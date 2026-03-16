@@ -14,6 +14,32 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
+function scoreQuestionMatch(referenceQuestion, candidateQuestion) {
+  const stopWords = new Set(["the", "a", "an", "on", "of", "for", "to", "in", "by", "at", "will"]);
+  const referenceTokens = normalizeText(referenceQuestion)
+    .split(" ")
+    .map((token) => token.replace(/[^a-z0-9$]/g, ""))
+    .filter((token) => token && !stopWords.has(token));
+  const candidate = normalizeText(candidateQuestion);
+
+  return referenceTokens.reduce((score, token) => (candidate.includes(token) ? score + 1 : score), 0);
+}
+
+function parseTargetFromQuestion(question) {
+  const match = String(question ?? "").match(
+    /(?:above|over|reach(?:es)?|hits?|at least)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const rawValue = Number(match[1].replace(/,/g, ""));
+  const scale = match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
+
+  return rawValue * scale;
+}
+
 function parseIsoDate(value) {
   if (!value) {
     return null;
@@ -133,22 +159,54 @@ function resolveQuotePrice(quotesBySymbol, symbol, fallback = 0) {
 }
 
 function findMatchingMarket(order, polymarketMarkets) {
+  const markets = polymarketMarkets ?? [];
   const orderUrl = String(order.polymarketUrl ?? "").trim();
-  if (orderUrl) {
-    const byUrl = (polymarketMarkets ?? []).find((market) => market.url === orderUrl);
-    if (byUrl) {
-      return byUrl;
-    }
-  }
-
   const normalizedQuestion = normalizeText(order.polymarketQuestion);
-  if (!normalizedQuestion) {
-    return null;
+  const targetUnderlyingValue = toNumber(order.marketContext?.targetUnderlyingValue, null);
+  const exactTargetMatch = (candidates) =>
+    candidates.find((market) => {
+      const marketTarget = parseTargetFromQuestion(market.question);
+      return marketTarget != null && targetUnderlyingValue != null && Math.abs(marketTarget - targetUnderlyingValue) < 0.5;
+    }) ?? null;
+  const questionRank = (candidates) =>
+    [...candidates].sort(
+      (left, right) =>
+        scoreQuestionMatch(order.polymarketQuestion, right.question) -
+        scoreQuestionMatch(order.polymarketQuestion, left.question)
+    )[0] ?? null;
+  const scopedMarkets = orderUrl ? markets.filter((market) => market.url === orderUrl) : markets;
+
+  if (!normalizedQuestion && targetUnderlyingValue == null) {
+    return scopedMarkets[0] ?? null;
   }
 
-  return (
-    (polymarketMarkets ?? []).find((market) => normalizeText(market.question) === normalizedQuestion) ?? null
-  );
+  const exactQuestionMatch = scopedMarkets.find(
+    (market) => normalizeText(market.question) === normalizedQuestion
+  ) ?? markets.find((market) => normalizeText(market.question) === normalizedQuestion);
+  if (exactQuestionMatch) {
+    return exactQuestionMatch;
+  }
+
+  const scopedTargetMatch = exactTargetMatch(scopedMarkets);
+  if (scopedTargetMatch) {
+    return scopedTargetMatch;
+  }
+
+  const globalTargetMatch = exactTargetMatch(markets);
+  if (globalTargetMatch) {
+    return globalTargetMatch;
+  }
+
+  if (normalizedQuestion) {
+    const scopedQuestionMatch = questionRank(scopedMarkets);
+    if (scopedQuestionMatch) {
+      return scopedQuestionMatch;
+    }
+
+    return questionRank(markets);
+  }
+
+  return scopedMarkets[0] ?? null;
 }
 
 function findMatchingOption(leg, optionMatches, proxySymbol) {

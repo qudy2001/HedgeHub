@@ -163,6 +163,18 @@ function renderLegDescriptor(leg) {
   return `${leg.action} ${String(leg.optionType ?? "call").toUpperCase()} ${leg.strike}${leg.optionType === "put" ? "P" : "C"} ${leg.expiry}`;
 }
 
+function getLegTitle(order, leg) {
+  if (leg.kind === "binary") {
+    return order.polymarketQuestion || leg.label;
+  }
+
+  return leg.label;
+}
+
+function getLegUrl(order, leg) {
+  return leg.kind === "binary" ? order.polymarketUrl || "" : "";
+}
+
 function ClosedOrderCard({ order, onDeletePaperOrder, busyOrderId, setBusyOrderId, setFeedbackByOrder, feedback }) {
   async function handleDelete() {
     if (!window.confirm(`Remove closed order "${order.combinationLabel}" from history?`)) {
@@ -253,8 +265,13 @@ function ClosedOrderCard({ order, onDeletePaperOrder, busyOrderId, setBusyOrderI
         {order.legs.map((leg) => (
           <div key={leg.id} className="paper-legs-table__row paper-legs-table__row--history">
             <span className="paper-legs-table__label">
-              <strong>{leg.label}</strong>
+              <strong>{getLegTitle(order, leg)}</strong>
               <small>{renderLegDescriptor(leg)}</small>
+              {getLegUrl(order, leg) ? (
+                <a href={getLegUrl(order, leg)} target="_blank" rel="noreferrer">
+                  {getLegUrl(order, leg)}
+                </a>
+              ) : null}
             </span>
             <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
             <span>{formatCurrency(leg.entryPrice, leg.kind === "binary" ? 4 : 2)}</span>
@@ -608,12 +625,18 @@ export default function PaperTradingWorkspace({
                               entryPrice: String(leg.entryPrice ?? ""),
                               quantity: String(leg.quantity ?? "")
                             };
+                            const legUrl = getLegUrl(order, leg);
 
                             return (
                               <div key={leg.id} className="paper-legs-table__row">
                                 <span className="paper-legs-table__label">
-                                  <strong>{leg.label}</strong>
+                                  <strong>{getLegTitle(order, leg)}</strong>
                                   <small>{renderLegDescriptor(leg)}</small>
+                                  {legUrl ? (
+                                    <a href={legUrl} target="_blank" rel="noreferrer">
+                                      {legUrl}
+                                    </a>
+                                  ) : null}
                                 </span>
                                 <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
                                 <span>

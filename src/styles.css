@@ -2580,6 +2580,17 @@ a {
   color: var(--muted);
 }
 
+.paper-legs-table__label a {
+  color: var(--accent);
+  font-size: 0.82rem;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.paper-legs-table__label a:hover {
+  text-decoration: underline;
+}
+
 .paper-order-footer {
   padding-top: 4px;
   color: var(--muted);
