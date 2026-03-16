@@ -1,0 +1,11 @@
+node_modules
+dist
+/data/
+/dashboards/
+/logs/
+*.log
+*.pid
+.env
+.env.app
+.env.local
+.DS_Store

@@ -1,0 +1,21 @@
+{
+  "id": "main",
+  "name": "Main",
+  "createdAt": "2026-03-14T22:20:04.875Z",
+  "updatedAt": "2026-03-14T22:20:04.875Z",
+  "layout": {
+    "lookback": "30D",
+    "sectionOrder": [
+      "global-markets",
+      "etf-heatmap",
+      "money-and-reserves",
+      "debt-and-assets"
+    ],
+    "sectionHeights": {
+      "global-markets": 1800,
+      "etf-heatmap": 1259,
+      "money-and-reserves": 1491,
+      "debt-and-assets": 1800
+    }
+  }
+}
