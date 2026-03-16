@@ -450,6 +450,10 @@ export function buildPaperPortfolio({
       targetUnderlyingValue,
       referenceYesPrice: order.marketReferenceYesPrice
     });
+    const currentNoPrice =
+      toNumber(liveMarket?.noPrice, null) != null
+        ? clamp(toNumber(liveMarket?.noPrice, 0) ?? 0, 0.001, 0.999)
+        : clamp(1 - currentYesPrice, 0.001, 0.999);
 
     const valuedLegs = order.legs.map((leg) => {
       const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
@@ -499,7 +503,7 @@ export function buildPaperPortfolio({
       }
 
       if (leg.kind === "binary") {
-        const markPrice = leg.outcome === "NO" ? 1 - currentYesPrice : currentYesPrice;
+        const markPrice = leg.outcome === "NO" ? currentNoPrice : currentYesPrice;
         const entryExposure = Math.abs((toNumber(leg.entryPrice, 0) ?? 0) * quantity);
         const currentExposure = Math.abs(markPrice * quantity);
         const profitLossValue =
@@ -517,7 +521,14 @@ export function buildPaperPortfolio({
           netMarkedValue: direction * markPrice * quantity,
           profitLossValue,
           profitLossPercent: entryExposure > 0 ? (profitLossValue / entryExposure) * 100 : null,
-          priceSource: liveMarket?.yesPrice != null ? "live-market" : "reference"
+          priceSource:
+            leg.outcome === "NO"
+              ? liveMarket?.noPrice != null
+                ? "live-market"
+                : "reference"
+              : liveMarket?.yesPrice != null
+                ? "live-market"
+                : "reference"
         };
       }
 

@@ -784,7 +784,11 @@ const polymarketStructures = [
 
 function buildPolymarketBlueprints(market, structure) {
   const yesPrice = clamp(market.yesPrice, 0.001, 0.999);
-  const noPrice = clamp(1 - yesPrice, 0.001, 0.999);
+  const noPrice = clamp(
+    Number.isFinite(Number(market.noPrice)) ? Number(market.noPrice) : 1 - yesPrice,
+    0.001,
+    0.999
+  );
 
   return structure.legs.map((leg) => ({
     id: `${market.id}-${structure.id}-${leg.outcome.toLowerCase()}-${leg.action.toLowerCase()}`,
