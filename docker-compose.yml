@@ -6,12 +6,11 @@ services:
     restart: unless-stopped
     ports:
       - "${HEDGEHUB_PORT:-8787}:8787"
-    env_file:
-      - .env.app
     environment:
       NODE_ENV: production
       PORT: 8787
       TZ: ${HEDGEHUB_TZ:-Europe/London}
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
     volumes:
       - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
       - ${HEDGEHUB_DASHBOARDS_DIR:-./dashboards}:/app/dashboards

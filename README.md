@@ -28,13 +28,13 @@ Docker / NAS deployment:
 
 ```bash
 cp .env.compose.example .env
-cp .env.app.example .env.app
 docker compose pull
 docker compose up -d
 ```
 
 - app: `http://localhost:8787` by default, or the host port set in `.env`
 - image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub:latest`
+- `POLYGON_API_KEY` is optional and can be added to `.env` if you want live Polygon option-chain data
 - persistent data: `data/` for SQLite and `dashboards/` for saved layouts
 - logs: use `docker compose logs -f hedgehub`
 - default dashboard layouts are seeded automatically on first boot if the dashboards volume starts empty
