@@ -218,7 +218,9 @@ export async function searchPolymarketMarkets(query, limit = 8) {
     });
 }
 
-export async function fetchPolymarketMarketsFromEventPage(eventUrl) {
+export async function fetchPolymarketMarketsFromEventPage(eventUrl, options = {}) {
+  const { tradableOnly = true } = options;
+
   if (!eventUrl?.startsWith("https://polymarket.com/event/")) {
     return [];
   }
@@ -231,7 +233,7 @@ export async function fetchPolymarketMarketsFromEventPage(eventUrl) {
   }
 
   const rawMarkets = safeJsonParse(rawMarketsJson, []);
-  return rawMarkets
+  const normalizedMarkets = rawMarkets
     .map((market) =>
       normalizeMarket(
         {
@@ -245,5 +247,9 @@ export async function fetchPolymarketMarketsFromEventPage(eventUrl) {
       )
     )
     .filter((market) => market.question && market.yesPrice != null)
-    .filter((market) => isTradablePolymarketMarket(market));
+    .filter((market) => market.active !== false && market.closed !== true);
+
+  return tradableOnly
+    ? normalizedMarkets.filter((market) => isTradablePolymarketMarket(market))
+    : normalizedMarkets;
 }

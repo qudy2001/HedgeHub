@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="HedgeHub favicon">
+  <defs>
+    <linearGradient id="orbGradient" x1="0%" y1="20%" x2="100%" y2="80%">
+      <stop offset="0%" stop-color="#3a3a3d" />
+      <stop offset="55%" stop-color="#242427" />
+      <stop offset="100%" stop-color="#111214" />
+    </linearGradient>
+    <linearGradient id="metalGradient" x1="10%" y1="0%" x2="90%" y2="100%">
+      <stop offset="0%" stop-color="#fbfbfd" />
+      <stop offset="18%" stop-color="#f3f3f6" />
+      <stop offset="42%" stop-color="#c6c8cd" />
+      <stop offset="62%" stop-color="#8c8f96" />
+      <stop offset="78%" stop-color="#e6e7ea" />
+      <stop offset="100%" stop-color="#b5b8bf" />
+    </linearGradient>
+    <linearGradient id="metalShadow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4b4d53" />
+      <stop offset="100%" stop-color="#222428" />
+    </linearGradient>
+    <linearGradient id="arrowGradient" x1="10%" y1="10%" x2="90%" y2="90%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="35%" stop-color="#f3f4f6" />
+      <stop offset="70%" stop-color="#a9adb5" />
+      <stop offset="100%" stop-color="#767a82" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#000000" flood-opacity="0.28" />
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <ellipse
+      cx="124"
+      cy="113"
+      rx="97"
+      ry="72"
+      transform="rotate(-16 124 113)"
+      fill="url(#orbGradient)"
+      stroke="#343438"
+      stroke-width="7"
+    />
+
+    <path
+      d="M82 69H126L118 78V111H139V92H174V78L166 69H210L202 78V176L192 186H166V143H118V176L108 186H82L90 176V78Z"
+      fill="url(#metalGradient)"
+      stroke="#404147"
+      stroke-width="6"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M82 69L90 78V176L82 186V69Z"
+      fill="url(#metalShadow)"
+      opacity="0.9"
+    />
+    <path
+      d="M118 78L126 69V111L118 119V78Z"
+      fill="url(#metalShadow)"
+      opacity="0.75"
+    />
+    <path
+      d="M166 69L174 78V92L166 100V69Z"
+      fill="url(#metalShadow)"
+      opacity="0.7"
+    />
+    <path
+      d="M82 69H126L118 78H90Z"
+      fill="#ffffff"
+      opacity="0.82"
+    />
+    <path
+      d="M166 69H210L202 78H174Z"
+      fill="#ffffff"
+      opacity="0.8"
+    />
+    <path
+      d="M118 111H174L166 119H118Z"
+      fill="#ffffff"
+      opacity="0.55"
+    />
+
+    <path
+      d="M49 158C82 190 148 194 205 156L194 145L229 149L214 182L203 171C148 206 86 202 44 173Z"
+      fill="url(#arrowGradient)"
+      stroke="#2f3034"
+      stroke-width="7"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M59 163C88 187 148 191 201 159"
+      fill="none"
+      stroke="#ffffff"
+      stroke-width="6"
+      stroke-linecap="round"
+      opacity="0.55"
+    />
+  </g>
+</svg>

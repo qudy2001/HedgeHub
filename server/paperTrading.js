@@ -188,7 +188,11 @@ function findMatchingMarket(order, polymarketMarkets) {
   const markets = polymarketMarkets ?? [];
   const orderUrl = String(order.polymarketUrl ?? "").trim();
   const normalizedQuestion = normalizeText(order.polymarketQuestion);
-  const targetUnderlyingValue = toNumber(order.marketContext?.targetUnderlyingValue, null);
+  const parsedQuestionTarget = parseTargetFromQuestion(order.polymarketQuestion);
+  const targetUnderlyingValue =
+    toNumber(order.marketContext?.targetUnderlyingValue, null) ??
+    toNumber(order.valuationContext?.targetUnderlyingValue, null) ??
+    parsedQuestionTarget;
   const exactTargetMatch = (candidates) =>
     candidates.find((market) => {
       const marketTarget = parseTargetFromQuestion(market.question);

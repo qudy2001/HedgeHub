@@ -117,6 +117,7 @@ app.get("/api/health", (_request, response) => {
 const liveState = {
   quotes: [],
   polymarketMarkets: [],
+  polymarketValuationMarkets: [],
   optionMatches: [],
   macroDashboard: null,
   economicCalendar: null,
@@ -140,11 +141,17 @@ function normalizeTimestamp(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
+function getPaperValuationPolymarketMarkets() {
+  return liveState.polymarketValuationMarkets?.length
+    ? liveState.polymarketValuationMarkets
+    : liveState.polymarketMarkets;
+}
+
 function buildPaperPortfolioResponse() {
   const portfolio = buildPaperPortfolio({
     orders: listPaperOrders(),
     quotes: liveState.quotes,
-    polymarketMarkets: liveState.polymarketMarkets,
+    polymarketMarkets: getPaperValuationPolymarketMarkets(),
     optionMatches: liveState.optionMatches
   });
 
@@ -423,6 +430,7 @@ async function refreshLiveState() {
   }
 
   let polymarketMarkets = liveState.polymarketMarkets;
+  let polymarketValuationMarkets = liveState.polymarketValuationMarkets;
   try {
     const queries = deduplicateBy(
       [
@@ -444,18 +452,29 @@ async function refreshLiveState() {
     ).slice(0, 30);
 
     const exactEventUrls = deduplicateBy(
-      fallbackPolymarketMarkets
-        .map((market) => market.url)
+      [
+        ...fallbackPolymarketMarkets.map((market) => market.url),
+        ...listPaperOrders().map((order) => order.position?.polymarketUrl ?? "")
+      ]
         .filter((url) => url?.startsWith("https://polymarket.com/event/")),
       (url) => url
     );
     const exactEventResults = await Promise.allSettled(
-      exactEventUrls.map((url) => fetchPolymarketMarketsFromEventPage(url))
+      exactEventUrls.map((url) => fetchPolymarketMarketsFromEventPage(url, { tradableOnly: false }))
+    );
+    const exactEventMarkets = exactEventResults.flatMap((result) =>
+      result.status === "fulfilled" ? result.value : []
     );
 
+    polymarketValuationMarkets = deduplicateBy(
+      [...exactEventMarkets, ...polymarketMarkets].filter(
+        (market) => market.question && (market.yesPrice != null || market.noPrice != null)
+      ),
+      (market) => market.id
+    );
     polymarketMarkets = deduplicateBy(
       [
-        ...exactEventResults.flatMap((result) => (result.status === "fulfilled" ? result.value : [])),
+        ...exactEventMarkets,
         ...polymarketMarkets
       ].filter((market) => isTradablePolymarketMarket(market)),
       (market) => market.id
@@ -463,9 +482,17 @@ async function refreshLiveState() {
   } catch (error) {
     warnings.push(`Polymarket unavailable: ${error.message}`);
     polymarketMarkets = liveState.polymarketMarkets;
+    polymarketValuationMarkets = liveState.polymarketValuationMarkets;
   }
 
   polymarketMarkets = polymarketMarkets.filter((market) => isTradablePolymarketMarket(market));
+  polymarketValuationMarkets = deduplicateBy(
+    [
+      ...(polymarketValuationMarkets ?? []),
+      ...polymarketMarkets
+    ].filter((market) => market.question && (market.yesPrice != null || market.noPrice != null)),
+    (market) => market.id
+  );
 
   let optionMatches = liveState.optionMatches;
   try {
@@ -548,6 +575,7 @@ async function refreshLiveState() {
 
   liveState.quotes = quotes;
   liveState.polymarketMarkets = polymarketMarkets;
+  liveState.polymarketValuationMarkets = polymarketValuationMarkets;
   liveState.optionMatches = optionMatches;
   liveState.lastUpdated = new Date().toISOString();
   liveState.warnings = warnings;
@@ -556,7 +584,7 @@ async function refreshLiveState() {
     const paperPortfolio = buildPaperPortfolio({
       orders: listPaperOrders(),
       quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
       optionMatches: liveState.optionMatches
     });
     const snapshots = paperPortfolio.openOrders
@@ -753,7 +781,7 @@ app.post("/api/paper-orders", async (request, response) => {
     const valuedPaperPortfolio = buildPaperPortfolio({
       orders: [createdOrder],
       quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
       optionMatches: liveState.optionMatches
     });
     const valuedOrder = valuedPaperPortfolio.openOrders[0] ?? valuedPaperPortfolio.orders[0] ?? null;
@@ -801,7 +829,7 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
     const valuedPaperPortfolio = buildPaperPortfolio({
       orders: [updatedOrder],
       quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
       optionMatches: liveState.optionMatches
     });
     const valuedOrder =
@@ -864,7 +892,7 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
         }
       ],
       quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
       optionMatches: liveState.optionMatches
     });
     const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0];
