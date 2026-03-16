@@ -1,4 +1,6 @@
 const GAMMA_BASE_URL = "https://gamma-api.polymarket.com/markets";
+const MIN_TRADABLE_POLY_PRICE = 0.03;
+const MAX_TRADABLE_POLY_PRICE = 0.97;
 
 async function fetchWithTimeout(url) {
   const controller = new AbortController();
@@ -100,7 +102,12 @@ export function isTradablePolymarketMarket(market, now = new Date()) {
     return false;
   }
 
-  if (yesPrice <= 0.001 || yesPrice >= 0.999 || noPrice <= 0.001 || noPrice >= 0.999) {
+  if (
+    yesPrice < MIN_TRADABLE_POLY_PRICE ||
+    yesPrice > MAX_TRADABLE_POLY_PRICE ||
+    noPrice < MIN_TRADABLE_POLY_PRICE ||
+    noPrice > MAX_TRADABLE_POLY_PRICE
+  ) {
     return false;
   }
 

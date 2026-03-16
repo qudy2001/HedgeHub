@@ -41,6 +41,26 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS paper_order_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    current_holding_value REAL NOT NULL,
+    net_marked_value REAL NOT NULL,
+    profit_loss_value REAL NOT NULL,
+    profit_loss_percent REAL,
+    captured_at TEXT NOT NULL,
+    UNIQUE(order_id, captured_at)
+  );
+
+  CREATE TABLE IF NOT EXISTS paper_calculator_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL,
+    snapshot_name TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
@@ -151,6 +171,54 @@ const updatePaperOrderStatement = db.prepare(`
 const deletePaperOrderStatement = db.prepare(`
   DELETE FROM paper_orders
   WHERE id = ?
+`);
+
+const insertPaperOrderSnapshot = db.prepare(`
+  INSERT INTO paper_order_snapshots (
+    order_id,
+    status,
+    current_holding_value,
+    net_marked_value,
+    profit_loss_value,
+    profit_loss_percent,
+    captured_at
+  ) VALUES (
+    @orderId,
+    @status,
+    @currentHoldingValue,
+    @netMarkedValue,
+    @profitLossValue,
+    @profitLossPercent,
+    @capturedAt
+  )
+  ON CONFLICT(order_id, captured_at) DO UPDATE SET
+    status = excluded.status,
+    current_holding_value = excluded.current_holding_value,
+    net_marked_value = excluded.net_marked_value,
+    profit_loss_value = excluded.profit_loss_value,
+    profit_loss_percent = excluded.profit_loss_percent
+`);
+
+const deletePaperOrderSnapshotsStatement = db.prepare(`
+  DELETE FROM paper_order_snapshots
+  WHERE order_id = ?
+`);
+
+const insertPaperCalculatorSnapshot = db.prepare(`
+  INSERT INTO paper_calculator_snapshots (
+    order_id,
+    snapshot_name,
+    snapshot_json
+  ) VALUES (
+    @orderId,
+    @snapshotName,
+    @snapshotJson
+  )
+`);
+
+const deletePaperCalculatorSnapshotsStatement = db.prepare(`
+  DELETE FROM paper_calculator_snapshots
+  WHERE order_id = ?
 `);
 
 const insertMacroDashboardSnapshot = db.prepare(`
@@ -314,6 +382,138 @@ export function updatePaperOrder(id, order) {
 
 export function deletePaperOrder(id) {
   return deletePaperOrderStatement.run(id).changes > 0;
+}
+
+export function recordPaperOrderSnapshots(snapshots) {
+  const insertMany = db.transaction((items) => {
+    for (const snapshot of items) {
+      insertPaperOrderSnapshot.run(snapshot);
+    }
+  });
+
+  insertMany(snapshots ?? []);
+}
+
+export function listPaperOrderSnapshots(orderIds = null) {
+  const rows =
+    Array.isArray(orderIds) && orderIds.length
+      ? db
+          .prepare(
+            `
+              SELECT
+                order_id AS orderId,
+                status,
+                current_holding_value AS currentHoldingValue,
+                net_marked_value AS netMarkedValue,
+                profit_loss_value AS profitLossValue,
+                profit_loss_percent AS profitLossPercent,
+                captured_at AS capturedAt
+              FROM paper_order_snapshots
+              WHERE order_id IN (${orderIds.map(() => "?").join(", ")})
+              ORDER BY order_id ASC, captured_at ASC
+            `
+          )
+          .all(...orderIds)
+      : db
+          .prepare(
+            `
+              SELECT
+                order_id AS orderId,
+                status,
+                current_holding_value AS currentHoldingValue,
+                net_marked_value AS netMarkedValue,
+                profit_loss_value AS profitLossValue,
+                profit_loss_percent AS profitLossPercent,
+                captured_at AS capturedAt
+              FROM paper_order_snapshots
+              ORDER BY order_id ASC, captured_at ASC
+            `
+          )
+          .all();
+
+  return rows.map((row) => ({
+    ...row,
+    orderId: Number(row.orderId)
+  }));
+}
+
+export function deletePaperOrderSnapshots(orderId) {
+  return deletePaperOrderSnapshotsStatement.run(orderId).changes >= 0;
+}
+
+export function createPaperCalculatorSnapshot(orderId, snapshotName, payload) {
+  const result = insertPaperCalculatorSnapshot.run({
+    orderId,
+    snapshotName,
+    snapshotJson: JSON.stringify(payload)
+  });
+
+  const row = db
+    .prepare(
+      `
+        SELECT
+          id,
+          order_id AS orderId,
+          snapshot_name AS snapshotName,
+          snapshot_json AS snapshotJson,
+          created_at AS createdAt
+        FROM paper_calculator_snapshots
+        WHERE id = ?
+      `
+    )
+    .get(result.lastInsertRowid);
+
+  return row
+    ? {
+        ...row,
+        orderId: Number(row.orderId),
+        payload: JSON.parse(row.snapshotJson)
+      }
+    : null;
+}
+
+export function listPaperCalculatorSnapshots(orderIds = null) {
+  const rows =
+    Array.isArray(orderIds) && orderIds.length
+      ? db
+          .prepare(
+            `
+              SELECT
+                id,
+                order_id AS orderId,
+                snapshot_name AS snapshotName,
+                snapshot_json AS snapshotJson,
+                created_at AS createdAt
+              FROM paper_calculator_snapshots
+              WHERE order_id IN (${orderIds.map(() => "?").join(", ")})
+              ORDER BY created_at DESC, id DESC
+            `
+          )
+          .all(...orderIds)
+      : db
+          .prepare(
+            `
+              SELECT
+                id,
+                order_id AS orderId,
+                snapshot_name AS snapshotName,
+                snapshot_json AS snapshotJson,
+                created_at AS createdAt
+              FROM paper_calculator_snapshots
+              ORDER BY created_at DESC, id DESC
+            `
+          )
+          .all();
+
+  return rows.map((row) => ({
+    ...row,
+    orderId: Number(row.orderId),
+    payload: JSON.parse(row.snapshotJson)
+  }));
+}
+
+export function deletePaperCalculatorSnapshots(orderId) {
+  return deletePaperCalculatorSnapshotsStatement.run(orderId).changes >= 0;
 }
 
 export function recordMarketSnapshots(snapshots) {

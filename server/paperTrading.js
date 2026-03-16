@@ -78,8 +78,34 @@ function normalizeTimestamp(value) {
     return "";
   }
 
-  const date = new Date(value);
+  const normalizedValue =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+      ? `${value.replace(" ", "T")}Z`
+      : value;
+  const date = new Date(normalizedValue);
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function addHours(timestamp, hours) {
+  const normalized = normalizeTimestamp(timestamp);
+  if (!normalized) {
+    return "";
+  }
+
+  const date = new Date(normalized);
+  date.setUTCHours(date.getUTCHours() + hours, 0, 0, 0);
+  return date.toISOString();
+}
+
+function floorToHourTimestamp(timestamp) {
+  const normalized = normalizeTimestamp(timestamp);
+  if (!normalized) {
+    return "";
+  }
+
+  const date = new Date(normalized);
+  date.setUTCMinutes(0, 0, 0);
+  return date.toISOString();
 }
 
 function normalCdf(x) {
@@ -474,6 +500,164 @@ export function closePaperOrderPayload(order, valuedOrder, closedAt = new Date()
     },
     order
   );
+}
+
+export function buildPaperOrderSnapshot(order, capturedAt = new Date().toISOString()) {
+  const timestamp = normalizeTimestamp(capturedAt) || new Date().toISOString();
+
+  return {
+    orderId: Number(order.id),
+    status: String(order.status ?? "open"),
+    currentHoldingValue: Math.max(toNumber(order.currentHoldingValue, 0) ?? 0, 0),
+    netMarkedValue: toNumber(order.netMarkedValue, 0) ?? 0,
+    profitLossValue: toNumber(order.profitLossValue, 0) ?? 0,
+    profitLossPercent: toNumber(order.profitLossPercent, null),
+    capturedAt: timestamp
+  };
+}
+
+function buildFallbackHistoryPoints(order, startAt, endAt) {
+  if (!startAt) {
+    return [];
+  }
+
+  const currentPoint = {
+    capturedAt: endAt || startAt,
+    profitLossValue: toNumber(order.profitLossValue, 0) ?? 0,
+    currentHoldingValue: Math.max(toNumber(order.currentHoldingValue, 0) ?? 0, 0),
+    netMarkedValue: toNumber(order.netMarkedValue, 0) ?? 0,
+    profitLossPercent: toNumber(order.profitLossPercent, null)
+  };
+
+  if (!endAt || endAt === startAt) {
+    return [currentPoint];
+  }
+
+  return [
+    {
+      ...currentPoint,
+      capturedAt: startAt,
+      profitLossValue: 0,
+      netMarkedValue: 0,
+      profitLossPercent: 0
+    },
+    currentPoint
+  ];
+}
+
+function buildHourlyCandles(points) {
+  const buckets = new Map();
+
+  for (const point of points) {
+    const bucketStart = floorToHourTimestamp(point.capturedAt);
+    if (!bucketStart) {
+      continue;
+    }
+
+    const currentProfitLoss = toNumber(point.profitLossValue, 0) ?? 0;
+    const existingBucket = buckets.get(bucketStart);
+
+    if (!existingBucket) {
+      buckets.set(bucketStart, {
+        bucketStart,
+        bucketEnd: addHours(bucketStart, 1),
+        open: currentProfitLoss,
+        high: currentProfitLoss,
+        low: currentProfitLoss,
+        close: currentProfitLoss,
+        firstCapturedAt: point.capturedAt,
+        lastCapturedAt: point.capturedAt,
+        sampleCount: 1
+      });
+      continue;
+    }
+
+    existingBucket.high = Math.max(existingBucket.high, currentProfitLoss);
+    existingBucket.low = Math.min(existingBucket.low, currentProfitLoss);
+    existingBucket.close = currentProfitLoss;
+    existingBucket.lastCapturedAt = point.capturedAt;
+    existingBucket.sampleCount += 1;
+  }
+
+  return [...buckets.values()].sort((left, right) => left.bucketStart.localeCompare(right.bucketStart));
+}
+
+function buildPaperOrderHistory(order, snapshots, asOf = new Date().toISOString()) {
+  const startAt = normalizeTimestamp(order.createdAt);
+  const endAt = order.isClosed
+    ? normalizeTimestamp(order.closedAt) || startAt
+    : normalizeTimestamp(asOf) || startAt;
+  const normalizedSnapshots = (snapshots ?? [])
+    .map((snapshot) => ({
+      capturedAt: normalizeTimestamp(snapshot.capturedAt),
+      profitLossValue: toNumber(snapshot.profitLossValue, 0) ?? 0,
+      currentHoldingValue: Math.max(toNumber(snapshot.currentHoldingValue, 0) ?? 0, 0),
+      netMarkedValue: toNumber(snapshot.netMarkedValue, 0) ?? 0,
+      profitLossPercent: toNumber(snapshot.profitLossPercent, null)
+    }))
+    .filter((snapshot) => snapshot.capturedAt)
+    .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt));
+  const points = normalizedSnapshots.length
+    ? normalizedSnapshots
+    : buildFallbackHistoryPoints(order, startAt, endAt);
+
+  if (startAt && points.length && points[0].capturedAt > startAt) {
+    points.unshift({
+      ...points[0],
+      capturedAt: startAt,
+      profitLossValue: 0,
+      netMarkedValue: 0,
+      profitLossPercent: 0
+    });
+  }
+
+  if (endAt && points.length && points[points.length - 1].capturedAt < endAt) {
+    points.push({
+      capturedAt: endAt,
+      profitLossValue: toNumber(order.profitLossValue, 0) ?? 0,
+      currentHoldingValue: Math.max(toNumber(order.currentHoldingValue, 0) ?? 0, 0),
+      netMarkedValue: toNumber(order.netMarkedValue, 0) ?? 0,
+      profitLossPercent: toNumber(order.profitLossPercent, null)
+    });
+  }
+
+  return {
+    interval: "1h",
+    live: !order.isClosed,
+    startAt,
+    endAt: points[points.length - 1]?.capturedAt ?? endAt ?? startAt,
+    lastCapturedAt: points[points.length - 1]?.capturedAt ?? "",
+    sampleCount: points.length,
+    candles: buildHourlyCandles(points)
+  };
+}
+
+export function attachPaperOrderHistory(paperPortfolio, historySnapshots, asOf = new Date().toISOString()) {
+  const snapshotsByOrderId = new Map();
+
+  for (const snapshot of historySnapshots ?? []) {
+    const orderId = Number(snapshot.orderId);
+    if (!snapshotsByOrderId.has(orderId)) {
+      snapshotsByOrderId.set(orderId, []);
+    }
+    snapshotsByOrderId.get(orderId).push(snapshot);
+  }
+
+  const openOrders = (paperPortfolio?.openOrders ?? []).map((order) => ({
+    ...order,
+    history: buildPaperOrderHistory(order, snapshotsByOrderId.get(Number(order.id)) ?? [], asOf)
+  }));
+  const closedOrders = (paperPortfolio?.closedOrders ?? []).map((order) => ({
+    ...order,
+    history: buildPaperOrderHistory(order, snapshotsByOrderId.get(Number(order.id)) ?? [], asOf)
+  }));
+
+  return {
+    ...paperPortfolio,
+    orders: openOrders,
+    openOrders,
+    closedOrders
+  };
 }
 
 export function buildPaperPortfolio({

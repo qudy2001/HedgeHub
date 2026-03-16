@@ -184,6 +184,13 @@ export default function App() {
     });
   }, [mutatePaperOrders]);
 
+  const handleSaveCalculatorSnapshot = useCallback((orderId, snapshotPayload) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/calculator-snapshots`, {
+      method: "POST",
+      body: JSON.stringify(snapshotPayload)
+    });
+  }, [mutatePaperOrders]);
+
   useEffect(() => {
     let isActive = true;
 
@@ -272,9 +279,11 @@ export default function App() {
           {showPaperTrading ? (
             <PaperTradingWorkspace
               paperPortfolio={paperPortfolio}
+              lastUpdated={strategyPayload?.lastUpdated ?? null}
               onUpdatePaperOrder={handleUpdatePaperOrder}
               onClosePaperOrder={handleClosePaperOrder}
               onDeletePaperOrder={handleDeletePaperOrder}
+              onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
             />
           ) : showStrategyFinder ? (
             <StrategyFinderWorkspace

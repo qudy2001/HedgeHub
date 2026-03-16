@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import PaperTradeHistoryChart from "./PaperTradeHistoryChart.jsx";
+import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 
 function formatCurrency(value, digits = 2) {
   if (value == null || Number.isNaN(Number(value))) {
@@ -175,7 +177,16 @@ function getLegUrl(order, leg) {
   return leg.kind === "binary" ? order.polymarketUrl || "" : "";
 }
 
-function ClosedOrderCard({ order, onDeletePaperOrder, busyOrderId, setBusyOrderId, setFeedbackByOrder, feedback }) {
+function ClosedOrderCard({
+  order,
+  lastUpdated,
+  onDeletePaperOrder,
+  onSaveCalculatorSnapshot,
+  busyOrderId,
+  setBusyOrderId,
+  setFeedbackByOrder,
+  feedback
+}) {
   async function handleDelete() {
     if (!window.confirm(`Remove closed order "${order.combinationLabel}" from history?`)) {
       return;
@@ -253,6 +264,13 @@ function ClosedOrderCard({ order, onDeletePaperOrder, busyOrderId, setBusyOrderI
         </div>
       </div>
 
+      <PaperTradeHistoryChart history={order.history} />
+      <PaperTradeScenarioPanel
+        order={order}
+        lastUpdated={lastUpdated}
+        onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+      />
+
       <div className="paper-legs-table paper-legs-table--history">
         <div className="paper-legs-table__head">
           <span>Sub item</span>
@@ -303,9 +321,11 @@ function ClosedOrderCard({ order, onDeletePaperOrder, busyOrderId, setBusyOrderI
 
 export default function PaperTradingWorkspace({
   paperPortfolio,
+  lastUpdated,
   onUpdatePaperOrder,
   onClosePaperOrder,
-  onDeletePaperOrder
+  onDeletePaperOrder,
+  onSaveCalculatorSnapshot
 }) {
   const openOrders = paperPortfolio?.openOrders ?? paperPortfolio?.orders ?? [];
   const closedOrders = paperPortfolio?.closedOrders ?? [];
@@ -554,6 +574,13 @@ export default function PaperTradingWorkspace({
                           </div>
                         </div>
 
+                        <PaperTradeHistoryChart history={order.history} />
+                        <PaperTradeScenarioPanel
+                          order={order}
+                          lastUpdated={lastUpdated}
+                          onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+                        />
+
                         <div className="paper-order-editbar">
                           <label>
                             <span>Purchase date</span>
@@ -734,7 +761,9 @@ export default function PaperTradingWorkspace({
                     <ClosedOrderCard
                       key={order.id}
                       order={order}
+                      lastUpdated={lastUpdated}
                       onDeletePaperOrder={onDeletePaperOrder}
+                      onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
                       busyOrderId={busyOrderId}
                       setBusyOrderId={setBusyOrderId}
                       setFeedbackByOrder={setFeedbackByOrder}

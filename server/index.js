@@ -12,14 +12,20 @@ import {
 } from "./marketCatalog.js";
 import { buildMacroDashboardPayload, buildMacroHeroStats } from "./macroDashboard.js";
 import {
+  createPaperCalculatorSnapshot,
   createPaperOrder,
+  deletePaperCalculatorSnapshots,
+  deletePaperOrderSnapshots,
   deletePaperOrder,
   getLatestMacroDashboardSnapshot,
+  listPaperCalculatorSnapshots,
   getLatestSnapshots,
+  listPaperOrderSnapshots,
   listPaperOrders,
   getRecentRuns,
   getStrategies,
   recordMarketSnapshots,
+  recordPaperOrderSnapshots,
   saveMacroDashboardSnapshot,
   saveStrategyRun,
   updatePaperOrder
@@ -46,6 +52,8 @@ import {
 } from "./strategyEngine.js";
 import {
   applyPaperOrderPatch,
+  attachPaperOrderHistory,
+  buildPaperOrderSnapshot,
   buildPaperPortfolio,
   closePaperOrderPayload,
   sanitizePaperOrderPayload
@@ -118,6 +126,59 @@ const liveState = {
   warnings: [],
   calendarWarnings: []
 };
+
+function normalizeTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+
+  const normalizedValue =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+      ? `${value.replace(" ", "T")}Z`
+      : value;
+  const date = new Date(normalizedValue);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function buildPaperPortfolioResponse() {
+  const portfolio = buildPaperPortfolio({
+    orders: listPaperOrders(),
+    quotes: liveState.quotes,
+    polymarketMarkets: liveState.polymarketMarkets,
+    optionMatches: liveState.optionMatches
+  });
+
+  const withHistory = attachPaperOrderHistory(
+    portfolio,
+    listPaperOrderSnapshots(),
+    liveState.lastUpdated ?? new Date().toISOString()
+  );
+  const calculatorSnapshotsByOrderId = new Map();
+
+  for (const snapshot of listPaperCalculatorSnapshots()) {
+    const orderId = Number(snapshot.orderId);
+    if (!calculatorSnapshotsByOrderId.has(orderId)) {
+      calculatorSnapshotsByOrderId.set(orderId, []);
+    }
+    calculatorSnapshotsByOrderId.get(orderId).push(snapshot);
+  }
+
+  const openOrders = (withHistory.openOrders ?? []).map((order) => ({
+    ...order,
+    calculatorSnapshots: calculatorSnapshotsByOrderId.get(Number(order.id)) ?? []
+  }));
+  const closedOrders = (withHistory.closedOrders ?? []).map((order) => ({
+    ...order,
+    calculatorSnapshots: calculatorSnapshotsByOrderId.get(Number(order.id)) ?? []
+  }));
+
+  return {
+    ...withHistory,
+    orders: openOrders,
+    openOrders,
+    closedOrders
+  };
+}
 
 function isFreshWithin(refreshTimestamp, maxAgeMs) {
   if (!refreshTimestamp) {
@@ -490,6 +551,25 @@ async function refreshLiveState() {
   liveState.optionMatches = optionMatches;
   liveState.lastUpdated = new Date().toISOString();
   liveState.warnings = warnings;
+
+  try {
+    const paperPortfolio = buildPaperPortfolio({
+      orders: listPaperOrders(),
+      quotes: liveState.quotes,
+      polymarketMarkets: liveState.polymarketMarkets,
+      optionMatches: liveState.optionMatches
+    });
+    const snapshots = paperPortfolio.openOrders
+      .filter((order) => Number.isInteger(Number(order.id)) && Number(order.id) > 0)
+      .map((order) => buildPaperOrderSnapshot(order, liveState.lastUpdated));
+
+    if (snapshots.length) {
+      recordPaperOrderSnapshots(snapshots);
+    }
+  } catch (error) {
+    warnings.push(`Paper-trade history unavailable: ${error.message}`);
+    liveState.warnings = warnings;
+  }
 }
 
 async function buildStrategiesResponse() {
@@ -498,12 +578,7 @@ async function buildStrategiesResponse() {
     polymarketMarkets: liveState.polymarketMarkets,
     optionMatches: liveState.optionMatches
   });
-  const paperPortfolio = buildPaperPortfolio({
-    orders: listPaperOrders(),
-    quotes: liveState.quotes,
-    polymarketMarkets: liveState.polymarketMarkets,
-    optionMatches: liveState.optionMatches
-  });
+  const paperPortfolio = buildPaperPortfolioResponse();
 
   return {
     lastUpdated: liveState.lastUpdated,
@@ -675,12 +750,21 @@ app.post("/api/paper-orders", async (request, response) => {
   try {
     const order = sanitizePaperOrderPayload(request.body);
     const createdOrder = createPaperOrder(order);
-    const paperPortfolio = buildPaperPortfolio({
-      orders: listPaperOrders(),
+    const valuedPaperPortfolio = buildPaperPortfolio({
+      orders: [createdOrder],
       quotes: liveState.quotes,
       polymarketMarkets: liveState.polymarketMarkets,
       optionMatches: liveState.optionMatches
     });
+    const valuedOrder = valuedPaperPortfolio.openOrders[0] ?? valuedPaperPortfolio.orders[0] ?? null;
+
+    if (valuedOrder) {
+      recordPaperOrderSnapshots([
+        buildPaperOrderSnapshot(valuedOrder, normalizeTimestamp(createdOrder.createdAt) || new Date().toISOString())
+      ]);
+    }
+
+    const paperPortfolio = buildPaperPortfolioResponse();
 
     response.status(201).json({
       order: createdOrder,
@@ -714,12 +798,25 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
   try {
     const nextOrder = applyPaperOrderPatch(existingOrder.position, request.body);
     const updatedOrder = updatePaperOrder(orderId, nextOrder);
-    const paperPortfolio = buildPaperPortfolio({
-      orders: listPaperOrders(),
+    const valuedPaperPortfolio = buildPaperPortfolio({
+      orders: [updatedOrder],
       quotes: liveState.quotes,
       polymarketMarkets: liveState.polymarketMarkets,
       optionMatches: liveState.optionMatches
     });
+    const valuedOrder =
+      valuedPaperPortfolio.openOrders[0] ??
+      valuedPaperPortfolio.orders[0] ??
+      valuedPaperPortfolio.closedOrders[0] ??
+      null;
+
+    if (valuedOrder && !valuedOrder.isClosed) {
+      recordPaperOrderSnapshots([
+        buildPaperOrderSnapshot(valuedOrder, normalizeTimestamp(updatedOrder.updatedAt) || new Date().toISOString())
+      ]);
+    }
+
+    const paperPortfolio = buildPaperPortfolioResponse();
 
     response.json({
       order: updatedOrder,
@@ -778,15 +875,66 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
 
     const closedOrder = closePaperOrderPayload(patchedOrder, valuedOrder);
     const updatedOrder = updatePaperOrder(orderId, closedOrder);
-    const paperPortfolio = buildPaperPortfolio({
-      orders: listPaperOrders(),
-      quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
-      optionMatches: liveState.optionMatches
-    });
+    recordPaperOrderSnapshots([
+      buildPaperOrderSnapshot(
+        {
+          ...valuedOrder,
+          status: "closed"
+        },
+        closedOrder.closedAt
+      )
+    ]);
+    const paperPortfolio = buildPaperPortfolioResponse();
 
     response.json({
       order: updatedOrder,
+      paperPortfolio
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error.message
+    });
+  }
+});
+
+app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response) => {
+  const orderId = Number(request.params.id);
+
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    response.status(400).json({
+      error: "paper order id must be a positive integer"
+    });
+    return;
+  }
+
+  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
+  if (!existingOrder) {
+    response.status(404).json({
+      error: "paper order not found"
+    });
+    return;
+  }
+
+  const payload = request.body?.payload;
+
+  if (!payload || typeof payload !== "object") {
+    response.status(400).json({
+      error: "snapshot payload is required"
+    });
+    return;
+  }
+
+  try {
+    const snapshot = createPaperCalculatorSnapshot(
+      orderId,
+      String(request.body?.snapshotName ?? existingOrder.position?.combinationLabel ?? "Calculator snapshot").trim() ||
+        "Calculator snapshot",
+      payload
+    );
+    const paperPortfolio = buildPaperPortfolioResponse();
+
+    response.status(201).json({
+      snapshot,
       paperPortfolio
     });
   } catch (error) {
@@ -815,12 +963,9 @@ app.delete("/api/paper-orders/:id", async (request, response) => {
     return;
   }
 
-  const paperPortfolio = buildPaperPortfolio({
-    orders: listPaperOrders(),
-    quotes: liveState.quotes,
-    polymarketMarkets: liveState.polymarketMarkets,
-    optionMatches: liveState.optionMatches
-  });
+  deletePaperOrderSnapshots(orderId);
+  deletePaperCalculatorSnapshots(orderId);
+  const paperPortfolio = buildPaperPortfolioResponse();
 
   response.json({
     deleted: true,
