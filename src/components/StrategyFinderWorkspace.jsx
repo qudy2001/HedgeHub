@@ -619,6 +619,7 @@ const columns = [
   { key: "days", label: "Days" },
   { key: "assetLabel", label: "Asset" },
   { key: "strategyType", label: "Strategy type" },
+  { key: "marketBias", label: "Tag" },
   { key: "formula", label: "Formula" },
   { key: "polymarketPrice", label: "Poly price" },
   { key: "maxProfit", label: "Max profit" },
@@ -631,6 +632,8 @@ const columns = [
   { key: "bidAskSpread", label: "Bid-ask spread" },
   { key: "expPayoff", label: "Exp payoff" }
 ];
+
+const BIAS_FILTER_ORDER = ["Bull", "Bear", "Range-bound", "Breakout", "Neutral"];
 
 export default function StrategyFinderWorkspace({
   strategyPayload,
@@ -645,8 +648,12 @@ export default function StrategyFinderWorkspace({
   const rows = finder?.rows ?? [];
   const availableStrategyTypes = finder?.filters?.strategyTypes ?? [];
   const availableAssets = [...new Set(rows.map((row) => row.assetLabel))];
+  const availableBiasTags = BIAS_FILTER_ORDER.filter((tag) =>
+    rows.some((row) => (row.marketBias ?? "Neutral") === tag)
+  );
   const availableStrategyTypesKey = availableStrategyTypes.join("|");
   const availableAssetsKey = availableAssets.join("|");
+  const availableBiasTagsKey = availableBiasTags.join("|");
   const detailRef = useRef(null);
   const filterMenuRefs = useRef({});
   const hasHydratedFiltersRef = useRef(false);
@@ -662,6 +669,7 @@ export default function StrategyFinderWorkspace({
   const [dateTo, setDateTo] = useState(finder?.filters?.dateRange?.to ?? "");
   const [activeAssets, setActiveAssets] = useState(availableAssets);
   const [activeStrategyTypes, setActiveStrategyTypes] = useState(availableStrategyTypes);
+  const [activeBiasTags, setActiveBiasTags] = useState(availableBiasTags);
   const [maxProfitMin, setMaxProfitMin] = useState("");
   const [maxProfitMax, setMaxProfitMax] = useState("");
   const [maxLossMin, setMaxLossMin] = useState(DEFAULT_MAX_LOSS_FLOOR);
@@ -687,6 +695,7 @@ export default function StrategyFinderWorkspace({
       setDateTo(finder.filters.dateRange.to ?? "");
       setActiveAssets(availableAssets);
       setActiveStrategyTypes(availableStrategyTypes);
+      setActiveBiasTags(availableBiasTags);
       setControls(finder.calculatorDefaults ?? null);
       hasHydratedFiltersRef.current = true;
       return;
@@ -711,13 +720,25 @@ export default function StrategyFinderWorkspace({
 
       return next.length ? next : availableStrategyTypes;
     });
-  }, [availableAssetsKey, availableStrategyTypesKey, finder]);
+    setActiveBiasTags((current) => {
+      const next = current.filter((marketBias) => availableBiasTags.includes(marketBias));
+      if (
+        next.length === current.length &&
+        next.every((marketBias, index) => marketBias === current[index])
+      ) {
+        return current;
+      }
+
+      return next.length ? next : availableBiasTags;
+    });
+  }, [availableAssetsKey, availableStrategyTypesKey, availableBiasTagsKey, finder]);
 
   const filteredRows = rows.filter((row) => {
     const withinFrom = !dateFrom || row.expiration >= dateFrom;
     const withinTo = !dateTo || row.expiration <= dateTo;
     const assetMatch = activeAssets.includes(row.assetLabel);
     const strategyMatch = activeStrategyTypes.includes(row.strategyType);
+    const biasMatch = activeBiasTags.includes(row.marketBias ?? "Neutral");
     const numericMaxProfit = Number(row.maxProfit);
     const numericMaxLoss = Number(row.maxLoss);
     const maxProfitMatch =
@@ -738,7 +759,15 @@ export default function StrategyFinderWorkspace({
           Number.isFinite(numericMaxLoss) &&
           numericMaxLoss <= maxLossThreshold));
 
-    return withinFrom && withinTo && assetMatch && strategyMatch && maxProfitMatch && maxLossMatch;
+    return (
+      withinFrom &&
+      withinTo &&
+      assetMatch &&
+      strategyMatch &&
+      biasMatch &&
+      maxProfitMatch &&
+      maxLossMatch
+    );
   });
   const sortedRows = [...filteredRows].sort((left, right) =>
     compareValues(left[sortKey], right[sortKey], sortDirection)
@@ -877,6 +906,16 @@ export default function StrategyFinderWorkspace({
     });
   }
 
+  function toggleBiasTag(marketBias) {
+    setActiveBiasTags((current) => {
+      if (current.includes(marketBias)) {
+        return current.length === 1 ? current : current.filter((item) => item !== marketBias);
+      }
+
+      return [...current, marketBias];
+    });
+  }
+
   function handleRowSelect(rowId) {
     setSelectedRowId(rowId);
     setDetailOpen(true);
@@ -910,6 +949,7 @@ export default function StrategyFinderWorkspace({
     setDateTo(finder?.filters?.dateRange?.to ?? "");
     setActiveAssets(availableAssets);
     setActiveStrategyTypes(availableStrategyTypes);
+    setActiveBiasTags(availableBiasTags);
     setMaxProfitMin("");
     setMaxProfitMax("");
     setMaxLossMin(DEFAULT_MAX_LOSS_FLOOR);
@@ -972,6 +1012,7 @@ export default function StrategyFinderWorkspace({
     (dateFrom && dateTo ? `${formatShortDate(dateFrom)} - ${formatShortDate(dateTo)}` : "Prediction period");
   const productSummary = buildSelectionSummary(activeAssets, availableAssets, "Products");
   const strategySummary = buildSelectionSummary(activeStrategyTypes, availableStrategyTypes, "Strategy types");
+  const biasSummary = buildSelectionSummary(activeBiasTags, availableBiasTags, "Tags");
   const pnlSummary = buildPnlFilterSummary({
     maxProfitMin: minProfitThreshold,
     maxProfitMax: maxProfitThreshold,
@@ -1848,6 +1889,42 @@ export default function StrategyFinderWorkspace({
             </div>
           </div>
         </details>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("tags", node)}
+          onToggle={() => handleFilterMenuToggle("tags")}
+        >
+          <summary className="finder-control">
+            <span>{biasSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Tags</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => setActiveBiasTags(availableBiasTags)}
+              >
+                All
+              </button>
+            </div>
+            <div className="finder-menu__list">
+              {availableBiasTags.map((marketBias) => (
+                <button
+                  key={marketBias}
+                  type="button"
+                  className={`finder-menu__option ${
+                    activeBiasTags.includes(marketBias) ? "finder-menu__option--active" : ""
+                  }`}
+                  onClick={() => toggleBiasTag(marketBias)}
+                >
+                  {marketBias}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
       </section>
 
       {selectedRow && detailOpen ? (
@@ -2659,6 +2736,11 @@ export default function StrategyFinderWorkspace({
                 <span>{row.days}</span>
                 <span>{row.assetLabel}</span>
                 <span>{row.strategyType}</span>
+                <span>
+                  <span className={`bias-pill bias-pill--${row.marketBiasTone ?? "neutral"}`}>
+                    {row.marketBias ?? "Neutral"}
+                  </span>
+                </span>
                 <span className="formula-cell">
                   {row.formula.map((item) => (
                     <span key={`${row.id}-${item.label}`} className={`formula-pill formula-pill--${item.tone}`}>

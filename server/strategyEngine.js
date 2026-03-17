@@ -627,6 +627,84 @@ function evaluatePayoffExtremes(curve, legs) {
   };
 }
 
+function findClosestCurvePoint(curve, referenceSpot) {
+  if (!curve.length) {
+    return null;
+  }
+
+  return curve.reduce((closest, point) => {
+    if (!closest) {
+      return point;
+    }
+
+    return Math.abs(Number(point.spot) - referenceSpot) < Math.abs(Number(closest.spot) - referenceSpot)
+      ? point
+      : closest;
+  }, null);
+}
+
+function classifyStrategyBias(curve, referenceSpot) {
+  const values = curve
+    .map((point) => ({
+      spot: Number(point.spot),
+      totalPnL: Number(point.totalPnL)
+    }))
+    .filter((point) => Number.isFinite(point.spot) && Number.isFinite(point.totalPnL));
+
+  if (!values.length) {
+    return {
+      label: "Neutral",
+      tone: "neutral"
+    };
+  }
+
+  const lowPoint = values[0];
+  const highPoint = values[values.length - 1];
+  const middlePoint = findClosestCurvePoint(values, referenceSpot) ?? values[Math.floor(values.length / 2)];
+  const payoffValues = values.map((point) => point.totalPnL);
+  const range = Math.max(...payoffValues) - Math.min(...payoffValues);
+  const threshold = Math.max(range * 0.12, 25);
+
+  if (
+    middlePoint.totalPnL >= lowPoint.totalPnL + threshold &&
+    middlePoint.totalPnL >= highPoint.totalPnL + threshold
+  ) {
+    return {
+      label: "Range-bound",
+      tone: "range"
+    };
+  }
+
+  if (
+    middlePoint.totalPnL <= lowPoint.totalPnL - threshold &&
+    middlePoint.totalPnL <= highPoint.totalPnL - threshold
+  ) {
+    return {
+      label: "Breakout",
+      tone: "breakout"
+    };
+  }
+
+  if (highPoint.totalPnL >= lowPoint.totalPnL + threshold) {
+    return {
+      label: "Bull",
+      tone: "bull"
+    };
+  }
+
+  if (lowPoint.totalPnL >= highPoint.totalPnL + threshold) {
+    return {
+      label: "Bear",
+      tone: "bear"
+    };
+  }
+
+  return {
+    label: "Neutral",
+    tone: "neutral"
+  };
+}
+
 function buildPayoffCurve({
   currentSpot,
   targetSpot,
@@ -866,6 +944,7 @@ function buildCombination({
     payoffCurve,
     payoffLegs
   );
+  const marketBias = classifyStrategyBias(payoffCurve, currentOptionSpot);
   const expPayoff =
     payoffCurve.find((point) => Math.abs(point.spot - (optionLegBlueprints[0]?.targetSpot || currentOptionSpot)) < 0.5)
       ?.totalPnL ?? null;
@@ -902,6 +981,8 @@ function buildCombination({
     expiration: strategyCloseDate,
     strategyCloseDate,
     polymarketResolutionDate,
+    marketBias: marketBias.label,
+    marketBiasTone: marketBias.tone,
     optionExpiry: optionLegBlueprints[0]?.expiration ?? null,
     days: daysUntil(strategyCloseDate),
     strategyType,

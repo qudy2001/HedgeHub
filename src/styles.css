@@ -1596,13 +1596,13 @@ a {
 }
 
 .finder-table {
-  min-width: 1500px;
+  min-width: 1600px;
 }
 
 .finder-table__head,
 .finder-row {
   display: grid;
-  grid-template-columns: 120px 70px 110px 150px 220px 90px 120px 120px 110px 140px 95px 80px 80px 120px 120px;
+  grid-template-columns: 120px 70px 110px 150px 110px 220px 90px 120px 120px 110px 140px 95px 80px 80px 120px 120px;
   gap: 14px;
   align-items: center;
 }
@@ -1680,6 +1680,42 @@ a {
 .formula-pill--short {
   background: rgba(251, 113, 133, 0.14);
   color: #fda4af;
+}
+
+.bias-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 88px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.77rem;
+  letter-spacing: 0.04em;
+}
+
+.bias-pill--bull {
+  background: rgba(34, 197, 94, 0.16);
+  color: #86efac;
+}
+
+.bias-pill--bear {
+  background: rgba(251, 113, 133, 0.14);
+  color: #fda4af;
+}
+
+.bias-pill--range {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
+}
+
+.bias-pill--breakout {
+  background: rgba(96, 165, 250, 0.16);
+  color: #bfdbfe;
+}
+
+.bias-pill--neutral {
+  background: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
 }
 
 .strategy-detail-grid {
