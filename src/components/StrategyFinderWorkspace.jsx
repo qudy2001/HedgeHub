@@ -2682,165 +2682,171 @@ export default function StrategyFinderWorkspace({
 
                   <div className="detail-panels">
                     <div className="detail-panel">
-                      <h4>Quick overview</h4>
-                      <dl>
-                        <div><dt>Underlying price</dt><dd>{formatCurrency(underlyingPrice)}</dd></div>
-                        <div><dt>Theo price</dt><dd>{formatNumber(effectiveTheoPrice, 2)}</dd></div>
-                        <div><dt>Bid</dt><dd>{formatNumber(effectiveNetBid, 2)}</dd></div>
-                        <div><dt>Ask</dt><dd>{formatNumber(effectiveNetAsk, 2)}</dd></div>
-                        <div><dt>Breakevens</dt><dd>{effectiveBreakevens.join("/") || "n/a"}</dd></div>
-                        <div><dt>Prob. of profit</dt><dd>{formatNumber(effectiveProbabilityOfProfit, 2)}%</dd></div>
-                      </dl>
+                      <h4>Strategy overview</h4>
+                      <div className="detail-panel__section">
+                        <span className="detail-panel__section-heading">Overview</span>
+                        <dl>
+                          <div><dt>Underlying price</dt><dd>{formatCurrency(underlyingPrice)}</dd></div>
+                          <div><dt>Theo price</dt><dd>{formatNumber(effectiveTheoPrice, 2)}</dd></div>
+                          <div><dt>Bid</dt><dd>{formatNumber(effectiveNetBid, 2)}</dd></div>
+                          <div><dt>Ask</dt><dd>{formatNumber(effectiveNetAsk, 2)}</dd></div>
+                          <div><dt>Breakevens</dt><dd>{effectiveBreakevens.join("/") || "n/a"}</dd></div>
+                          <div><dt>Prob. of profit</dt><dd>{formatNumber(effectiveProbabilityOfProfit, 2)}%</dd></div>
+                        </dl>
+                      </div>
+                      <div className="detail-panel__section">
+                        <span className="detail-panel__section-heading">Risk analysis</span>
+                        <dl>
+                          <div><dt>Exp payoff</dt><dd>{formatCurrency(effectiveExpPayoff)}</dd></div>
+                          <div>
+                            <dt>Max profit</dt>
+                            <dd>
+                              {formatExtrema(effectiveMaxProfit, {
+                                unbounded: effectiveMaxProfitUnbounded,
+                                kind: "profit"
+                              })}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Max loss</dt>
+                            <dd>
+                              {formatExtrema(effectiveMaxLoss, {
+                                unbounded: effectiveMaxLossUnbounded,
+                                kind: "loss"
+                              })}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Reward/Risk</dt>
+                            <dd>{formatNumber(effectiveMaxLoss < 0 ? effectiveMaxProfit / Math.abs(effectiveMaxLoss) : null, 2)}</dd>
+                          </div>
+                        </dl>
+                      </div>
                     </div>
 
-                    <div className="detail-panel">
-                      <h4>Risk analysis</h4>
-                      <dl>
-                        <div><dt>Exp payoff</dt><dd>{formatCurrency(effectiveExpPayoff)}</dd></div>
-                        <div>
-                          <dt>Max profit</dt>
-                          <dd>
-                            {formatExtrema(effectiveMaxProfit, {
-                              unbounded: effectiveMaxProfitUnbounded,
-                              kind: "profit"
-                            })}
-                          </dd>
+                    <div className="detail-panel detail-panel--contracts">
+                      <h4>Contract details</h4>
+                      <div className="legs-table">
+                        <div className="legs-table__head">
+                          <span>Action</span>
+                          <span>Qty</span>
+                          <span>Strike</span>
+                          <span>Bid</span>
+                          <span>Ask</span>
+                          <span>Spread</span>
+                          <span>Code / Link</span>
                         </div>
-                        <div>
-                          <dt>Max loss</dt>
-                          <dd>
-                            {formatExtrema(effectiveMaxLoss, {
-                              unbounded: effectiveMaxLossUnbounded,
-                              kind: "loss"
-                            })}
-                          </dd>
-                        </div>
-                        <div><dt>Reward/Risk</dt><dd>{formatNumber(effectiveMaxLoss < 0 ? effectiveMaxProfit / Math.abs(effectiveMaxLoss) : null, 2)}</dd></div>
-                      </dl>
+                        {detailLegRows.map((leg) => (
+                          <div key={leg.id} className="legs-table__row">
+                            <span className={`legs-action legs-action--${leg.action.toLowerCase()}`}>{leg.action}</span>
+                            <span>{formatNumber(leg.quantity, 0)}</span>
+                            <span>
+                              {typeof leg.strike === "string"
+                                ? leg.strike
+                                : `${formatNumber(leg.strike, 1)}${leg.optionType === "put" ? "P" : "C"}`}
+                            </span>
+                            <span>{formatNumber(leg.bid, 2)}</span>
+                            <span>{formatNumber(leg.ask, 2)}</span>
+                            <span>{leg.spread != null ? `${formatNumber(leg.spread, 2)}%` : ""}</span>
+                            <span className="leg-reference">
+                              {leg.kind === "binary" && leg.referenceUrl ? (
+                                <a href={leg.referenceUrl} target="_blank" rel="noreferrer">
+                                  {leg.referenceLabel}
+                                </a>
+                              ) : leg.kind === "binary" ? (
+                                <span>{leg.referenceLabel}</span>
+                              ) : leg.isLive === true ? (
+                                <code>{leg.referenceLabel}</code>
+                              ) : (
+                                <span>{leg.referenceLabel}</span>
+                              )}
+                              <small>{leg.referenceMeta}</small>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
 
-                    <div className="detail-panel detail-panel--legs">
-                      <h4>Legs details</h4>
-                      <div className="detail-panel__split">
-                        <div className="legs-table">
-                          <div className="legs-table__head">
-                            <span>Action</span>
-                            <span>Qty</span>
-                            <span>Strike</span>
-                            <span>Bid</span>
-                            <span>Ask</span>
-                            <span>Spread</span>
-                            <span>Code / Link</span>
+                    <div className="detail-panel detail-panel--controls">
+                      <h4>Scenario controls</h4>
+                      <div className="detail-mini-controls">
+                        <div className="detail-mini-slider">
+                          <div className="detail-mini-slider__header">
+                            <span>Date</span>
+                            <strong>{formatShortDate(valuationDate)}</strong>
                           </div>
-                          {detailLegRows.map((leg) => (
-                            <div key={leg.id} className="legs-table__row">
-                              <span className={`legs-action legs-action--${leg.action.toLowerCase()}`}>{leg.action}</span>
-                              <span>{formatNumber(leg.quantity, 0)}</span>
-                              <span>
-                                {typeof leg.strike === "string"
-                                  ? leg.strike
-                                  : `${formatNumber(leg.strike, 1)}${leg.optionType === "put" ? "P" : "C"}`}
-                              </span>
-                              <span>{formatNumber(leg.bid, 2)}</span>
-                              <span>{formatNumber(leg.ask, 2)}</span>
-                              <span>{leg.spread != null ? `${formatNumber(leg.spread, 2)}%` : ""}</span>
-                              <span className="leg-reference">
-                                {leg.kind === "binary" && leg.referenceUrl ? (
-                                  <a href={leg.referenceUrl} target="_blank" rel="noreferrer">
-                                    {leg.referenceLabel}
-                                  </a>
-                                ) : leg.kind === "binary" ? (
-                                  <span>{leg.referenceLabel}</span>
-                                ) : leg.isLive === true ? (
-                                  <code>{leg.referenceLabel}</code>
-                                ) : (
-                                  <span>{leg.referenceLabel}</span>
-                                )}
-                                <small>{leg.referenceMeta}</small>
-                              </span>
-                            </div>
-                          ))}
+                          <input
+                            className="detail-mini-slider__range"
+                            type="range"
+                            min="0"
+                            max={maxDateOffset}
+                            step="1"
+                            value={currentDateOffset}
+                            onChange={(event) =>
+                              setControls((current) => ({
+                                ...current,
+                                valuationDate: addDays(valuationMinDate, Number(event.target.value))
+                              }))
+                            }
+                          />
+                          <div className="detail-mini-slider__scale">
+                            <span>{formatShortDate(valuationMinDate)}</span>
+                            <span>{formatShortDate(strategyCloseDate)}</span>
+                          </div>
                         </div>
 
-                        <div className="detail-mini-controls">
-                          <div className="detail-mini-slider">
-                            <div className="detail-mini-slider__header">
-                              <span>Date</span>
-                              <strong>{formatShortDate(valuationDate)}</strong>
-                            </div>
-                            <input
-                              className="detail-mini-slider__range"
-                              type="range"
-                              min="0"
-                              max={maxDateOffset}
-                              step="1"
-                              value={currentDateOffset}
-                              onChange={(event) =>
-                                setControls((current) => ({
-                                  ...current,
-                                  valuationDate: addDays(valuationMinDate, Number(event.target.value))
-                                }))
-                              }
-                            />
-                            <div className="detail-mini-slider__scale">
-                              <span>{formatShortDate(valuationMinDate)}</span>
-                              <span>{formatShortDate(strategyCloseDate)}</span>
-                            </div>
-                          </div>
-
-                          <div className="detail-mini-slider">
-                            <div className="detail-mini-slider__header detail-mini-slider__header--market">
-                              <span>Market spot</span>
-                              <div className="detail-mini-slider__markets">
-                                <div className="detail-mini-slider__market-pair">
-                                  <span>{proxySpotLabel}:</span>
-                                  <strong>{formatCurrency(underlyingPrice, "USD", proxySpotDigits)}</strong>
-                                  <span>{actualSpotLabel}</span>
-                                  <strong>{formatCurrency(equivalentUnderlyingSpot, "USD", actualSpotDigits)}</strong>
-                                </div>
+                        <div className="detail-mini-slider">
+                          <div className="detail-mini-slider__header detail-mini-slider__header--market">
+                            <span>Market spot</span>
+                            <div className="detail-mini-slider__markets">
+                              <div className="detail-mini-slider__market-pair">
+                                <span>{proxySpotLabel}:</span>
+                                <strong>{formatCurrency(underlyingPrice, "USD", proxySpotDigits)}</strong>
+                                <span>{actualSpotLabel}</span>
+                                <strong>{formatCurrency(equivalentUnderlyingSpot, "USD", actualSpotDigits)}</strong>
                               </div>
                             </div>
-                            <input
-                              className="detail-mini-slider__range"
-                              type="range"
-                              min={spotMin}
-                              max={spotMax}
-                              step={spotStep}
-                              value={clamp(underlyingPrice, spotMin, spotMax)}
-                              onChange={(event) => updateUnderlyingPriceControl(event.target.value)}
-                            />
-                            <div className="detail-mini-slider__scale">
-                              <span>
-                                {proxySpotLabel} {formatCurrency(spotMin, "USD", proxySpotDigits)} · {actualSpotLabel}{" "}
-                                {formatCurrency(actualSpotMin, "USD", actualSpotDigits)}
-                              </span>
-                              <span>
-                                {proxySpotLabel} {formatCurrency(spotMax, "USD", proxySpotDigits)} · {actualSpotLabel}{" "}
-                                {formatCurrency(actualSpotMax, "USD", actualSpotDigits)}
-                              </span>
-                            </div>
                           </div>
+                          <input
+                            className="detail-mini-slider__range"
+                            type="range"
+                            min={spotMin}
+                            max={spotMax}
+                            step={spotStep}
+                            value={clamp(underlyingPrice, spotMin, spotMax)}
+                            onChange={(event) => updateUnderlyingPriceControl(event.target.value)}
+                          />
+                          <div className="detail-mini-slider__scale">
+                            <span>
+                              {proxySpotLabel} {formatCurrency(spotMin, "USD", proxySpotDigits)} · {actualSpotLabel}{" "}
+                              {formatCurrency(actualSpotMin, "USD", actualSpotDigits)}
+                            </span>
+                            <span>
+                              {proxySpotLabel} {formatCurrency(spotMax, "USD", proxySpotDigits)} · {actualSpotLabel}{" "}
+                              {formatCurrency(actualSpotMax, "USD", actualSpotDigits)}
+                            </span>
+                          </div>
+                        </div>
 
-                          <div className="detail-mini-slider">
-                            <div className="detail-mini-slider__header">
-                              <span>Volatility</span>
-                              <strong>{formatNumber(impliedVolatility * 100, 2)}%</strong>
-                            </div>
-                            <input
-                              className="detail-mini-slider__range"
-                              type="range"
-                              min="5"
-                              max="150"
-                              step="0.5"
-                              value={clamp(Number(controls?.impliedVolatility ?? 24), 5, 150)}
-                              onChange={(event) =>
-                                setControls((current) => ({ ...current, impliedVolatility: event.target.value }))
-                              }
-                            />
-                            <div className="detail-mini-slider__scale">
-                              <span>5%</span>
-                              <span>150%</span>
-                            </div>
+                        <div className="detail-mini-slider">
+                          <div className="detail-mini-slider__header">
+                            <span>Volatility</span>
+                            <strong>{formatNumber(impliedVolatility * 100, 2)}%</strong>
+                          </div>
+                          <input
+                            className="detail-mini-slider__range"
+                            type="range"
+                            min="5"
+                            max="150"
+                            step="0.5"
+                            value={clamp(Number(controls?.impliedVolatility ?? 24), 5, 150)}
+                            onChange={(event) =>
+                              setControls((current) => ({ ...current, impliedVolatility: event.target.value }))
+                            }
+                          />
+                          <div className="detail-mini-slider__scale">
+                            <span>5%</span>
+                            <span>150%</span>
                           </div>
                         </div>
                       </div>
