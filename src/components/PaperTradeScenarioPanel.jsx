@@ -9,6 +9,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -774,6 +775,61 @@ export default function PaperTradeScenarioPanel({
   const chartRange = Math.max(chartMax - chartMin, 1);
   const chartDomain = [chartMin - Math.max(chartRange * 0.08, 20), chartMax + Math.max(chartRange * 0.08, 20)];
 
+  function calculateHeatmapPnL({ spot, date }) {
+    const optionPnL = repricedOptionLegs.reduce((sum, leg) => {
+      const remainingDays = Math.max(differenceInDays(date, leg.expiry), 0);
+      const optionMarkPrice =
+        remainingDays > 0
+          ? blackScholesPrice({
+              type: leg.optionType,
+              spot,
+              strike: Number(leg.strike),
+              timeYears: remainingDays / 365,
+              volatility: impliedVolatility,
+              riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+            })
+          : leg.optionType === "put"
+            ? Math.max(Number(leg.strike) - spot, 0)
+            : Math.max(spot - Number(leg.strike), 0);
+      const pnlPerUnit =
+        leg.action === "LONG" ? optionMarkPrice - Number(leg.entryPrice ?? 0) : Number(leg.entryPrice ?? 0) - optionMarkPrice;
+
+      return sum + pnlPerUnit * leg.contractUnits;
+    }, 0);
+    const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
+    const remainingPolymarketDays = Math.max(differenceInDays(date, scenarioOrder.polymarketResolutionDate), 0);
+    const yesPrice =
+      remainingPolymarketDays > 0
+        ? estimatePolymarketYesPrice({
+            spot: settleUnderlying,
+            strike: targetUnderlyingValue,
+            timeYears: remainingPolymarketDays / 365,
+            volatility: impliedVolatility,
+            riskFreeRate,
+            marketReferenceYesPrice,
+            currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
+            currentTimeYears: currentTimeToMarketResolutionYears
+          })
+        : targetUnderlyingValue > 0
+          ? settleUnderlying >= targetUnderlyingValue
+            ? 1
+            : 0
+          : marketReferenceYesPrice;
+    const binaryPnLAtDate = repricedPolymarketLegs.reduce(
+      (sum, leg) =>
+        sum +
+        binaryPnL({
+          action: leg.action,
+          entryPrice: Number(leg.entryPrice ?? 0),
+          markPrice: binaryPriceFromYes(leg.outcome, yesPrice),
+          quantity: Number(leg.quantity ?? 0)
+        }),
+      0
+    );
+
+    return optionPnL + binaryPnLAtDate;
+  }
+
   async function handleSaveSnapshot() {
     if (!onSaveCalculatorSnapshot) {
       return;
@@ -890,7 +946,23 @@ export default function PaperTradeScenarioPanel({
       ) : null}
 
       {panelOpen ? (
-        <div className="calculator-studio paper-scenario-card__studio">
+        <>
+          <ScenarioHeatmap
+            className="paper-scenario-card__heatmap"
+            title="Time series heat map"
+            description="P/L across dates and proxy price levels, centered on the current proxy spot. The default view shows a 1x implied-vol range, with quick 2x and 3x range filters available."
+            startDate={valuationMinDate}
+            endDate={strategyCloseDate}
+            currentPrice={currentProxySpot || underlyingPrice}
+            volatility={impliedVolatility}
+            spotLabel={proxySpotLabel}
+            priceDigits={proxySpotDigits}
+            secondarySpotLabel={converterRatio > 0 ? actualSpotLabel : ""}
+            secondaryPriceDigits={actualSpotDigits}
+            getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
+            getCellPnL={calculateHeatmapPnL}
+          />
+          <div className="calculator-studio paper-scenario-card__studio">
           <div ref={mainLayoutRef} className="paper-scenario-card__main">
             <div
               className="detail-chart paper-scenario-card__chart"
@@ -1218,7 +1290,8 @@ export default function PaperTradeScenarioPanel({
               </div>
             ))}
           </div>
-        </div>
+          </div>
+        </>
       ) : null}
     </section>
   );

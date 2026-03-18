@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   CartesianGrid,
@@ -9,6 +9,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
 
 function normalCdf(x) {
   const sign = x >= 0 ? 1 : -1;
@@ -614,6 +615,257 @@ function estimatePolymarketYesPrice({
   );
 }
 
+const HEATMAP_RANGE_OPTIONS = [1, 2, 3];
+const HEATMAP_COMPARISON_ROW_COUNT = 13;
+const HEATMAP_COMPARISON_COLUMN_COUNT = 10;
+
+function buildHeatmapDateColumns(startDate, endDate, columnCount = HEATMAP_COMPARISON_COLUMN_COUNT) {
+  const totalDays = Math.max(differenceInDays(startDate, endDate), 0);
+
+  if (totalDays === 0) {
+    return [{ date: startDate, offsetDays: 0 }];
+  }
+
+  const targetCount = Math.min(totalDays + 1, Math.max(columnCount, 2));
+  const offsets = Array.from({ length: targetCount }, (_value, index) =>
+    Math.round((totalDays * index) / (targetCount - 1))
+  );
+  const uniqueOffsets = offsets.filter((offset, index, array) => array.indexOf(offset) === index);
+
+  if (uniqueOffsets[0] !== 0) {
+    uniqueOffsets.unshift(0);
+  }
+
+  if (uniqueOffsets[uniqueOffsets.length - 1] !== totalDays) {
+    uniqueOffsets.push(totalDays);
+  }
+
+  return uniqueOffsets.map((offsetDays) => ({
+    date: addDays(startDate, offsetDays),
+    offsetDays
+  }));
+}
+
+function buildHeatmapPriceRows({
+  centerPrice,
+  volatility,
+  totalDays,
+  rangeMultiplier,
+  rowCount = HEATMAP_COMPARISON_ROW_COUNT
+}) {
+  const halfSteps = Math.floor(rowCount / 2);
+  const timeYears = Math.max(totalDays, 1) / 365;
+  const sigmaMove = Math.max(centerPrice * volatility * Math.sqrt(timeYears), Math.max(centerPrice * 0.04, 1));
+
+  return Array.from({ length: rowCount }, (_value, index) => {
+    const relativePosition = halfSteps === 0 ? 0 : (halfSteps - index) / halfSteps;
+    return Math.max(centerPrice + relativePosition * rangeMultiplier * sigmaMove, 0.01);
+  });
+}
+
+function calculateScenarioHeatmapPointPnL({
+  spot,
+  date,
+  optionLegs,
+  polymarketLegs,
+  impliedVolatility,
+  riskFreeRate,
+  converterRatio,
+  targetUnderlyingValue,
+  polymarketResolutionDate,
+  marketReferenceYesPrice,
+  currentUnderlyingSpot,
+  equivalentUnderlyingSpot,
+  currentTimeToMarketResolutionYears
+}) {
+  const optionPnL = optionLegs.reduce((sum, leg) => {
+    const remainingDays = Math.max(differenceInDays(date, leg.expiry), 0);
+    const optionMarkPrice =
+      remainingDays > 0
+        ? blackScholesPrice({
+            type: leg.optionType,
+            spot,
+            strike: Number(leg.strike),
+            timeYears: remainingDays / 365,
+            volatility: Number(leg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
+            riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+          })
+        : leg.optionType === "put"
+          ? Math.max(Number(leg.strike) - spot, 0)
+          : Math.max(spot - Number(leg.strike), 0);
+    const pnlPerUnit = leg.action === "LONG" ? optionMarkPrice - leg.entryPrice : leg.entryPrice - optionMarkPrice;
+
+    return sum + pnlPerUnit * leg.contractUnits;
+  }, 0);
+
+  const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
+  const remainingPolymarketDays = Math.max(differenceInDays(date, polymarketResolutionDate), 0);
+  const yesPrice =
+    remainingPolymarketDays > 0
+      ? estimatePolymarketYesPrice({
+          spot: settleUnderlying,
+          strike: targetUnderlyingValue,
+          timeYears: remainingPolymarketDays / 365,
+          volatility: impliedVolatility,
+          riskFreeRate,
+          marketReferenceYesPrice,
+          currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
+          currentTimeYears: currentTimeToMarketResolutionYears
+        })
+      : targetUnderlyingValue > 0
+        ? settleUnderlying >= targetUnderlyingValue
+          ? 1
+          : 0
+        : marketReferenceYesPrice;
+  const binaryPnLAtDate = polymarketLegs.reduce(
+    (sum, leg) =>
+      sum +
+      binaryPnL({
+        action: leg.action,
+        entryPrice: leg.entryPrice,
+        markPrice: binaryPriceFromYes(leg.outcome, yesPrice),
+        quantity: leg.quantity
+      }),
+    0
+  );
+
+  return optionPnL + binaryPnLAtDate;
+}
+
+function calculateHeatmapExtremaForRow(row, currentDate) {
+  const optionLegs = (row.legs ?? []).filter((leg) => leg.kind === "option");
+  const polymarketLegs = (row.legs ?? []).filter((leg) => leg.kind === "binary");
+  const currentProxySpot = Number(row.marketContext?.currentProxySpot ?? row.quickOverview?.underlyingPrice ?? 0);
+
+  if (!(currentProxySpot > 0) || (!optionLegs.length && !polymarketLegs.length)) {
+    return {
+      maxProfitRangeTag: null,
+      maxLossRangeTag: null
+    };
+  }
+
+  const polymarketResolutionDate = row.polymarketResolutionDate ?? row.expiration ?? "";
+  const strategyCloseDate =
+    minIsoDate([polymarketResolutionDate, ...optionLegs.map((leg) => leg.expiry)]) ||
+    row.strategyCloseDate ||
+    row.expiration ||
+    polymarketResolutionDate ||
+    currentDate;
+  const valuationMinDate =
+    currentDate && (!strategyCloseDate || currentDate <= strategyCloseDate) ? currentDate : strategyCloseDate ?? currentDate;
+
+  if (!valuationMinDate || !strategyCloseDate) {
+    return {
+      maxProfitRangeTag: null,
+      maxLossRangeTag: null
+    };
+  }
+
+  const currentUnderlyingSpot = Number(row.marketContext?.currentUnderlyingSpot ?? 0);
+  const converterRatio =
+    Number(row.marketContext?.conversionRatio ?? 0) ||
+    (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
+  const targetUnderlyingValue =
+    Number(row.marketContext?.targetUnderlyingValue ?? 0) ||
+    parseTargetFromQuestion(row.polymarketQuestion ?? "") ||
+    0;
+  const impliedVolatility =
+    Number(optionLegs[0]?.impliedVolatility ?? row.marketContext?.impliedVolatility ?? 0) || 0.24;
+  const riskFreeRate =
+    Number(optionLegs[0]?.riskFreeRate ?? row.marketContext?.riskFreeRate ?? 0.0425) || 0.0425;
+  const equivalentUnderlyingSpot = converterRatio > 0 ? currentProxySpot / converterRatio : currentProxySpot;
+  const currentDaysToMarketResolution = Math.max(
+    differenceInDays(currentDate || valuationMinDate, polymarketResolutionDate),
+    0
+  );
+  const currentTimeToMarketResolutionYears = currentDaysToMarketResolution / 365;
+  const referenceYesLeg = polymarketLegs.find((leg) => leg.outcome === "YES") ?? null;
+  const referenceNoLeg = polymarketLegs.find((leg) => leg.outcome === "NO") ?? null;
+  const marketReferenceYesPrice = Number(
+    referenceYesLeg?.entryPrice ??
+      (referenceNoLeg ? 1 - Number(referenceNoLeg.entryPrice ?? 0) : row.polymarketPrice ?? 0.5)
+  );
+  const heatmapOptionLegs = optionLegs.map((leg) => ({
+    ...leg,
+    entryPrice: Number(leg.entryPrice ?? 0),
+    contractUnits: Number(leg.quantity ?? 0) * Number(leg.contractMultiplier ?? 100),
+    impliedVolatility: Number(leg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
+    riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+  }));
+  const heatmapPolymarketLegs = polymarketLegs.map((leg) => ({
+    ...leg,
+    entryPrice: Number(leg.entryPrice ?? 0),
+    quantity: Number(leg.quantity ?? 0)
+  }));
+  const dateColumns = buildHeatmapDateColumns(valuationMinDate, strategyCloseDate, HEATMAP_COMPARISON_COLUMN_COUNT);
+  const totalDays = Math.max(differenceInDays(valuationMinDate, strategyCloseDate), 0);
+
+  let maxProfitValue = null;
+  let maxLossValue = null;
+  let maxProfitRangeTag = null;
+  let maxLossRangeTag = null;
+
+  HEATMAP_RANGE_OPTIONS.forEach((rangeMultiplier) => {
+    const priceRows = buildHeatmapPriceRows({
+      centerPrice: currentProxySpot,
+      volatility: impliedVolatility,
+      totalDays,
+      rangeMultiplier,
+      rowCount: HEATMAP_COMPARISON_ROW_COUNT
+    });
+
+    priceRows.forEach((spot) => {
+      dateColumns.forEach(({ date }) => {
+        const pnl = calculateScenarioHeatmapPointPnL({
+          spot,
+          date,
+          optionLegs: heatmapOptionLegs,
+          polymarketLegs: heatmapPolymarketLegs,
+          impliedVolatility,
+          riskFreeRate,
+          converterRatio,
+          targetUnderlyingValue,
+          polymarketResolutionDate,
+          marketReferenceYesPrice,
+          currentUnderlyingSpot,
+          equivalentUnderlyingSpot,
+          currentTimeToMarketResolutionYears
+        });
+
+        if (!Number.isFinite(pnl)) {
+          return;
+        }
+
+        if (maxProfitValue == null || pnl > maxProfitValue) {
+          maxProfitValue = pnl;
+          maxProfitRangeTag = `${rangeMultiplier}x`;
+        }
+
+        if (maxLossValue == null || pnl < maxLossValue) {
+          maxLossValue = pnl;
+          maxLossRangeTag = `${rangeMultiplier}x`;
+        }
+      });
+    });
+  });
+
+  if (maxProfitValue == null || maxLossValue == null) {
+    return {
+      maxProfitRangeTag: null,
+      maxLossRangeTag: null
+    };
+  }
+
+  return {
+    maxProfit: Number(maxProfitValue.toFixed(2)),
+    maxLoss: Number(maxLossValue.toFixed(2)),
+    maxProfitUnbounded: false,
+    maxLossUnbounded: false,
+    maxProfitRangeTag,
+    maxLossRangeTag
+  };
+}
+
 const columns = [
   { key: "expiration", label: "Expiration" },
   { key: "days", label: "Days" },
@@ -645,7 +897,15 @@ export default function StrategyFinderWorkspace({
   onOpenPaperTrading = null
 }) {
   const finder = strategyPayload?.primaryStrategy?.finder;
-  const rows = finder?.rows ?? [];
+  const currentDate = strategyPayload?.lastUpdated?.slice(0, 10) ?? finder?.filters?.dateRange?.from ?? "";
+  const rows = useMemo(
+    () =>
+      (finder?.rows ?? []).map((row) => ({
+        ...row,
+        ...calculateHeatmapExtremaForRow(row, currentDate)
+      })),
+    [currentDate, finder?.rows]
+  );
   const availableStrategyTypes = finder?.filters?.strategyTypes ?? [];
   const availableAssets = [...new Set(rows.map((row) => row.assetLabel))];
   const availableBiasTags = BIAS_FILTER_ORDER.filter((tag) =>
@@ -996,7 +1256,6 @@ export default function StrategyFinderWorkspace({
   );
   const impliedVolatility = Number(controls?.impliedVolatility ?? 24) / 100;
   const riskFreeRate = 0.0425;
-  const currentDate = strategyPayload?.lastUpdated?.slice(0, 10) ?? finder?.filters?.dateRange?.from ?? "";
 
   useEffect(() => {
     setPaperTradeDate(currentDate || new Date().toISOString().slice(0, 10));
@@ -1065,7 +1324,6 @@ export default function StrategyFinderWorkspace({
     selectedRow?.expiration ||
     polymarketResolutionDate;
   const strategyCloseDays = Math.max(differenceInDays(currentDate || strategyCloseDate, strategyCloseDate), 0);
-  const currentVolatility = Number(effectiveOptionLegs[0]?.impliedVolatility ?? impliedVolatility) || impliedVolatility;
   const valuationMinDate =
     selectedRow && currentDate <= strategyCloseDate ? currentDate : strategyCloseDate ?? "";
   const valuationDate = clampIsoDate(
@@ -1594,6 +1852,59 @@ export default function StrategyFinderWorkspace({
   ]);
 
   const chartHeight = chartExpanded ? 1000 : 250;
+  function calculateHeatmapPnL({ spot, date }) {
+    const optionPnL = repricedOptionLegs.reduce((sum, leg) => {
+      const remainingDays = Math.max(differenceInDays(date, leg.expiry), 0);
+      const optionMarkPrice =
+        remainingDays > 0
+          ? blackScholesPrice({
+              type: leg.optionType,
+              spot,
+              strike: Number(leg.strike),
+              timeYears: remainingDays / 365,
+              volatility: impliedVolatility,
+              riskFreeRate
+            })
+          : leg.optionType === "put"
+            ? Math.max(Number(leg.strike) - spot, 0)
+            : Math.max(spot - Number(leg.strike), 0);
+      const pnlPerUnit = leg.action === "LONG" ? optionMarkPrice - leg.entryPrice : leg.entryPrice - optionMarkPrice;
+
+      return sum + pnlPerUnit * leg.contractUnits;
+    }, 0);
+    const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
+    const remainingPolymarketDays = Math.max(differenceInDays(date, polymarketResolutionDate), 0);
+    const yesPrice =
+      remainingPolymarketDays > 0
+        ? estimatePolymarketYesPrice({
+            spot: settleUnderlying,
+            strike: targetUnderlyingValue,
+            timeYears: remainingPolymarketDays / 365,
+            volatility: impliedVolatility,
+            riskFreeRate,
+            marketReferenceYesPrice,
+            currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
+            currentTimeYears: currentTimeToMarketResolutionYears
+          })
+        : targetUnderlyingValue > 0
+          ? settleUnderlying >= targetUnderlyingValue
+            ? 1
+            : 0
+          : marketReferenceYesPrice;
+    const binaryPnLAtDate = repricedPolymarketLegs.reduce(
+      (sum, leg) =>
+        sum +
+        binaryPnL({
+          action: leg.action,
+          entryPrice: leg.entryPrice,
+          markPrice: binaryPriceFromYes(leg.outcome, yesPrice),
+          quantity: leg.quantity
+        }),
+      0
+    );
+
+    return optionPnL + binaryPnLAtDate;
+  }
   const dateProfitSeries = [];
 
   if (selectedRow && valuationMinDate && strategyCloseDate) {
@@ -2347,13 +2658,29 @@ export default function StrategyFinderWorkspace({
                 </article>
               </section>
 
-              <section className="calculator-section">
-                <div className="section-heading">
-                  <span>Multi-leg calculator</span>
-                  <span className="pill pill--ghost">Slide date, market spot, and vol; YES auto-prices</span>
-                </div>
+                  <ScenarioHeatmap
+                    className="calculator-section"
+                    title="Time series heat map"
+                    description="P/L across dates and proxy price levels, centered on the current proxy spot. The default view shows a 1x implied-vol range, with quick 2x and 3x range filters available."
+                    startDate={valuationMinDate}
+                    endDate={strategyCloseDate}
+                    currentPrice={currentProxySpot || underlyingPrice}
+                    volatility={impliedVolatility}
+                    spotLabel={proxySpotLabel}
+                    priceDigits={proxySpotDigits}
+                    secondarySpotLabel={converterRatio > 0 ? actualSpotLabel : ""}
+                    secondaryPriceDigits={actualSpotDigits}
+                    getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
+                    getCellPnL={calculateHeatmapPnL}
+                  />
 
-	                <div className="calculator-studio">
+		              <section className="calculator-section">
+		                <div className="section-heading">
+		                  <span>Multi-leg calculator</span>
+		                  <span className="pill pill--ghost">Slide date, market spot, and vol; YES auto-prices</span>
+		                </div>
+
+			                <div className="calculator-studio">
                     <div className="paper-order-ticket">
                       <div>
                         <span className="brand__eyebrow">Paper-trade this setup</span>
@@ -2395,7 +2722,7 @@ export default function StrategyFinderWorkspace({
                       </div>
                     ) : null}
 
-	                  <div className="calculator-lines">
+			                  <div className="calculator-lines">
                     {repricedOptionLegs.map((leg) => (
                       <div key={leg.id} className="calculator-line">
                         <div className="calculator-line__body">
@@ -2527,7 +2854,7 @@ export default function StrategyFinderWorkspace({
                     ))}
 	                  </div>
 
-	                  <div className="calculator-summary calculator-summary--studio">
+			                  <div className="calculator-summary calculator-summary--studio">
 	                    <article className="calculator-total">
 	                      <span>{initialInvestment < 0 ? "Net initial credit" : "Net initial cost"}</span>
 	                      <strong className={initialInvestment < 0 ? "positive" : ""}>
@@ -2558,7 +2885,7 @@ export default function StrategyFinderWorkspace({
 	                    </article>
 	                  </div>
 
-	                  <div className="calculator-slider-stack">
+			                  <div className="calculator-slider-stack">
 	                    <div className="calculator-slider">
                       <div className="calculator-slider__header">
                         <div>
@@ -2749,17 +3076,31 @@ export default function StrategyFinderWorkspace({
                   ))}
                 </span>
                 <span>{`${row.polymarketPriceSide === "NO" ? "N" : "Y"} ${formatNumber(row.polymarketPrice, 2)}`}</span>
-                <span>
-                  {formatExtrema(row.maxProfit, {
-                    unbounded: row.maxProfitUnbounded === true,
-                    kind: "profit"
-                  })}
+                <span className="finder-metric-cell">
+                  <span
+                    className={
+                      row.maxProfitUnbounded === true ? "" : Number(row.maxProfit) >= 0 ? "positive" : "negative"
+                    }
+                  >
+                    {formatExtrema(row.maxProfit, {
+                      unbounded: row.maxProfitUnbounded === true,
+                      kind: "profit"
+                    })}
+                  </span>
+                  {row.maxProfitRangeTag ? <span className="finder-range-tag">{row.maxProfitRangeTag}</span> : null}
                 </span>
-                <span>
-                  {formatExtrema(row.maxLoss, {
-                    unbounded: row.maxLossUnbounded === true,
-                    kind: "loss"
-                  })}
+                <span className="finder-metric-cell">
+                  <span
+                    className={
+                      row.maxLossUnbounded === true ? "" : Number(row.maxLoss) >= 0 ? "positive" : "negative"
+                    }
+                  >
+                    {formatExtrema(row.maxLoss, {
+                      unbounded: row.maxLossUnbounded === true,
+                      kind: "loss"
+                    })}
+                  </span>
+                  {row.maxLossRangeTag ? <span className="finder-range-tag">{row.maxLossRangeTag}</span> : null}
                 </span>
                 <span>{formatNumber(row.rewardRisk, 2)}</span>
                 <span>{row.breakevens.join("/") || "n/a"}</span>

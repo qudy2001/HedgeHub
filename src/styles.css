@@ -1602,7 +1602,7 @@ a {
 .finder-table__head,
 .finder-row {
   display: grid;
-  grid-template-columns: 120px 70px 110px 150px 110px 220px 90px 120px 120px 110px 140px 95px 80px 80px 120px 120px;
+  grid-template-columns: 120px 70px 110px 150px 110px 220px 90px 148px 148px 110px 140px 95px 80px 80px 120px 120px;
   gap: 14px;
   align-items: center;
 }
@@ -1646,6 +1646,28 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.finder-metric-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.finder-range-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 
 .formula-pill {
@@ -1945,6 +1967,184 @@ a {
   border-color: rgba(41, 98, 255, 0.4);
   background: rgba(41, 98, 255, 0.12);
   color: var(--text);
+}
+
+.scenario-heatmap {
+  display: grid;
+  gap: 14px;
+}
+
+.scenario-heatmap__header {
+  margin-bottom: 0;
+}
+
+.scenario-heatmap__controls {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.scenario-heatmap__controls-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.scenario-heatmap__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.scenario-heatmap__meta span {
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.scenario-heatmap__frame {
+  overflow: auto;
+  border-radius: var(--radius-panel);
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(2, 6, 23, 0.72);
+}
+
+.scenario-heatmap__table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.scenario-heatmap__table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(6, 11, 23, 0.96);
+  backdrop-filter: blur(12px);
+}
+
+.scenario-heatmap__table th,
+.scenario-heatmap__table td {
+  min-width: 98px;
+  padding: 0;
+  border-right: 1px solid rgba(148, 163, 184, 0.08);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.scenario-heatmap__table th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  width: 148px;
+  min-width: 148px;
+  max-width: 148px;
+  background: rgba(6, 11, 23, 0.98);
+}
+
+.scenario-heatmap__table tr:last-child th,
+.scenario-heatmap__table tr:last-child td {
+  border-bottom: 0;
+}
+
+.scenario-heatmap__table th:last-child,
+.scenario-heatmap__table td:last-child {
+  border-right: 0;
+}
+
+.scenario-heatmap__axis-label,
+.scenario-heatmap__date-label,
+.scenario-heatmap__row-label {
+  display: grid;
+  gap: 4px;
+  padding: 10px 10px;
+}
+
+.scenario-heatmap__axis-label {
+  min-width: 76px;
+}
+
+.scenario-heatmap__axis-label strong,
+.scenario-heatmap__date-label strong,
+.scenario-heatmap__row-label strong {
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.scenario-heatmap__axis-label small,
+.scenario-heatmap__date-label small,
+.scenario-heatmap__row-label small {
+  color: var(--muted);
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.scenario-heatmap__row-price-stack {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+}
+
+.scenario-heatmap__row-price {
+  display: block;
+  font-size: 0.6rem;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.scenario-heatmap__row-price--primary {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.scenario-heatmap__row-price--secondary {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.scenario-heatmap__row--current th {
+  background:
+    linear-gradient(90deg, rgba(41, 98, 255, 0.24), rgba(41, 98, 255, 0.06)),
+    rgba(6, 11, 23, 0.98);
+}
+
+.scenario-heatmap__row--current .scenario-heatmap__row-label strong {
+  color: #f8fafc;
+}
+
+.scenario-heatmap__row--current .scenario-heatmap__row-label small {
+  color: #bfdbfe;
+}
+
+.scenario-heatmap__cell {
+  padding: 11px 10px;
+  border: 1px solid transparent;
+  text-align: right;
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+
+.scenario-heatmap__cell:hover {
+  transform: translateY(-1px);
+}
+
+.scenario-heatmap__cell span {
+  display: block;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.2;
 }
 
 .legs-table {
@@ -2389,7 +2589,7 @@ a {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 18px;
-  align-items: end;
+  align-items: center;
   padding: 18px;
   border-radius: var(--radius-panel);
   border: 1px solid rgba(56, 189, 248, 0.18);
@@ -2651,6 +2851,10 @@ a {
   background:
     radial-gradient(circle at top right, rgba(56, 189, 248, 0.14), transparent 26%),
     linear-gradient(180deg, rgba(1, 5, 12, 0.96), rgba(3, 7, 16, 0.96));
+}
+
+.paper-scenario-card__heatmap {
+  margin-top: 0;
 }
 
 .paper-scenario-card__main {
@@ -2992,6 +3196,35 @@ a {
 
   .paper-scenario-card__chart {
     min-height: 300px;
+  }
+
+  .scenario-heatmap__controls {
+    justify-items: start;
+  }
+
+  .scenario-heatmap__table th,
+  .scenario-heatmap__table td {
+    min-width: 84px;
+  }
+
+  .scenario-heatmap__table th:first-child {
+    width: 132px;
+    min-width: 132px;
+    max-width: 132px;
+  }
+
+  .scenario-heatmap__axis-label,
+  .scenario-heatmap__date-label,
+  .scenario-heatmap__row-label {
+    padding: 10px 11px;
+  }
+
+  .scenario-heatmap__cell {
+    padding: 9px 8px;
+  }
+
+  .scenario-heatmap__cell span {
+    font-size: 0.74rem;
   }
 
   .paper-legs-table__head {
