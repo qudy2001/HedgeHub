@@ -1087,6 +1087,7 @@ function buildCombination({
             entryPrice: formatNumber(leg.entryPrice, 4),
             kind: leg.kind,
             outcome: leg.outcome,
+            polymarketMarketId: market.id,
             expiry: polymarketResolutionDate,
             strategyCloseDate,
             marketQuestion: market.question

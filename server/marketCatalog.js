@@ -449,6 +449,8 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-03-31T12:00:00Z",
     active: true,
     source: "seed",
+    slug: "what-price-will-bitcoin-hit-in-march-2026",
+    eventSlug: "what-price-will-bitcoin-hit-in-march-2026",
     url: "https://polymarket.com/event/what-price-will-bitcoin-hit-in-march-2026"
   },
   {
@@ -462,7 +464,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-eth-mar-31",
@@ -475,6 +477,8 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-03-31T12:00:00Z",
     active: true,
     source: "seed",
+    slug: "what-price-will-ethereum-hit-in-march-2026",
+    eventSlug: "what-price-will-ethereum-hit-in-march-2026",
     url: "https://polymarket.com/event/what-price-will-ethereum-hit-in-march-2026"
   },
   {
@@ -488,7 +492,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-gold-apr-30",
@@ -501,7 +505,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-oil-apr-30",
@@ -514,7 +518,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-stocks-mar-31",
@@ -527,6 +531,8 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-03-31T20:00:00Z",
     active: true,
     source: "seed",
+    slug: "sp-500-spx-above-end-of-march",
+    eventSlug: "sp-500-spx-above-end-of-march",
     url: "https://polymarket.com/event/sp-500-spx-above-end-of-march"
   }
 ];

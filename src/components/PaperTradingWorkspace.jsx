@@ -173,8 +173,54 @@ function getLegTitle(order, leg) {
   return leg.label;
 }
 
+function getPolymarketEventUrl(url) {
+  const normalizedUrl = String(url ?? "").trim();
+  return normalizedUrl.startsWith("https://polymarket.com/event/") ? normalizedUrl : "";
+}
+
+function derivePolymarketEventSlug(url) {
+  const eventUrl = getPolymarketEventUrl(url);
+  if (!eventUrl) {
+    return "";
+  }
+
+  const match = eventUrl.match(/^https:\/\/polymarket\.com\/event\/([^/?#]+)/i);
+  return match?.[1] ?? "";
+}
+
 function getLegUrl(order, leg) {
-  return leg.kind === "binary" ? order.polymarketUrl || "" : "";
+  return leg.kind === "binary" ? getPolymarketEventUrl(order.polymarketUrl) : "";
+}
+
+function getPolymarketReferenceLine(order, leg) {
+  if (leg.kind !== "binary") {
+    return "";
+  }
+
+  const parts = [];
+  const marketId = String(leg.polymarketMarketId || order.polymarketMarketId || "").trim();
+  const marketSlug = String(order.polymarketMarketSlug || "").trim();
+  const eventSlug = String(order.polymarketEventSlug || derivePolymarketEventSlug(order.polymarketUrl) || "").trim();
+
+  if (marketId) {
+    parts.push(`ID ${marketId}`);
+  }
+
+  if (marketSlug) {
+    parts.push(`slug ${marketSlug}`);
+  }
+
+  if (eventSlug) {
+    parts.push(`event ${eventSlug}`);
+  }
+
+  if (parts.length) {
+    return parts.join(" · ");
+  }
+
+  return String(order.polymarketSource || "").toLowerCase() === "seed"
+    ? "Seed fallback market · no live slug/event yet"
+    : "";
 }
 
 function ClosedOrderCard({
@@ -214,6 +260,7 @@ function ClosedOrderCard({
   }
 
   const orderBusy = busyOrderId === String(order.id);
+  const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
 
   return (
     <article className="paper-order-card paper-order-card--closed">
@@ -230,8 +277,8 @@ function ClosedOrderCard({
           <span className={`pill ${Number(order.profitLossValue) >= 0 ? "pill--live" : "pill--ghost"}`}>
             {formatCurrency(order.profitLossValue)}
           </span>
-          {order.polymarketUrl ? (
-            <a href={order.polymarketUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
+          {orderEventUrl ? (
+            <a href={orderEventUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
               Open market
             </a>
           ) : null}
@@ -540,9 +587,9 @@ export default function PaperTradingWorkspace({
                             <span className={`pill ${Number(order.profitLossValue) >= 0 ? "pill--live" : "pill--ghost"}`}>
                               {formatCurrency(order.profitLossValue)}
                             </span>
-                            {order.polymarketUrl ? (
+                            {getPolymarketEventUrl(order.polymarketUrl) ? (
                               <a
-                                href={order.polymarketUrl}
+                                href={getPolymarketEventUrl(order.polymarketUrl)}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="pill pill--ghost"
@@ -653,6 +700,7 @@ export default function PaperTradingWorkspace({
                               quantity: String(leg.quantity ?? "")
                             };
                             const legUrl = getLegUrl(order, leg);
+                            const polymarketReferenceLine = getPolymarketReferenceLine(order, leg);
 
                             return (
                               <div key={leg.id} className="paper-legs-table__row">
@@ -664,6 +712,7 @@ export default function PaperTradingWorkspace({
                                       {legUrl}
                                     </a>
                                   ) : null}
+                                  {polymarketReferenceLine ? <small>{polymarketReferenceLine}</small> : null}
                                 </span>
                                 <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
                                 <span>

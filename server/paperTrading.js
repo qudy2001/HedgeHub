@@ -404,6 +404,7 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
     riskFreeRate: kind === "option" ? toNumber(leg?.riskFreeRate, 0.0425) ?? 0.0425 : null,
     quoteSource: kind === "option" ? String(leg?.quoteSource ?? "seed") : String(leg?.quoteSource ?? "Polymarket"),
     isLive: leg?.isLive === true,
+    polymarketMarketId: kind === "binary" ? String(leg?.polymarketMarketId ?? "") : "",
     outcome: kind === "binary" ? (String(leg?.outcome ?? "YES").toUpperCase() === "NO" ? "NO" : "YES") : null,
     closedPrice,
     closedExposure:

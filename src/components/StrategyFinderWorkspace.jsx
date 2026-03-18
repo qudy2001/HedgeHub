@@ -154,6 +154,44 @@ function compareValues(left, right, direction) {
     : rightValue.localeCompare(leftValue);
 }
 
+function getPolymarketEventUrl(url) {
+  const normalizedUrl = String(url ?? "").trim();
+  return normalizedUrl.startsWith("https://polymarket.com/event/") ? normalizedUrl : "";
+}
+
+function derivePolymarketEventSlug(url) {
+  const eventUrl = getPolymarketEventUrl(url);
+  if (!eventUrl) {
+    return "";
+  }
+
+  const match = eventUrl.match(/^https:\/\/polymarket\.com\/event\/([^/?#]+)/i);
+  return match?.[1] ?? "";
+}
+
+function buildPolymarketReferenceLine({ marketId, marketSlug, eventSlug, url, source }) {
+  const parts = [];
+  const derivedEventSlug = eventSlug || derivePolymarketEventSlug(url);
+
+  if (marketId) {
+    parts.push(`ID ${marketId}`);
+  }
+
+  if (marketSlug) {
+    parts.push(`slug ${marketSlug}`);
+  }
+
+  if (derivedEventSlug) {
+    parts.push(`event ${derivedEventSlug}`);
+  }
+
+  if (parts.length) {
+    return parts.join(" · ");
+  }
+
+  return source === "seed" ? "Seed fallback market · no live slug/event yet" : "";
+}
+
 function parseIsoDate(value) {
   if (!value) {
     return null;
@@ -1346,6 +1384,14 @@ export default function StrategyFinderWorkspace({
     Number(selectedRow?.marketContext?.targetUnderlyingValue ?? 0) ||
     parseTargetFromQuestion(selectedRow?.polymarketQuestion ?? "") ||
     0;
+  const selectedPolymarketEventUrl = getPolymarketEventUrl(selectedRow?.polymarketUrl);
+  const polymarketReferenceLine = buildPolymarketReferenceLine({
+    marketId: selectedRow?.polymarketMarketId,
+    marketSlug: selectedRow?.polymarketMarketSlug,
+    eventSlug: selectedRow?.polymarketEventSlug,
+    url: selectedRow?.polymarketUrl,
+    source: selectedRow?.polymarketSource
+  });
   const proxySpotLabel = selectedRow?.marketContext?.proxySymbol ?? selectedRow?.assetLabel ?? "Proxy";
   const actualSpotLabel = formatUnderlyingLabel(
     selectedRow?.marketContext?.underlyingSymbol,
@@ -1608,6 +1654,7 @@ export default function StrategyFinderWorkspace({
             quantity: leg.quantity,
             entryPrice: leg.entryPrice,
             outcome: leg.outcome,
+            polymarketMarketId: leg.polymarketMarketId ?? selectedRow.polymarketMarketId ?? "",
             quoteSource: "Polymarket",
             isLive: true
           }))
@@ -1745,9 +1792,16 @@ export default function StrategyFinderWorkspace({
       spread: leg.spread ?? calculateSpreadPercent(leg.bid ?? leg.entryPrice, leg.ask ?? leg.entryPrice),
       kind: leg.kind,
       outcome: leg.outcome,
-      referenceUrl: selectedRow?.polymarketUrl ?? "",
-      referenceLabel: "Open Polymarket bet",
-      referenceMeta: "Polymarket"
+      referenceUrl: selectedPolymarketEventUrl,
+      referenceLabel: selectedPolymarketEventUrl ? "Open Polymarket bet" : "Seed fallback market",
+      referenceMeta:
+        buildPolymarketReferenceLine({
+          marketId: leg.polymarketMarketId ?? selectedRow?.polymarketMarketId,
+          marketSlug: selectedRow?.polymarketMarketSlug,
+          eventSlug: selectedRow?.polymarketEventSlug,
+          url: selectedRow?.polymarketUrl,
+          source: selectedRow?.polymarketSource
+        }) || "Polymarket"
     })),
     ...repricedOptionLegs.map((leg) => ({
       ...leg,
@@ -2487,9 +2541,11 @@ export default function StrategyFinderWorkspace({
                       >
                         {strategyEditorOpen ? "Close editor" : "Edit strategy"}
                       </button>
-                      <a href={selectedRow.polymarketUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
-                        Open Polymarket
-                      </a>
+                      {selectedPolymarketEventUrl ? (
+                        <a href={selectedPolymarketEventUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
+                          Open Polymarket
+                        </a>
+                      ) : null}
                     </div>
                   </div>
 
@@ -2689,10 +2745,12 @@ export default function StrategyFinderWorkspace({
                               <span>{formatNumber(leg.ask, 2)}</span>
                               <span>{leg.spread != null ? `${formatNumber(leg.spread, 2)}%` : ""}</span>
                               <span className="leg-reference">
-                                {leg.kind === "binary" ? (
+                                {leg.kind === "binary" && leg.referenceUrl ? (
                                   <a href={leg.referenceUrl} target="_blank" rel="noreferrer">
                                     {leg.referenceLabel}
                                   </a>
+                                ) : leg.kind === "binary" ? (
+                                  <span>{leg.referenceLabel}</span>
                                 ) : leg.isLive === true ? (
                                   <code>{leg.referenceLabel}</code>
                                 ) : (
@@ -3029,10 +3087,15 @@ export default function StrategyFinderWorkspace({
                             <span className="calculator-line__calc">Calc mark {formatNumber(leg.modelPrice, 2)}</span>
                           </div>
                           <div className="calculator-line__reference">
-                            <a href={selectedRow.polymarketUrl} target="_blank" rel="noreferrer">
-                              {selectedRow.polymarketUrl}
-                            </a>
-                            <span>Polymarket event URL</span>
+                            {selectedPolymarketEventUrl ? (
+                              <a href={selectedPolymarketEventUrl} target="_blank" rel="noreferrer">
+                                {selectedPolymarketEventUrl}
+                              </a>
+                            ) : (
+                              <span>Seed fallback market</span>
+                            )}
+                            {polymarketReferenceLine ? <span>{polymarketReferenceLine}</span> : null}
+                            <span>{selectedPolymarketEventUrl ? "Polymarket event URL" : "No live event URL yet"}</span>
                           </div>
                         </div>
                         <div className="calculator-line__editor">

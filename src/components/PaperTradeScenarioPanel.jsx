@@ -160,6 +160,44 @@ function formatNumber(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function getPolymarketEventUrl(url) {
+  const normalizedUrl = String(url ?? "").trim();
+  return normalizedUrl.startsWith("https://polymarket.com/event/") ? normalizedUrl : "";
+}
+
+function derivePolymarketEventSlug(url) {
+  const eventUrl = getPolymarketEventUrl(url);
+  if (!eventUrl) {
+    return "";
+  }
+
+  const match = eventUrl.match(/^https:\/\/polymarket\.com\/event\/([^/?#]+)/i);
+  return match?.[1] ?? "";
+}
+
+function buildPolymarketReferenceLine({ marketId, marketSlug, eventSlug, url, source }) {
+  const parts = [];
+  const derivedEventSlug = eventSlug || derivePolymarketEventSlug(url);
+
+  if (marketId) {
+    parts.push(`ID ${marketId}`);
+  }
+
+  if (marketSlug) {
+    parts.push(`slug ${marketSlug}`);
+  }
+
+  if (derivedEventSlug) {
+    parts.push(`event ${derivedEventSlug}`);
+  }
+
+  if (parts.length) {
+    return parts.join(" · ");
+  }
+
+  return source === "seed" ? "Seed fallback market · no live slug/event yet" : "";
+}
+
 function formatDateLabel(value) {
   const date = parseIsoDate(value);
   if (!date) {
@@ -387,6 +425,7 @@ function serializeScenarioOrder(order) {
       action: leg.action,
       quantity: Number(leg.quantity ?? 0),
       entryPrice: Number(leg.entryPrice ?? 0),
+      polymarketMarketId: leg.polymarketMarketId ?? "",
       contractMultiplier: Number(leg.contractMultiplier ?? 100),
       optionType: leg.optionType ?? null,
       expiry: leg.expiry ?? "",
@@ -442,6 +481,14 @@ export default function PaperTradeScenarioPanel({
   const activeSnapshot =
     snapshots.find((snapshot) => String(snapshot.id) === String(activeSnapshotId)) ?? null;
   const scenarioOrder = activeSnapshot?.payload?.orderSnapshot ?? serializeScenarioOrder(order);
+  const scenarioPolymarketEventUrl = getPolymarketEventUrl(scenarioOrder.polymarketUrl);
+  const polymarketReferenceLine = buildPolymarketReferenceLine({
+    marketId: scenarioOrder.polymarketMarketId,
+    marketSlug: scenarioOrder.polymarketMarketSlug,
+    eventSlug: scenarioOrder.polymarketEventSlug,
+    url: scenarioOrder.polymarketUrl,
+    source: scenarioOrder.polymarketSource
+  });
 
   useEffect(() => {
     setActiveSnapshotId(null);
@@ -1264,12 +1311,15 @@ export default function PaperTradeScenarioPanel({
                     <span className="calculator-line__calc">Calc mark {formatNumber(leg.modelPrice, 2)}</span>
                   </div>
                   <div className="calculator-line__reference">
-                    {scenarioOrder.polymarketUrl ? (
-                      <a href={scenarioOrder.polymarketUrl} target="_blank" rel="noreferrer">
-                        {scenarioOrder.polymarketUrl}
+                    {scenarioPolymarketEventUrl ? (
+                      <a href={scenarioPolymarketEventUrl} target="_blank" rel="noreferrer">
+                        {scenarioPolymarketEventUrl}
                       </a>
-                    ) : null}
-                    <span>{leg.action} {leg.outcome}</span>
+                    ) : (
+                      <span>Seed fallback market</span>
+                    )}
+                    {polymarketReferenceLine ? <span>{polymarketReferenceLine}</span> : null}
+                    <span>{scenarioPolymarketEventUrl ? `${leg.action} ${leg.outcome}` : "No live event URL yet"}</span>
                   </div>
                 </div>
                 <div className="calculator-line__editor">
