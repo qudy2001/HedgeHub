@@ -33,7 +33,7 @@ docker compose up -d
 ```
 
 - app: `http://localhost:8787` by default, or the host port set in `.env`
-- image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub:latest`
+- image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub-livedata:latest`
 - `POLYGON_API_KEY` is optional and can be added to `.env` if you want live Polygon option-chain data
 - persistent data: `data/` for SQLite and `dashboards/` for saved layouts
 - logs: use `docker compose logs -f hedgehub`
@@ -53,8 +53,9 @@ For NAS setups that prefer absolute bind mounts, update these values in `.env`:
 GitHub image publishing:
 
 - a GitHub Actions workflow at `.github/workflows/docker-publish.yml` builds multi-arch images for `linux/amd64` and `linux/arm64`
-- pushes on `main`, `master`, tags starting with `v`, and manual runs
+- pushes on `main`, `master`, `codex/livedata`, tags starting with `v`, and manual runs
 - publishes to GitHub Container Registry as `ghcr.io/<owner>/<repo>`
+- the `codex/livedata` branch publishes a separate image line at `ghcr.io/qudy2001/hedgehub-livedata`
 - if the package stays private, the NAS must log in first with `docker login ghcr.io`
 
 Nginx reverse proxy:

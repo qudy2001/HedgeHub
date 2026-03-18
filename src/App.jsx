@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import CompanyEventsPanel from "./components/CompanyEventsPanel.jsx";
 import EconomicCalendarPanel from "./components/EconomicCalendarPanel.jsx";
 import MacroHeatmapDashboard from "./components/MacroHeatmapDashboard.jsx";
@@ -53,6 +53,7 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState(null);
   const [error, setError] = useState("");
+  const strategyRefreshKeyRef = useRef(null);
 
   const applyAppState = useCallback((dashboardJson, strategyJson) => {
     setDashboard(dashboardJson);
@@ -85,6 +86,18 @@ export default function App() {
     return { dashboardJson, strategyJson };
   }, [applyAppState, fetchAppState]);
 
+  const applyPaperPortfolioUpdate = useCallback((paperPortfolio, lastUpdated = null) => {
+    setStrategyPayload((current) =>
+      current
+        ? {
+            ...current,
+            paperPortfolio,
+            lastUpdated: lastUpdated ?? current.lastUpdated
+          }
+        : current
+    );
+  }, []);
+
   const navigateTo = useCallback((nextView, strategyId = selectedStrategyId) => {
     setActiveView(nextView);
     if (strategyId) {
@@ -97,12 +110,14 @@ export default function App() {
     }
   }, [selectedStrategyId]);
 
-  const handleManualRefresh = useCallback(async () => {
+  const runStrategyRefresh = useCallback(async ({ announceStart = true } = {}) => {
     setRefreshing(true);
-    setRefreshNotice({
-      tone: "info",
-      message: "Refreshing live strategy data..."
-    });
+    if (announceStart) {
+      setRefreshNotice({
+        tone: "info",
+        message: "Refreshing live strategy data..."
+      });
+    }
 
     try {
       const refreshResponse = await fetch("/api/refresh", {
@@ -122,14 +137,16 @@ export default function App() {
         ...(strategyJson?.warnings ?? [])
       ].filter(Boolean);
 
-      setRefreshNotice({
-        tone: warnings.length ? "warning" : "success",
-        message: warnings.length
-          ? `Refresh complete with warnings: ${warnings.join(" | ")}`
-          : `Refresh complete at ${new Date(
-              refreshPayload?.lastUpdated ?? strategyJson?.lastUpdated ?? new Date().toISOString()
-            ).toLocaleString("en-GB")}`
-      });
+      if (announceStart || warnings.length) {
+        setRefreshNotice({
+          tone: warnings.length ? "warning" : "success",
+          message: warnings.length
+            ? `Refresh complete with warnings: ${warnings.join(" | ")}`
+            : `Refresh complete at ${new Date(
+                refreshPayload?.lastUpdated ?? strategyJson?.lastUpdated ?? new Date().toISOString()
+              ).toLocaleString("en-GB")}`
+        });
+      }
     } catch (refreshError) {
       setRefreshNotice({
         tone: "error",
@@ -139,6 +156,10 @@ export default function App() {
       setRefreshing(false);
     }
   }, [syncAppState]);
+
+  const handleManualRefresh = useCallback(() => {
+    return runStrategyRefresh({ announceStart: true });
+  }, [runStrategyRefresh]);
 
   const mutatePaperOrders = useCallback(async (url, options = {}) => {
     const response = await fetch(url, {
@@ -153,9 +174,14 @@ export default function App() {
       throw new Error(payload?.error || "Paper-trading request failed");
     }
 
-    await syncAppState();
+    if (payload?.paperPortfolio) {
+      applyPaperPortfolioUpdate(payload.paperPortfolio, new Date().toISOString());
+    } else {
+      await syncAppState();
+    }
+
     return payload;
-  }, [syncAppState]);
+  }, [applyPaperPortfolioUpdate, syncAppState]);
 
   const handleCreatePaperOrder = useCallback((orderPayload) => {
     return mutatePaperOrders("/api/paper-orders", {
@@ -215,13 +241,54 @@ export default function App() {
     }
 
     load();
-    const interval = window.setInterval(load, 60_000);
 
     return () => {
       isActive = false;
-      window.clearInterval(interval);
     };
   }, [applyAppState, fetchAppState]);
+
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    if (activeView !== "strategy" || selectedStrategyId !== "strategy-1") {
+      strategyRefreshKeyRef.current = null;
+      return;
+    }
+
+    const refreshKey = `${activeView}:${selectedStrategyId}`;
+    if (strategyRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+
+    strategyRefreshKeyRef.current = refreshKey;
+    void runStrategyRefresh({ announceStart: false });
+  }, [activeView, loading, runStrategyRefresh, selectedStrategyId]);
+
+  useEffect(() => {
+    if (loading || activeView !== "paper") {
+      return;
+    }
+
+    const source = new EventSource("/api/paper-orders/stream");
+
+    source.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+
+        if (payload?.paperPortfolio) {
+          applyPaperPortfolioUpdate(payload.paperPortfolio, payload.lastUpdated ?? new Date().toISOString());
+        }
+      } catch (streamError) {
+        console.error("Unable to parse paper-trading stream payload:", streamError);
+      }
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [activeView, applyPaperPortfolioUpdate, loading]);
 
   useEffect(() => {
     function handlePopState() {
@@ -332,6 +399,7 @@ export default function App() {
               <MacroHeatmapDashboard
                 macroDashboard={dashboard?.macroDashboard}
                 watchlist={dashboard?.watchlist ?? []}
+                streamDiagnostics={dashboard?.streamDiagnostics ?? null}
               />
 
               <section className="scan-section">

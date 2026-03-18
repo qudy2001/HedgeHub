@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+      - codex/livedata
     tags:
       - "v*"
   workflow_dispatch:
@@ -24,7 +25,14 @@ jobs:
       - name: Normalize image name
         id: image
         shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          image_name="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          if [[ "${GITHUB_REF_NAME}" == "codex/livedata" ]]; then
+            image_name="${image_name}-livedata"
+          fi
+
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -45,7 +53,7 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=ref,event=branch
             type=ref,event=tag
             type=sha

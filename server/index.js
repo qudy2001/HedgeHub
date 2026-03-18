@@ -103,6 +103,11 @@ const MACRO_DASHBOARD_CHECK_MS = 60 * 60 * 1000;
 const MACRO_DASHBOARD_SCHEMA_VERSION = 3;
 const CALENDAR_REFRESH_MS = 60 * 60 * 1000;
 const CALENDAR_WINDOW_DAYS = 30;
+const REFERENCE_REFRESH_MS = 5 * 60 * 1000;
+const PAPER_STREAM_HEARTBEAT_MS = 20 * 1000;
+const PAPER_STREAM_BROADCAST_DEBOUNCE_MS = 750;
+const PAPER_ORDER_SNAPSHOT_INTERVAL_MS = 60 * 1000;
+const MASSIVE_OPTIONS_WS_URL = process.env.POLYGON_WS_URL || "wss://socket.massive.com/options";
 
 app.use(cors());
 app.use(express.json());
@@ -127,6 +132,22 @@ const liveState = {
   warnings: [],
   calendarWarnings: []
 };
+const paperStreamClients = new Set();
+const paperLiveState = {
+  socket: null,
+  authenticated: false,
+  desiredSymbols: new Set(),
+  subscribedSymbols: new Set(),
+  reconnectTimer: null,
+  broadcastTimer: null,
+  lastSnapshotAt: 0,
+  lastAuthAt: null,
+  lastMessageAt: null,
+  lastQuoteAt: null,
+  lastDisconnectAt: null,
+  lastError: null
+};
+const livePaperOptionQuotes = new Map();
 
 function normalizeTimestamp(value) {
   if (!value) {
@@ -147,12 +168,86 @@ function getPaperValuationPolymarketMarkets() {
     : liveState.polymarketMarkets;
 }
 
+function toNonNegativeNumber(value, fallback = null) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : fallback;
+}
+
+function getOpenPaperOrders() {
+  return listPaperOrders().filter(
+    (order) => String(order.position?.status ?? "open").toLowerCase() !== "closed"
+  );
+}
+
+function getOpenPaperOptionContractSeeds() {
+  const seeds = new Map();
+
+  getOpenPaperOrders().forEach((order) => {
+    const proxySymbol = String(order.position?.marketContext?.proxySymbol ?? "").trim();
+
+    (order.position?.legs ?? []).forEach((leg) => {
+      if (leg?.kind !== "option") {
+        return;
+      }
+
+      const contractSymbol = String(leg.contractSymbol ?? "").trim();
+      if (!contractSymbol) {
+        return;
+      }
+
+      seeds.set(contractSymbol, {
+        contractSymbol,
+        strike: Number(leg.strike ?? 0) || null,
+        expiration: String(leg.expiry ?? "").trim() || null,
+        optionType: String(leg.optionType ?? "call").toLowerCase() === "put" ? "put" : "call",
+        rootSymbol: String(leg.rootSymbol ?? proxySymbol ?? "").trim() || null,
+        source: String(leg.quoteSource ?? "paper-order"),
+        sourceLabel: "Paper order",
+        isLive: leg.isLive === true,
+        hasRealBidAsk: false
+      });
+    });
+  });
+
+  return seeds;
+}
+
+function getDesiredPaperOptionSymbols() {
+  return [...getOpenPaperOptionContractSeeds().values()]
+    .filter((contract) => contract.isLive === true && contract.contractSymbol)
+    .map((contract) => contract.contractSymbol);
+}
+
+function buildPaperValuationOptionMatches() {
+  const mergedContracts = new Map(
+    liveState.optionMatches.map((contract) => [contract.contractSymbol, contract])
+  );
+  const orderSeeds = getOpenPaperOptionContractSeeds();
+
+  orderSeeds.forEach((contract, contractSymbol) => {
+    if (!mergedContracts.has(contractSymbol)) {
+      mergedContracts.set(contractSymbol, contract);
+    }
+  });
+
+  livePaperOptionQuotes.forEach((quote, contractSymbol) => {
+    mergedContracts.set(contractSymbol, {
+      ...(mergedContracts.get(contractSymbol) ?? orderSeeds.get(contractSymbol) ?? {
+        contractSymbol
+      }),
+      ...quote
+    });
+  });
+
+  return [...mergedContracts.values()];
+}
+
 function buildPaperPortfolioResponse() {
   const portfolio = buildPaperPortfolio({
     orders: listPaperOrders(),
     quotes: liveState.quotes,
     polymarketMarkets: getPaperValuationPolymarketMarkets(),
-    optionMatches: liveState.optionMatches
+    optionMatches: buildPaperValuationOptionMatches()
   });
 
   const withHistory = attachPaperOrderHistory(
@@ -185,6 +280,353 @@ function buildPaperPortfolioResponse() {
     openOrders,
     closedOrders
   };
+}
+
+function formatDiagnosticTimestamp(value) {
+  return value ? normalizeTimestamp(value) || null : null;
+}
+
+function getOptionStreamState() {
+  if (!paperLiveState.desiredSymbols.size) {
+    return "idle";
+  }
+
+  if (paperLiveState.authenticated && paperLiveState.socket?.readyState === WebSocket.OPEN) {
+    return "live";
+  }
+
+  if (paperLiveState.socket?.readyState === WebSocket.CONNECTING) {
+    return "connecting";
+  }
+
+  if (paperLiveState.reconnectTimer) {
+    return "retrying";
+  }
+
+  return "disconnected";
+}
+
+function buildStreamDiagnosticsResponse() {
+  return {
+    generatedAt: new Date().toISOString(),
+    options: {
+      provider: "Polygon / Massive websocket",
+      state: getOptionStreamState(),
+      trackedContracts: paperLiveState.desiredSymbols.size,
+      subscribedContracts: paperLiveState.subscribedSymbols.size,
+      lastAuthAt: formatDiagnosticTimestamp(paperLiveState.lastAuthAt),
+      lastMessageAt: formatDiagnosticTimestamp(paperLiveState.lastMessageAt),
+      lastQuoteAt: formatDiagnosticTimestamp(paperLiveState.lastQuoteAt),
+      lastDisconnectAt: formatDiagnosticTimestamp(paperLiveState.lastDisconnectAt),
+      lastError: paperLiveState.lastError ?? null
+    },
+    polymarket: {
+      mode: "polling",
+      refreshEverySeconds: Math.round(REFERENCE_REFRESH_MS / 1000),
+      lastRefreshAt: formatDiagnosticTimestamp(liveState.lastUpdated)
+    }
+  };
+}
+
+function writeSseJson(response, payload) {
+  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function broadcastPaperPortfolioNow() {
+  if (!paperStreamClients.size) {
+    return;
+  }
+
+  try {
+    const payload = {
+      type: "paper-portfolio",
+      lastUpdated: new Date().toISOString(),
+      paperPortfolio: buildPaperPortfolioResponse()
+    };
+
+    paperStreamClients.forEach((client) => {
+      writeSseJson(client, payload);
+    });
+  } catch (error) {
+    console.error("Unable to broadcast paper portfolio:", error.message);
+  }
+}
+
+function schedulePaperPortfolioBroadcast(delayMs = PAPER_STREAM_BROADCAST_DEBOUNCE_MS) {
+  if (paperLiveState.broadcastTimer) {
+    return;
+  }
+
+  paperLiveState.broadcastTimer = setTimeout(() => {
+    paperLiveState.broadcastTimer = null;
+    broadcastPaperPortfolioNow();
+  }, delayMs);
+}
+
+function recordPaperPortfolioSnapshotsIfDue(capturedAt = new Date().toISOString(), force = false) {
+  const capturedAtMs = new Date(capturedAt).getTime();
+  if (!force && capturedAtMs - paperLiveState.lastSnapshotAt < PAPER_ORDER_SNAPSHOT_INTERVAL_MS) {
+    return;
+  }
+
+  const paperPortfolio = buildPaperPortfolio({
+    orders: listPaperOrders(),
+    quotes: liveState.quotes,
+    polymarketMarkets: getPaperValuationPolymarketMarkets(),
+    optionMatches: buildPaperValuationOptionMatches()
+  });
+  const snapshots = paperPortfolio.openOrders
+    .filter((order) => Number.isInteger(Number(order.id)) && Number(order.id) > 0)
+    .map((order) => buildPaperOrderSnapshot(order, capturedAt));
+
+  if (snapshots.length) {
+    recordPaperOrderSnapshots(snapshots);
+  }
+
+  paperLiveState.lastSnapshotAt = capturedAtMs;
+}
+
+function clearPaperOptionReconnectTimer() {
+  if (!paperLiveState.reconnectTimer) {
+    return;
+  }
+
+  clearTimeout(paperLiveState.reconnectTimer);
+  paperLiveState.reconnectTimer = null;
+}
+
+function schedulePaperOptionReconnect() {
+  if (
+    paperLiveState.reconnectTimer ||
+    !process.env.POLYGON_API_KEY ||
+    !paperLiveState.desiredSymbols.size
+  ) {
+    return;
+  }
+
+  paperLiveState.reconnectTimer = setTimeout(() => {
+    paperLiveState.reconnectTimer = null;
+    ensurePaperOptionStream();
+  }, 3000);
+}
+
+function closePaperOptionStream() {
+  clearPaperOptionReconnectTimer();
+
+  if (paperLiveState.socket) {
+    paperLiveState.socket.close();
+  }
+
+  paperLiveState.socket = null;
+  paperLiveState.authenticated = false;
+  paperLiveState.subscribedSymbols = new Set();
+}
+
+function sendPaperOptionStreamAction(action, symbols) {
+  if (
+    !paperLiveState.socket ||
+    paperLiveState.socket.readyState !== WebSocket.OPEN ||
+    !paperLiveState.authenticated ||
+    !symbols.length
+  ) {
+    return;
+  }
+
+  const params = symbols.map((symbol) => `Q.${symbol}`).join(",");
+  paperLiveState.socket.send(JSON.stringify({ action, params }));
+}
+
+function updatePaperOptionStreamSubscriptions() {
+  if (
+    !paperLiveState.socket ||
+    paperLiveState.socket.readyState !== WebSocket.OPEN ||
+    !paperLiveState.authenticated
+  ) {
+    return;
+  }
+
+  const desiredSymbols = [...paperLiveState.desiredSymbols];
+  const subscribedSymbols = [...paperLiveState.subscribedSymbols];
+  const toSubscribe = desiredSymbols.filter((symbol) => !paperLiveState.subscribedSymbols.has(symbol));
+  const toUnsubscribe = subscribedSymbols.filter((symbol) => !paperLiveState.desiredSymbols.has(symbol));
+
+  sendPaperOptionStreamAction("unsubscribe", toUnsubscribe);
+  sendPaperOptionStreamAction("subscribe", toSubscribe);
+
+  toUnsubscribe.forEach((symbol) => {
+    paperLiveState.subscribedSymbols.delete(symbol);
+  });
+  toSubscribe.forEach((symbol) => {
+    paperLiveState.subscribedSymbols.add(symbol);
+  });
+}
+
+function handlePaperOptionQuote(message) {
+  const contractSymbol = String(message?.sym ?? "").trim();
+  if (!contractSymbol || !paperLiveState.desiredSymbols.has(contractSymbol)) {
+    return;
+  }
+
+  const bid = toNonNegativeNumber(message.bp, null);
+  const ask = toNonNegativeNumber(message.ap, null);
+  const bidSize = toNonNegativeNumber(message.bs, null);
+  const askSize = toNonNegativeNumber(message.as, null);
+  const hasBid = bid != null && bid > 0;
+  const hasAsk = ask != null && ask > 0;
+  const midpoint =
+    hasBid && hasAsk ? (bid + ask) / 2
+    : hasBid ? bid
+    : hasAsk ? ask
+    : null;
+  const contractSeed =
+    buildPaperValuationOptionMatches().find((contract) => contract.contractSymbol === contractSymbol) ??
+    getOpenPaperOptionContractSeeds().get(contractSymbol) ??
+    { contractSymbol };
+
+  livePaperOptionQuotes.set(contractSymbol, {
+    ...contractSeed,
+    contractSymbol,
+    bid,
+    ask,
+    bidSize,
+    askSize,
+    mark: midpoint,
+    lastPrice: midpoint,
+    source: "polygon-websocket",
+    sourceLabel: "Polygon.io WebSocket",
+    isLive: true,
+    hasRealBidAsk: hasBid && hasAsk,
+    updatedAt:
+      Number.isFinite(Number(message.t)) && Number(message.t) > 0
+        ? new Date(Number(message.t)).toISOString()
+        : new Date().toISOString()
+  });
+  paperLiveState.lastQuoteAt =
+    Number.isFinite(Number(message.t)) && Number(message.t) > 0
+      ? new Date(Number(message.t)).toISOString()
+      : new Date().toISOString();
+  paperLiveState.lastMessageAt = paperLiveState.lastQuoteAt;
+
+  try {
+    recordPaperPortfolioSnapshotsIfDue(
+      Number.isFinite(Number(message.t)) && Number(message.t) > 0
+        ? new Date(Number(message.t)).toISOString()
+        : new Date().toISOString()
+    );
+  } catch (error) {
+    liveState.warnings = [...liveState.warnings, `Paper-trade history unavailable: ${error.message}`].slice(-8);
+  }
+
+  schedulePaperPortfolioBroadcast();
+}
+
+function handlePaperOptionStreamMessage(event) {
+  const rawData =
+    typeof event.data === "string"
+      ? event.data
+      : Buffer.isBuffer(event.data)
+        ? event.data.toString("utf8")
+        : "";
+
+  if (!rawData) {
+    return;
+  }
+
+  let messages = [];
+
+  try {
+    messages = JSON.parse(rawData);
+  } catch (error) {
+    console.error("Unable to parse Massive options websocket payload:", error.message);
+    paperLiveState.lastError = error.message;
+    return;
+  }
+
+  paperLiveState.lastMessageAt = new Date().toISOString();
+
+  messages.forEach((message) => {
+    if (message?.ev === "status") {
+      if (message.status === "auth_success") {
+        paperLiveState.authenticated = true;
+        paperLiveState.subscribedSymbols = new Set();
+        paperLiveState.lastAuthAt = new Date().toISOString();
+        paperLiveState.lastError = null;
+        updatePaperOptionStreamSubscriptions();
+      }
+
+      return;
+    }
+
+    if (message?.ev === "Q") {
+      handlePaperOptionQuote(message);
+    }
+  });
+}
+
+function ensurePaperOptionStream() {
+  if (!process.env.POLYGON_API_KEY || !paperLiveState.desiredSymbols.size) {
+    closePaperOptionStream();
+    return;
+  }
+
+  if (
+    paperLiveState.socket &&
+    (paperLiveState.socket.readyState === WebSocket.OPEN ||
+      paperLiveState.socket.readyState === WebSocket.CONNECTING)
+  ) {
+    if (paperLiveState.authenticated) {
+      updatePaperOptionStreamSubscriptions();
+    }
+    return;
+  }
+
+  clearPaperOptionReconnectTimer();
+  const socket = new WebSocket(MASSIVE_OPTIONS_WS_URL);
+
+  paperLiveState.socket = socket;
+  paperLiveState.authenticated = false;
+  paperLiveState.subscribedSymbols = new Set();
+
+  socket.onopen = () => {
+    paperLiveState.lastError = null;
+    socket.send(JSON.stringify({ action: "auth", params: process.env.POLYGON_API_KEY }));
+  };
+  socket.onmessage = (event) => {
+    handlePaperOptionStreamMessage(event);
+  };
+  socket.onerror = (error) => {
+    paperLiveState.lastError = error?.message ?? "Unknown error";
+    console.error("Massive options websocket error:", error?.message ?? "Unknown error");
+  };
+  socket.onclose = () => {
+    if (paperLiveState.socket === socket) {
+      paperLiveState.socket = null;
+      paperLiveState.authenticated = false;
+      paperLiveState.subscribedSymbols = new Set();
+      paperLiveState.lastDisconnectAt = new Date().toISOString();
+      schedulePaperOptionReconnect();
+    }
+  };
+}
+
+function syncPaperOptionStreamSubscriptions() {
+  const desiredSymbols = new Set(getDesiredPaperOptionSymbols());
+  paperLiveState.desiredSymbols = desiredSymbols;
+
+  livePaperOptionQuotes.forEach((_quote, contractSymbol) => {
+    if (!desiredSymbols.has(contractSymbol)) {
+      livePaperOptionQuotes.delete(contractSymbol);
+    }
+  });
+
+  if (!desiredSymbols.size) {
+    closePaperOptionStream();
+    schedulePaperPortfolioBroadcast(0);
+    return;
+  }
+
+  ensurePaperOptionStream();
+  updatePaperOptionStreamSubscriptions();
 }
 
 function isFreshWithin(refreshTimestamp, maxAgeMs) {
@@ -395,7 +837,7 @@ function withDerivedQuotes(quotes) {
   ].filter(Boolean);
 }
 
-async function refreshLiveState() {
+async function refreshLiveState({ includeOptions = true } = {}) {
   const warnings = [];
 
   let quotes = liveState.quotes;
@@ -441,7 +883,7 @@ async function refreshLiveState() {
     );
 
     const results = await Promise.allSettled(
-      queries.map((query) => searchPolymarketMarkets(query, 6))
+      queries.map((query) => searchPolymarketMarkets(query, 12))
     );
 
     polymarketMarkets = deduplicateBy(
@@ -495,82 +937,91 @@ async function refreshLiveState() {
   );
 
   let optionMatches = liveState.optionMatches;
-  try {
-    const quoteMap = new Map(quotes.map((quote) => [quote.symbol, quote]));
+  if (includeOptions) {
+    try {
+      const quoteMap = new Map(quotes.map((quote) => [quote.symbol, quote]));
 
-    const optionResults = await Promise.allSettled(
-      strategyAssetUniverse.map(async (asset) => {
-        const assetMarkets = polymarketMarkets.filter((market) => matchesAsset(asset, market));
-        const leadMarket = assetMarkets[0] ?? null;
-        const optionSpot = Number(quoteMap.get(asset.optionSymbol)?.regularMarketPrice ?? 0);
-        const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? 0);
-        const targetUnderlyings = assetMarkets
-          .map((market) => parseTargetFromQuestion(market.question))
-          .filter((value) => Number.isFinite(value) && value > 0);
-        const targetUnderlying =
-          targetUnderlyings[0] || parseTargetFromQuestion(leadMarket?.question ?? "") || underlyingSpot || optionSpot;
-        const ratio = underlyingSpot > 0 ? optionSpot / underlyingSpot : 1;
-        const targetStrikes = (targetUnderlyings.length ? targetUnderlyings : [targetUnderlying]).map((value) =>
-          Math.max(Math.round(value * ratio), 1)
-        );
-        const targetStrike =
-          asset.optionSymbol === defaultStrategyConfig.optionLeg.symbol
-            ? defaultStrategyConfig.optionLeg.strike
-            : Math.max(Math.round(targetUnderlying * ratio), 1);
-        const strikeFloor = Math.max(Math.min(...targetStrikes, targetStrike) * 0.85, 1);
-        const strikeCeiling = Math.max(...targetStrikes, targetStrike) * 1.15;
-        const desiredExpiry = leadMarket?.endDate?.slice(0, 10) || defaultStrategyConfig.optionLeg.expiry;
-        const searchWindow = buildAssetOptionSearchWindow(assetMarkets, desiredExpiry);
+      const optionResults = await Promise.allSettled(
+        strategyAssetUniverse.map(async (asset) => {
+          const assetMarkets = polymarketMarkets.filter((market) => matchesAsset(asset, market));
+          const leadMarket = assetMarkets[0] ?? null;
+          const optionSpot = Number(quoteMap.get(asset.optionSymbol)?.regularMarketPrice ?? 0);
+          const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? 0);
+          const targetUnderlyings = assetMarkets
+            .map((market) => parseTargetFromQuestion(market.question))
+            .filter((value) => Number.isFinite(value) && value > 0);
+          const targetUnderlying =
+            targetUnderlyings[0] ||
+            parseTargetFromQuestion(leadMarket?.question ?? "") ||
+            underlyingSpot ||
+            optionSpot;
+          const ratio = underlyingSpot > 0 ? optionSpot / underlyingSpot : 1;
+          const targetStrikes = (targetUnderlyings.length ? targetUnderlyings : [targetUnderlying]).map((value) =>
+            Math.max(Math.round(value * ratio), 1)
+          );
+          const targetStrike =
+            asset.optionSymbol === defaultStrategyConfig.optionLeg.symbol
+              ? defaultStrategyConfig.optionLeg.strike
+              : Math.max(Math.round(targetUnderlying * ratio), 1);
+          const strikeFloor = Math.max(Math.min(...targetStrikes, targetStrike) * 0.85, 1);
+          const strikeCeiling = Math.max(...targetStrikes, targetStrike) * 1.15;
+          const desiredExpiry = leadMarket?.endDate?.slice(0, 10) || defaultStrategyConfig.optionLeg.expiry;
+          const searchWindow = buildAssetOptionSearchWindow(assetMarkets, desiredExpiry);
 
-        const [callsPayload, putsPayload] = await Promise.all([
-          fetchOptionChain({
-            symbol: asset.optionSymbol,
-            expirationFrom: searchWindow.from,
-            expirationTo: searchWindow.to,
-            optionType: "call",
-            currentSpot: optionSpot,
-            strikeHint: targetStrike,
-            strikeMin: strikeFloor,
-            strikeMax: strikeCeiling,
-            limit: 150
-          }),
-          fetchOptionChain({
-            symbol: asset.optionSymbol,
-            expirationFrom: searchWindow.from,
-            expirationTo: searchWindow.to,
-            optionType: "put",
-            currentSpot: optionSpot,
-            strikeHint: targetStrike,
-            strikeMin: strikeFloor,
-            strikeMax: strikeCeiling,
-            limit: 150
-          })
-        ]);
+          const [callsPayload, putsPayload] = await Promise.all([
+            fetchOptionChain({
+              symbol: asset.optionSymbol,
+              expirationFrom: searchWindow.from,
+              expirationTo: searchWindow.to,
+              optionType: "call",
+              currentSpot: optionSpot,
+              strikeHint: targetStrike,
+              strikeMin: strikeFloor,
+              strikeMax: strikeCeiling,
+              limit: 150
+            }),
+            fetchOptionChain({
+              symbol: asset.optionSymbol,
+              expirationFrom: searchWindow.from,
+              expirationTo: searchWindow.to,
+              optionType: "put",
+              currentSpot: optionSpot,
+              strikeHint: targetStrike,
+              strikeMin: strikeFloor,
+              strikeMax: strikeCeiling,
+              limit: 150
+            })
+          ]);
 
-        return [...callsPayload.contracts, ...putsPayload.contracts].map((contract) => ({
-          contractSymbol: contract.contractSymbol,
-          strike: contract.strike,
-          expiration: contract.expiration,
-          lastPrice: contract.lastPrice ?? contract.mark ?? null,
-          impliedVolatility: Number(contract.impliedVolatility ?? 0) || null,
-          optionType: contract.optionType,
-          bid: contract.bid,
-          ask: contract.ask,
-          source: contract.source,
-          sourceLabel: contract.sourceLabel,
-          isLive: contract.isLive === true,
-          rootSymbol: asset.optionSymbol,
-          assetId: asset.id
-        }));
-      })
-    );
+          return [...callsPayload.contracts, ...putsPayload.contracts].map((contract) => ({
+            contractSymbol: contract.contractSymbol,
+            strike: contract.strike,
+            expiration: contract.expiration,
+            mark: contract.mark ?? null,
+            lastPrice: contract.lastPrice ?? contract.mark ?? null,
+            impliedVolatility: Number(contract.impliedVolatility ?? 0) || null,
+            optionType: contract.optionType,
+            bid: contract.bid,
+            ask: contract.ask,
+            bidSize: contract.bidSize ?? null,
+            askSize: contract.askSize ?? null,
+            source: contract.source,
+            sourceLabel: contract.sourceLabel,
+            isLive: contract.isLive === true,
+            hasRealBidAsk: contract.hasRealBidAsk === true,
+            rootSymbol: asset.optionSymbol,
+            assetId: asset.id
+          }));
+        })
+      );
 
-    optionMatches = optionResults
-      .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
-      .filter(Boolean);
-  } catch (error) {
-    warnings.push(`Options unavailable: ${error.message}`);
-    optionMatches = liveState.optionMatches;
+      optionMatches = optionResults
+        .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
+        .filter(Boolean);
+    } catch (error) {
+      warnings.push(`Options unavailable: ${error.message}`);
+      optionMatches = liveState.optionMatches;
+    }
   }
 
   liveState.quotes = quotes;
@@ -579,25 +1030,16 @@ async function refreshLiveState() {
   liveState.optionMatches = optionMatches;
   liveState.lastUpdated = new Date().toISOString();
   liveState.warnings = warnings;
+  syncPaperOptionStreamSubscriptions();
 
   try {
-    const paperPortfolio = buildPaperPortfolio({
-      orders: listPaperOrders(),
-      quotes: liveState.quotes,
-      polymarketMarkets: getPaperValuationPolymarketMarkets(),
-      optionMatches: liveState.optionMatches
-    });
-    const snapshots = paperPortfolio.openOrders
-      .filter((order) => Number.isInteger(Number(order.id)) && Number(order.id) > 0)
-      .map((order) => buildPaperOrderSnapshot(order, liveState.lastUpdated));
-
-    if (snapshots.length) {
-      recordPaperOrderSnapshots(snapshots);
-    }
+    recordPaperPortfolioSnapshotsIfDue(liveState.lastUpdated, true);
   } catch (error) {
     warnings.push(`Paper-trade history unavailable: ${error.message}`);
     liveState.warnings = warnings;
   }
+
+  schedulePaperPortfolioBroadcast(0);
 }
 
 async function buildStrategiesResponse() {
@@ -624,13 +1066,18 @@ app.get("/api/health", (_request, response) => {
     lastUpdated: liveState.lastUpdated,
     macroDashboardRefreshedAt: liveState.macroDashboard?.refreshedAt ?? null,
     calendarsRefreshedAt: liveState.calendarsRefreshedAt,
-    warnings: [...liveState.warnings, ...liveState.calendarWarnings]
+    warnings: [...liveState.warnings, ...liveState.calendarWarnings],
+    streamDiagnostics: buildStreamDiagnosticsResponse()
   });
+});
+
+app.get("/api/stream-status", (_request, response) => {
+  response.json(buildStreamDiagnosticsResponse());
 });
 
 app.post("/api/refresh", async (_request, response) => {
   try {
-    await refreshLiveState();
+    await refreshLiveState({ includeOptions: true });
 
     response.json({
       ok: true,
@@ -657,6 +1104,7 @@ app.get("/api/dashboard", async (_request, response) => {
     generatedAt: new Date().toISOString(),
     lastUpdated: liveState.lastUpdated,
     warnings: [...liveState.warnings, ...liveState.calendarWarnings],
+    streamDiagnostics: buildStreamDiagnosticsResponse(),
     heroStats: buildMacroHeroStats(macroDashboard),
     macroDashboard,
     economicCalendar: liveState.economicCalendar,
@@ -722,6 +1170,26 @@ app.get("/api/strategies", async (_request, response) => {
   response.json(await buildStrategiesResponse());
 });
 
+app.get("/api/paper-orders/stream", (request, response) => {
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders?.();
+  response.write("retry: 5000\n\n");
+
+  paperStreamClients.add(response);
+  writeSseJson(response, {
+    type: "paper-portfolio",
+    lastUpdated: new Date().toISOString(),
+    paperPortfolio: buildPaperPortfolioResponse()
+  });
+
+  request.on("close", () => {
+    paperStreamClients.delete(response);
+    response.end();
+  });
+});
+
 app.get("/api/options/chain", async (request, response) => {
   const symbol = String(request.query.symbol ?? "").trim().toUpperCase();
   const expiration = String(request.query.expiration ?? "").trim();
@@ -782,7 +1250,7 @@ app.post("/api/paper-orders", async (request, response) => {
       orders: [createdOrder],
       quotes: liveState.quotes,
       polymarketMarkets: getPaperValuationPolymarketMarkets(),
-      optionMatches: liveState.optionMatches
+      optionMatches: buildPaperValuationOptionMatches()
     });
     const valuedOrder = valuedPaperPortfolio.openOrders[0] ?? valuedPaperPortfolio.orders[0] ?? null;
 
@@ -793,6 +1261,8 @@ app.post("/api/paper-orders", async (request, response) => {
     }
 
     const paperPortfolio = buildPaperPortfolioResponse();
+    syncPaperOptionStreamSubscriptions();
+    schedulePaperPortfolioBroadcast(0);
 
     response.status(201).json({
       order: createdOrder,
@@ -830,7 +1300,7 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
       orders: [updatedOrder],
       quotes: liveState.quotes,
       polymarketMarkets: getPaperValuationPolymarketMarkets(),
-      optionMatches: liveState.optionMatches
+      optionMatches: buildPaperValuationOptionMatches()
     });
     const valuedOrder =
       valuedPaperPortfolio.openOrders[0] ??
@@ -845,6 +1315,8 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
     }
 
     const paperPortfolio = buildPaperPortfolioResponse();
+    syncPaperOptionStreamSubscriptions();
+    schedulePaperPortfolioBroadcast(0);
 
     response.json({
       order: updatedOrder,
@@ -893,7 +1365,7 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
       ],
       quotes: liveState.quotes,
       polymarketMarkets: getPaperValuationPolymarketMarkets(),
-      optionMatches: liveState.optionMatches
+      optionMatches: buildPaperValuationOptionMatches()
     });
     const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0];
 
@@ -913,6 +1385,8 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
       )
     ]);
     const paperPortfolio = buildPaperPortfolioResponse();
+    syncPaperOptionStreamSubscriptions();
+    schedulePaperPortfolioBroadcast(0);
 
     response.json({
       order: updatedOrder,
@@ -960,6 +1434,8 @@ app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response)
       payload
     );
     const paperPortfolio = buildPaperPortfolioResponse();
+    syncPaperOptionStreamSubscriptions();
+    schedulePaperPortfolioBroadcast(0);
 
     response.status(201).json({
       snapshot,
@@ -994,6 +1470,8 @@ app.delete("/api/paper-orders/:id", async (request, response) => {
   deletePaperOrderSnapshots(orderId);
   deletePaperCalculatorSnapshots(orderId);
   const paperPortfolio = buildPaperPortfolioResponse();
+  syncPaperOptionStreamSubscriptions();
+  schedulePaperPortfolioBroadcast(0);
 
   response.json({
     deleted: true,
@@ -1017,7 +1495,7 @@ app.get("*", (request, response, next) => {
   });
 });
 
-refreshLiveState().catch((error) => {
+refreshLiveState({ includeOptions: true }).catch((error) => {
   liveState.warnings = [`Initial refresh failed: ${error.message}`];
 });
 try {
@@ -1029,10 +1507,10 @@ refreshCalendarState().catch((error) => {
   liveState.calendarWarnings = [`Calendar refresh failed: ${error.message}`];
 });
 setInterval(() => {
-  refreshLiveState().catch((error) => {
+  refreshLiveState({ includeOptions: false }).catch((error) => {
     liveState.warnings = [`Refresh failed: ${error.message}`];
   });
-}, 5 * 60 * 1000);
+}, REFERENCE_REFRESH_MS);
 setInterval(() => {
   try {
     refreshMacroDashboard();
@@ -1045,6 +1523,11 @@ setInterval(() => {
     liveState.calendarWarnings = [`Calendar refresh failed: ${error.message}`];
   });
 }, CALENDAR_REFRESH_MS);
+setInterval(() => {
+  paperStreamClients.forEach((client) => {
+    client.write(": heartbeat\n\n");
+  });
+}, PAPER_STREAM_HEARTBEAT_MS);
 
 app.listen(port, () => {
   console.log(`HedgeHub listening on http://localhost:${port}`);

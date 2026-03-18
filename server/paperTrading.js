@@ -1,3 +1,5 @@
+import { pickOptionReferencePrice } from "./optionPricing.js";
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -14,15 +16,42 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
-function scoreQuestionMatch(referenceQuestion, candidateQuestion) {
-  const stopWords = new Set(["the", "a", "an", "on", "of", "for", "to", "in", "by", "at", "will"]);
-  const referenceTokens = normalizeText(referenceQuestion)
-    .split(" ")
-    .map((token) => token.replace(/[^a-z0-9$]/g, ""))
-    .filter((token) => token && !stopWords.has(token));
-  const candidate = normalizeText(candidateQuestion);
+function normalizeQuestionKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[$,]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
 
-  return referenceTokens.reduce((score, token) => (candidate.includes(token) ? score + 1 : score), 0);
+function scoreQuestionMatch(referenceQuestion, candidateQuestion, targetUnderlyingValue = null) {
+  const stopWords = new Set(["the", "a", "an", "on", "of", "for", "to", "in", "by", "at", "will"]);
+  const referenceTokens = normalizeQuestionKey(referenceQuestion)
+    .split(" ")
+    .filter((token) => token && !stopWords.has(token));
+  const candidateTokens = new Set(
+    normalizeQuestionKey(candidateQuestion)
+      .split(" ")
+      .filter((token) => token && !stopWords.has(token))
+  );
+  const referenceTarget = targetUnderlyingValue ?? parseTargetFromQuestion(referenceQuestion);
+  const candidateTarget = parseTargetFromQuestion(candidateQuestion);
+  const tokenScore = referenceTokens.reduce((score, token) => {
+    if (!candidateTokens.has(token)) {
+      return score;
+    }
+
+    return score + (/\d/.test(token) ? 3 : 1);
+  }, 0);
+
+  return candidateTarget != null &&
+    referenceTarget != null &&
+    Math.abs(candidateTarget - referenceTarget) < 0.5
+    ? tokenScore + 10
+    : tokenScore;
 }
 
 function parseTargetFromQuestion(question) {
@@ -149,31 +178,7 @@ function blackScholesPrice({ type, spot, strike, timeYears, volatility, riskFree
 }
 
 function pickOptionMark(contract, fallback = 0) {
-  const lastPrice = toNumber(contract?.lastPrice);
-  if (lastPrice > 0) {
-    return lastPrice;
-  }
-
-  const mark = toNumber(contract?.mark);
-  if (mark > 0) {
-    return mark;
-  }
-
-  const bid = toNumber(contract?.bid);
-  const ask = toNumber(contract?.ask);
-  if (bid != null && ask != null && bid >= 0 && ask >= 0) {
-    return (bid + ask) / 2;
-  }
-
-  if (ask > 0) {
-    return ask;
-  }
-
-  if (bid > 0) {
-    return bid;
-  }
-
-  return fallback;
+  return pickOptionReferencePrice(contract, fallback);
 }
 
 function quoteLookup(quotes) {
@@ -184,59 +189,123 @@ function resolveQuotePrice(quotesBySymbol, symbol, fallback = 0) {
   return toNumber(quotesBySymbol.get(symbol)?.regularMarketPrice, fallback) ?? fallback;
 }
 
+function inferPolymarketMarketId(order) {
+  const explicitMarketId = String(order?.polymarketMarketId ?? "").trim();
+  if (explicitMarketId) {
+    return explicitMarketId;
+  }
+
+  const binaryLegId = String(
+    (order?.legs ?? []).find((leg) => leg?.kind === "binary" && leg?.id)?.id ?? ""
+  ).trim();
+  const markerIndex = binaryLegId.indexOf("-pm-");
+
+  return markerIndex > 0 ? binaryLegId.slice(0, markerIndex) : "";
+}
+
 function findMatchingMarket(order, polymarketMarkets) {
   const markets = polymarketMarkets ?? [];
+  const orderMarketId = inferPolymarketMarketId(order);
+  const orderMarketSlug = String(order.polymarketMarketSlug ?? "")
+    .trim()
+    .toLowerCase();
+  const orderEventSlug = String(order.polymarketEventSlug ?? "")
+    .trim()
+    .toLowerCase();
   const orderUrl = String(order.polymarketUrl ?? "").trim();
   const normalizedQuestion = normalizeText(order.polymarketQuestion);
+  const questionKey = normalizeQuestionKey(order.polymarketQuestion);
   const parsedQuestionTarget = parseTargetFromQuestion(order.polymarketQuestion);
   const targetUnderlyingValue =
     toNumber(order.marketContext?.targetUnderlyingValue, null) ??
     toNumber(order.valuationContext?.targetUnderlyingValue, null) ??
     parsedQuestionTarget;
+  const filterByEventSlug = (candidates) => {
+    if (!orderEventSlug) {
+      return candidates;
+    }
+
+    const scopedCandidates = candidates.filter(
+      (market) => String(market.eventSlug ?? "").trim().toLowerCase() === orderEventSlug
+    );
+    return scopedCandidates.length ? scopedCandidates : candidates;
+  };
+  const selectScopedMatch = (predicate) =>
+    filterByEventSlug(scopedMarkets).find(predicate) ??
+    filterByEventSlug(markets).find(predicate) ??
+    null;
   const exactTargetMatch = (candidates) =>
     candidates.find((market) => {
       const marketTarget = parseTargetFromQuestion(market.question);
       return marketTarget != null && targetUnderlyingValue != null && Math.abs(marketTarget - targetUnderlyingValue) < 0.5;
     }) ?? null;
+  const targetDistance = (question) => {
+    if (targetUnderlyingValue == null) {
+      return 0;
+    }
+
+    const marketTarget = parseTargetFromQuestion(question);
+    return marketTarget == null ? Number.MAX_SAFE_INTEGER : Math.abs(marketTarget - targetUnderlyingValue);
+  };
   const questionRank = (candidates) =>
     [...candidates].sort(
       (left, right) =>
-        scoreQuestionMatch(order.polymarketQuestion, right.question) -
-        scoreQuestionMatch(order.polymarketQuestion, left.question)
+        scoreQuestionMatch(order.polymarketQuestion, right.question, targetUnderlyingValue) -
+          scoreQuestionMatch(order.polymarketQuestion, left.question, targetUnderlyingValue) ||
+        targetDistance(left.question) - targetDistance(right.question)
     )[0] ?? null;
   const scopedMarkets = orderUrl ? markets.filter((market) => market.url === orderUrl) : markets;
+  const eventScopedMarkets = filterByEventSlug(scopedMarkets);
 
   if (!normalizedQuestion && targetUnderlyingValue == null) {
-    return scopedMarkets[0] ?? null;
+    return eventScopedMarkets[0] ?? scopedMarkets[0] ?? null;
   }
 
-  const exactQuestionMatch = scopedMarkets.find(
-    (market) => normalizeText(market.question) === normalizedQuestion
-  ) ?? markets.find((market) => normalizeText(market.question) === normalizedQuestion);
+  if (orderMarketId) {
+    const idMatch = selectScopedMatch((market) => String(market.id ?? "").trim() === orderMarketId);
+    if (idMatch) {
+      return idMatch;
+    }
+  }
+
+  if (orderMarketSlug) {
+    const slugMatch = selectScopedMatch(
+      (market) => String(market.slug ?? "").trim().toLowerCase() === orderMarketSlug
+    );
+    if (slugMatch) {
+      return slugMatch;
+    }
+  }
+
+  const exactQuestionMatch = selectScopedMatch(
+    (market) =>
+      normalizeText(market.question) === normalizedQuestion ||
+      normalizeQuestionKey(market.question) === questionKey
+  );
   if (exactQuestionMatch) {
     return exactQuestionMatch;
   }
 
-  const scopedTargetMatch = exactTargetMatch(scopedMarkets);
+  const scopedTargetMatch = exactTargetMatch(eventScopedMarkets);
   if (scopedTargetMatch) {
     return scopedTargetMatch;
   }
 
-  const globalTargetMatch = exactTargetMatch(markets);
+  const globalTargetMatch = exactTargetMatch(filterByEventSlug(markets));
   if (globalTargetMatch) {
     return globalTargetMatch;
   }
 
   if (normalizedQuestion) {
-    const scopedQuestionMatch = questionRank(scopedMarkets);
+    const scopedQuestionMatch = questionRank(eventScopedMarkets);
     if (scopedQuestionMatch) {
       return scopedQuestionMatch;
     }
 
-    return questionRank(markets);
+    return questionRank(filterByEventSlug(markets));
   }
 
-  return scopedMarkets[0] ?? null;
+  return eventScopedMarkets[0] ?? scopedMarkets[0] ?? null;
 }
 
 function findMatchingOption(leg, optionMatches, proxySymbol) {
@@ -398,6 +467,11 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     throw new Error("At least one paper-trade leg is required");
   }
 
+  const polymarketMarketId = inferPolymarketMarketId({
+    ...source,
+    legs
+  });
+
   const referenceYesPrice = clamp(
     toNumber(source.marketReferenceYesPrice, defaults.marketReferenceYesPrice ?? 0.5) ?? 0.5,
     0.001,
@@ -425,6 +499,9 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     assetLabel: String(source.assetLabel ?? defaults.assetLabel ?? ""),
     strategyType: String(source.strategyType ?? defaults.strategyType ?? ""),
     purchaseDate,
+    polymarketMarketId,
+    polymarketMarketSlug: String(source.polymarketMarketSlug ?? defaults.polymarketMarketSlug ?? ""),
+    polymarketEventSlug: String(source.polymarketEventSlug ?? defaults.polymarketEventSlug ?? ""),
     polymarketQuestion: String(source.polymarketQuestion ?? defaults.polymarketQuestion ?? ""),
     polymarketUrl: String(source.polymarketUrl ?? defaults.polymarketUrl ?? ""),
     polymarketSource: String(source.polymarketSource ?? defaults.polymarketSource ?? "Polymarket"),
@@ -852,6 +929,9 @@ export function buildPaperPortfolio({
       isClosed,
       closedAt: order.closedAt ?? "",
       closedDate: order.closedDate ?? "",
+      polymarketMarketId: inferPolymarketMarketId(order),
+      polymarketMarketSlug: order.polymarketMarketSlug ?? "",
+      polymarketEventSlug: order.polymarketEventSlug ?? "",
       polymarketQuestion: order.polymarketQuestion,
       polymarketUrl: order.polymarketUrl,
       polymarketSource: order.polymarketSource,

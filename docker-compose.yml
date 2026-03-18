@@ -1,7 +1,7 @@
 services:
   hedgehub:
     container_name: ${HEDGEHUB_CONTAINER_NAME:-hedgehub}
-    image: ${HEDGEHUB_IMAGE:-ghcr.io/qudy2001/hedgehub:latest}
+    image: ${HEDGEHUB_IMAGE:-ghcr.io/qudy2001/hedgehub-livedata:latest}
     init: true
     restart: unless-stopped
     ports:

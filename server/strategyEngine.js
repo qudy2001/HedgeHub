@@ -3,6 +3,7 @@ import {
   fallbackPolymarketMarkets,
   strategyAssetUniverse
 } from "./marketCatalog.js";
+import { pickOptionReferencePrice } from "./optionPricing.js";
 import { isTradablePolymarketMarket } from "./providers/polymarket.js";
 
 function erf(x) {
@@ -245,6 +246,29 @@ function formatNumber(value, digits = 2) {
   }
 
   return Number(value.toFixed(digits));
+}
+
+const TARGET_OPTION_QUOTE_SIZE_THRESHOLDS = [10, 25, 50];
+const DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD = TARGET_OPTION_QUOTE_SIZE_THRESHOLDS[0];
+
+function quoteSizeMeetsThreshold(option, threshold = DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD) {
+  const bidSize = Number(option?.bidSize);
+  const askSize = Number(option?.askSize);
+
+  return Number.isFinite(bidSize) && Number.isFinite(askSize) && bidSize > threshold && askSize > threshold;
+}
+
+function getMinimumQuoteSize(optionLegBlueprints, side) {
+  const sizeKey = side === "ask" ? "marketAskSize" : "marketBidSize";
+  const sizes = optionLegBlueprints
+    .map((leg) => Number(leg?.[sizeKey]))
+    .filter((size) => Number.isFinite(size));
+
+  if (!sizes.length) {
+    return null;
+  }
+
+  return Math.min(...sizes);
 }
 
 function roundContracts(value, minimum = 1) {
@@ -959,10 +983,18 @@ function buildCombination({
     (sum, leg) => sum + (leg.action === "LONG" ? (leg.marketAsk ?? leg.entryPrice) : -(leg.marketBid ?? leg.entryPrice)),
     0
   );
+  const targetOptionBidSize = getMinimumQuoteSize(optionLegBlueprints, "bid");
+  const targetOptionAskSize = getMinimumQuoteSize(optionLegBlueprints, "ask");
+  const targetOptionQuoteSize =
+    targetOptionBidSize != null && targetOptionAskSize != null
+      ? Math.min(targetOptionBidSize, targetOptionAskSize)
+      : null;
+  const hasRealNetSpread =
+    optionLegBlueprints.length > 0 && optionLegBlueprints.every((leg) => leg.hasRealBidAsk === true);
   const spreadPct =
-    Math.abs(netAsk) + Math.abs(netBid) > 0
+    hasRealNetSpread && Math.abs(netAsk) + Math.abs(netBid) > 0
       ? (Math.abs(netAsk - netBid) / Math.max(Math.abs((netAsk + netBid) / 2), 0.01)) * 100
-      : 0;
+      : null;
   const primaryPolymarketLeg = payoffLegs.find((leg) => leg.kind === "binary") ?? null;
   const polymarketPrice = primaryPolymarketLeg?.entryPrice ?? market.yesPrice;
   const polymarketPriceSide = primaryPolymarketLeg?.outcome ?? "YES";
@@ -973,6 +1005,9 @@ function buildCombination({
       .join("-")}`,
     assetId: asset.id,
     assetLabel: asset.label,
+    polymarketMarketId: market.id,
+    polymarketMarketSlug: market.slug ?? "",
+    polymarketEventSlug: market.eventSlug ?? "",
     polymarketQuestion: market.question,
     polymarketSource: market.source || "live",
     polymarketUrl: market.url,
@@ -1005,6 +1040,9 @@ function buildCombination({
     theoPrice: formatNumber(structureEntryPerUnit, 4),
     bid: formatNumber(netBid, 4),
     ask: formatNumber(netAsk, 4),
+    targetOptionBidSize: formatNumber(targetOptionBidSize, 0),
+    targetOptionAskSize: formatNumber(targetOptionAskSize, 0),
+    targetOptionQuoteSize: formatNumber(targetOptionQuoteSize, 0),
     bidAskSpread: formatNumber(spreadPct, 2),
     expPayoff: formatNumber(expPayoff, 2),
     payoffCurve,
@@ -1013,6 +1051,9 @@ function buildCombination({
       theoPrice: formatNumber(structureEntryPerUnit, 4),
       bid: formatNumber(netBid, 4),
       ask: formatNumber(netAsk, 4),
+      targetOptionBidSize: formatNumber(targetOptionBidSize, 0),
+      targetOptionAskSize: formatNumber(targetOptionAskSize, 0),
+      targetOptionQuoteSize: formatNumber(targetOptionQuoteSize, 0),
       breakevens,
       probabilityOfProfit: formatNumber(probabilityOfProfit, 2)
     },
@@ -1059,8 +1100,10 @@ function buildCombination({
             strike: formatNumber(leg.strike, 1),
             bid: leg.marketBid,
             ask: leg.marketAsk,
+            bidSize: formatNumber(leg.marketBidSize, 0),
+            askSize: formatNumber(leg.marketAskSize, 0),
             spread:
-              leg.marketBid != null && leg.marketAsk != null
+              leg.hasRealBidAsk === true && leg.marketBid != null && leg.marketAsk != null
                 ? formatNumber(
                     (Math.abs(leg.marketAsk - leg.marketBid) /
                       Math.max(Math.abs((leg.marketAsk + leg.marketBid) / 2), 0.01)) *
@@ -1075,7 +1118,8 @@ function buildCombination({
             impliedVolatility: formatNumber(leg.impliedVolatility, 4),
             contractMultiplier: leg.contractMultiplier,
             quoteSource: leg.quoteSource ?? "seed",
-            isLive: leg.isLive === true
+            isLive: leg.isLive === true,
+            hasRealBidAsk: leg.hasRealBidAsk === true
           }
     )
   };
@@ -1136,19 +1180,8 @@ function buildStrategyFinder({
 	          : asset.conversionFallback;
 	      const targetSpot = Math.max(targetValue * ratio, currentOptionSpot || 1);
 
-	      const buildLeg = (option, action) => {
-	        const price =
-          (Number.isFinite(option.lastPrice) && option.lastPrice > 0
-            ? option.lastPrice
-            : Number.isFinite(option.mark) && option.mark > 0
-              ? option.mark
-              : Number.isFinite(option.bid) && Number.isFinite(option.ask) && option.bid >= 0 && option.ask >= 0
-                ? (option.bid + option.ask) / 2
-                : Number.isFinite(option.ask) && option.ask > 0
-                  ? option.ask
-                  : Number.isFinite(option.bid) && option.bid > 0
-                    ? option.bid
-                    : option.projectedTargetPrice ?? 0.05);
+      const buildLeg = (option, action) => {
+        const price = pickOptionReferencePrice(option, option.projectedTargetPrice ?? 0.05);
         const quotes =
           option.bid != null && option.ask != null
             ? {
@@ -1169,10 +1202,13 @@ function buildStrategyFinder({
           targetSpot: formatNumber(targetSpot, 2),
           marketBid: quotes.bid,
           marketAsk: quotes.ask,
+          marketBidSize: formatNumber(Number(option.bidSize), 0),
+          marketAskSize: formatNumber(Number(option.askSize), 0),
           quoteSource: option.source || (option.isModeled ? "modeled" : "seed"),
-	          isLive: option.isLive === true
-	        };
-	      };
+          isLive: option.isLive === true,
+          hasRealBidAsk: option.hasRealBidAsk === true
+        };
+      };
 
 	      return expiries.flatMap((expiry) => {
 	        const expiryCalls = [...(callUniverseByExpiry.get(expiry) ?? [])].sort((left, right) => left.strike - right.strike);
@@ -1241,6 +1277,17 @@ function buildStrategyFinder({
 	            : null
 	        ]
 	          .filter(Boolean)
+	          .filter((strategy) =>
+	            strategy.legs.every((leg) =>
+	              quoteSizeMeetsThreshold(
+	                {
+	                  bidSize: leg.marketBidSize,
+	                  askSize: leg.marketAskSize
+	                },
+	                DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
+	              )
+	            )
+	          )
 	          .filter((strategy, index, array) => {
 	            const signature = `${expiry}:${strategy.label}:${strategy.legs
 	              .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
@@ -1282,7 +1329,9 @@ function buildStrategyFinder({
         to: selectedRow?.expiration ?? defaultStrategyConfig.optionLeg.expiry
       },
       priceRange: "+5% to +10%",
-      strategyTypes: [...new Set(rows.map((row) => row.strategyType))]
+      strategyTypes: [...new Set(rows.map((row) => row.strategyType))],
+      targetOptionQuoteSizeThresholds: TARGET_OPTION_QUOTE_SIZE_THRESHOLDS,
+      defaultTargetOptionQuoteSizeThreshold: DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
     },
     rows: rows.sort((left, right) => {
       if (right.rewardRisk !== left.rewardRisk) {
@@ -1318,7 +1367,7 @@ function buildScenarioFromConfig({
     parseTargetFromQuestion(polymarketMarket?.question ?? "") || config.yesLeg.targetValue;
   const conversionRatio = currentUnderlyingSpot > 0 ? currentOptionSpot / currentUnderlyingSpot : 1;
   const targetOptionSpot = Math.max(targetUnderlyingValue * conversionRatio, config.optionLeg.strike);
-  const premium = optionCandidates[0]?.lastPrice ?? config.optionLeg.premium;
+  const premium = pickOptionReferencePrice(optionCandidates[0], config.optionLeg.premium);
   const timeSeriesDates = buildDateSeries(config.optionLeg.expiry);
   const now = new Date();
   const daysToExpiry = Math.max(
@@ -1535,19 +1584,23 @@ function buildAssetScans({
               ? currentOptionSpot / currentUnderlyingSpot
               : asset.conversionFallback;
           const proxyTarget = Math.max(targetValue * ratio, currentOptionSpot || 0);
-	          const optionUniverse = getOptionUniverseForMarket({
-	            asset,
-	            market,
-	            liveOptions,
-	            currentOptionSpot,
-	            currentUnderlyingSpot,
-	            fallbackVolatility: fallbackVolatility[asset.id] || 0.25,
-	            optionType: "call"
-	          });
+          const optionUniverse = getOptionUniverseForMarket({
+            asset,
+            market,
+            liveOptions,
+            currentOptionSpot,
+            currentUnderlyingSpot,
+            fallbackVolatility: fallbackVolatility[asset.id] || 0.25,
+            optionType: "call"
+          }).filter((option) => quoteSizeMeetsThreshold(option, DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD));
           const option = optionUniverse
             .sort((left, right) => {
-              const leftDistance = Math.abs((left.projectedTargetPrice ?? left.lastPrice) - 0.45);
-              const rightDistance = Math.abs((right.projectedTargetPrice ?? right.lastPrice) - 0.45);
+              const leftDistance = Math.abs(
+                pickOptionReferencePrice(left, left.projectedTargetPrice ?? 0) - 0.45
+              );
+              const rightDistance = Math.abs(
+                pickOptionReferencePrice(right, right.projectedTargetPrice ?? 0) - 0.45
+              );
               if (leftDistance !== rightDistance) {
                 return leftDistance - rightDistance;
               }
@@ -1558,6 +1611,8 @@ function buildAssetScans({
           if (!parsedTarget || !option || !proxyTarget || !market.yesPrice) {
             return null;
           }
+
+          const optionReferencePrice = pickOptionReferencePrice(option, option.projectedTargetPrice ?? 0);
 
           const timeToExpiryYears = Math.max(
             differenceInDays(
@@ -1575,7 +1630,7 @@ function buildAssetScans({
           });
 
           const grossYesUnits = market.yesPrice ? 1000 / market.yesPrice : 0;
-          const shortUnits = option.lastPrice ? 1000 / option.lastPrice : 0;
+          const shortUnits = optionReferencePrice ? 1000 / optionReferencePrice : 0;
           const projectedProfit = grossYesUnits - shortUnits * theoreticalPrice + 1000;
 
           return {
@@ -1587,7 +1642,7 @@ function buildAssetScans({
             optionReference: asset.referenceSymbol,
             optionStrike: option.strike,
             optionExpiry: option.expiration,
-            liveOptionPrice: formatNumber(option.lastPrice, 4),
+            liveOptionPrice: formatNumber(optionReferencePrice, 4),
             optionPriceSource: option.isModeled ? "modeled" : "live",
             theoreticalOptionPriceAtTarget: formatNumber(theoreticalPrice, 4),
             targetUnderlyingValue: formatNumber(targetValue, 2),

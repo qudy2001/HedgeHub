@@ -423,6 +423,70 @@ a {
   margin: 6px 0 0;
 }
 
+.macro-layout-diagnostics {
+  display: grid;
+  gap: 8px;
+  min-width: min(100%, 420px);
+  padding: 10px 12px;
+  border-radius: calc(var(--radius-panel) - 6px);
+  border: 1px solid rgba(56, 189, 248, 0.14);
+  background: rgba(7, 13, 26, 0.54);
+}
+
+.macro-layout-diagnostics__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.macro-layout-diagnostics__label {
+  min-width: 74px;
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.macro-layout-diagnostics__state {
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.72);
+  color: var(--text);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.macro-layout-diagnostics__state--live {
+  border-color: rgba(45, 212, 191, 0.28);
+  background: rgba(13, 148, 136, 0.18);
+  color: #ccfbf1;
+}
+
+.macro-layout-diagnostics__state--connecting,
+.macro-layout-diagnostics__state--retrying,
+.macro-layout-diagnostics__state--polling {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(180, 83, 9, 0.16);
+  color: #fef3c7;
+}
+
+.macro-layout-diagnostics__state--disconnected {
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(127, 29, 29, 0.18);
+  color: #fecaca;
+}
+
+.macro-layout-diagnostics__state--idle {
+  border-color: rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.6);
+  color: var(--muted);
+}
+
 .macro-dashboard-bar__actions {
   display: grid;
   gap: 10px;
@@ -1963,6 +2027,12 @@ a {
   cursor: pointer;
 }
 
+.chart-toggle--compact {
+  padding: 9px 10px;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
 .chart-toggle--active {
   border-color: rgba(41, 98, 255, 0.4);
   background: rgba(41, 98, 255, 0.12);
@@ -3128,6 +3198,11 @@ a {
     display: grid;
   }
 
+  .macro-layout-diagnostics,
+  .macro-dashboard-bar__actions {
+    min-width: 0;
+  }
+
   .macro-atlas__side {
     min-width: 0;
   }
@@ -3187,6 +3262,10 @@ a {
   .macro-load-panel__header,
   .macro-load-panel__item,
   .macro-section-shell__toolbar {
+    display: grid;
+  }
+
+  .macro-layout-diagnostics__row {
     display: grid;
   }
 

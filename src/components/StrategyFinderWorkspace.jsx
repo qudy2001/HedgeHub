@@ -108,6 +108,25 @@ function formatNumber(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function formatWholeNumber(value) {
+  if (value == null || Number.isNaN(value)) {
+    return null;
+  }
+
+  return String(Math.round(Number(value)));
+}
+
+function formatQuoteSizePair(bidSize, askSize) {
+  const bidSizeLabel = formatWholeNumber(bidSize);
+  const askSizeLabel = formatWholeNumber(askSize);
+
+  if (!bidSizeLabel || !askSizeLabel) {
+    return null;
+  }
+
+  return `${bidSizeLabel}/${askSizeLabel}`;
+}
+
 function compareValues(left, right, direction) {
   if (left == null && right == null) {
     return 0;
@@ -397,6 +416,11 @@ function buildPnlFilterSummary({ maxProfitMin, maxProfitMax, maxLossMin, maxLoss
   return activeFilters.length === 1 ? activeFilters[0] : `P&L filters (${activeFilters.length})`;
 }
 
+function buildQuoteSizeFilterSummary(threshold) {
+  const thresholdLabel = formatWholeNumber(threshold);
+  return thresholdLabel ? `Bid/ask size > ${thresholdLabel}` : "Bid/ask size";
+}
+
 const DEFAULT_MAX_LOSS_FLOOR = "-3000";
 
 function calculateSpreadPercent(bid, ask) {
@@ -511,8 +535,10 @@ function formatQuoteSourceLabel(leg) {
     return "Polymarket";
   }
 
+  const quoteSizePair = formatQuoteSizePair(leg?.bidSize, leg?.askSize);
+
   if (leg?.isLive === true || leg?.quoteSource === "polygon" || leg?.quoteSource === "Polygon.io") {
-    return "Polygon.io";
+    return quoteSizePair ? `Polygon.io · size ${quoteSizePair}` : "Polygon.io";
   }
 
   if (
@@ -541,14 +567,16 @@ function formatOptionReferenceLabel(leg) {
 function formatContractChoiceLabel(contract) {
   const bidLabel = formatNumber(contract?.bid, 2) ?? "n/a";
   const askLabel = formatNumber(contract?.ask, 2) ?? "n/a";
+  const quoteSizePair = formatQuoteSizePair(contract?.bidSize, contract?.askSize);
+  const sizeSuffix = quoteSizePair ? ` · size ${quoteSizePair}` : "";
 
   if (contract?.isLive === true && contract?.contractSymbol) {
-    return `${contract.contractSymbol} · bid ${bidLabel} · ask ${askLabel}`;
+    return `${contract.contractSymbol} · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}`;
   }
 
   return `Synthetic ${formatNumber(contract?.strike, 1)}${contract?.optionType === "put" ? "P" : "C"} · ${
     contract?.expiration
-  } · bid ${bidLabel} · ask ${askLabel}`;
+  } · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}`;
 }
 
 function binaryPriceFromYes(outcome, yesPrice) {
@@ -911,9 +939,13 @@ export default function StrategyFinderWorkspace({
   const availableBiasTags = BIAS_FILTER_ORDER.filter((tag) =>
     rows.some((row) => (row.marketBias ?? "Neutral") === tag)
   );
+  const quoteSizeThresholdOptions = finder?.filters?.targetOptionQuoteSizeThresholds ?? [10, 25, 50];
+  const defaultQuoteSizeThreshold =
+    Number(finder?.filters?.defaultTargetOptionQuoteSizeThreshold ?? quoteSizeThresholdOptions[0]) || 10;
   const availableStrategyTypesKey = availableStrategyTypes.join("|");
   const availableAssetsKey = availableAssets.join("|");
   const availableBiasTagsKey = availableBiasTags.join("|");
+  const quoteSizeThresholdOptionsKey = quoteSizeThresholdOptions.join("|");
   const detailRef = useRef(null);
   const filterMenuRefs = useRef({});
   const hasHydratedFiltersRef = useRef(false);
@@ -930,6 +962,7 @@ export default function StrategyFinderWorkspace({
   const [activeAssets, setActiveAssets] = useState(availableAssets);
   const [activeStrategyTypes, setActiveStrategyTypes] = useState(availableStrategyTypes);
   const [activeBiasTags, setActiveBiasTags] = useState(availableBiasTags);
+  const [targetOptionQuoteSizeThreshold, setTargetOptionQuoteSizeThreshold] = useState(defaultQuoteSizeThreshold);
   const [maxProfitMin, setMaxProfitMin] = useState("");
   const [maxProfitMax, setMaxProfitMax] = useState("");
   const [maxLossMin, setMaxLossMin] = useState(DEFAULT_MAX_LOSS_FLOOR);
@@ -940,6 +973,8 @@ export default function StrategyFinderWorkspace({
   const [paperTradeDate, setPaperTradeDate] = useState("");
   const [paperOrderState, setPaperOrderState] = useState(null);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
+  const [optionPriceRefreshing, setOptionPriceRefreshing] = useState(false);
+  const [optionPriceRefreshState, setOptionPriceRefreshState] = useState(null);
   const minProfitThreshold = parseOptionalNumber(maxProfitMin);
   const maxProfitThreshold = parseOptionalNumber(maxProfitMax);
   const minLossThreshold = parseOptionalNumber(maxLossMin);
@@ -956,6 +991,7 @@ export default function StrategyFinderWorkspace({
       setActiveAssets(availableAssets);
       setActiveStrategyTypes(availableStrategyTypes);
       setActiveBiasTags(availableBiasTags);
+      setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold);
       setControls(finder.calculatorDefaults ?? null);
       hasHydratedFiltersRef.current = true;
       return;
@@ -991,7 +1027,17 @@ export default function StrategyFinderWorkspace({
 
       return next.length ? next : availableBiasTags;
     });
-  }, [availableAssetsKey, availableStrategyTypesKey, availableBiasTagsKey, finder]);
+    setTargetOptionQuoteSizeThreshold((current) =>
+      quoteSizeThresholdOptions.includes(current) ? current : defaultQuoteSizeThreshold
+    );
+  }, [
+    availableAssetsKey,
+    availableStrategyTypesKey,
+    availableBiasTagsKey,
+    defaultQuoteSizeThreshold,
+    finder,
+    quoteSizeThresholdOptionsKey
+  ]);
 
   const filteredRows = rows.filter((row) => {
     const withinFrom = !dateFrom || row.expiration >= dateFrom;
@@ -999,8 +1045,11 @@ export default function StrategyFinderWorkspace({
     const assetMatch = activeAssets.includes(row.assetLabel);
     const strategyMatch = activeStrategyTypes.includes(row.strategyType);
     const biasMatch = activeBiasTags.includes(row.marketBias ?? "Neutral");
+    const numericTargetOptionQuoteSize = Number(row.targetOptionQuoteSize);
     const numericMaxProfit = Number(row.maxProfit);
     const numericMaxLoss = Number(row.maxLoss);
+    const quoteSizeMatch =
+      Number.isFinite(numericTargetOptionQuoteSize) && numericTargetOptionQuoteSize > targetOptionQuoteSizeThreshold;
     const maxProfitMatch =
       (minProfitThreshold == null ||
         row.maxProfitUnbounded === true ||
@@ -1025,6 +1074,7 @@ export default function StrategyFinderWorkspace({
       assetMatch &&
       strategyMatch &&
       biasMatch &&
+      quoteSizeMatch &&
       maxProfitMatch &&
       maxLossMatch
     );
@@ -1073,10 +1123,13 @@ export default function StrategyFinderWorkspace({
               strike: Number(leg.strike),
               bid: Number(leg.bid ?? 0),
               ask: Number(leg.ask ?? 0),
+              bidSize: leg.bidSize != null ? Number(leg.bidSize) : null,
+              askSize: leg.askSize != null ? Number(leg.askSize) : null,
               contractSymbol: leg.contractSymbol ?? "",
               impliedVolatility: Number(leg.impliedVolatility ?? 0) || 0.24,
               quoteSource: leg.quoteSource ?? "seed",
-              isLive: leg.isLive === true
+              isLive: leg.isLive === true,
+              hasRealBidAsk: leg.hasRealBidAsk === true
             }
           ])
       ),
@@ -1210,6 +1263,7 @@ export default function StrategyFinderWorkspace({
     setActiveAssets(availableAssets);
     setActiveStrategyTypes(availableStrategyTypes);
     setActiveBiasTags(availableBiasTags);
+    setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold);
     setMaxProfitMin("");
     setMaxProfitMax("");
     setMaxLossMin(DEFAULT_MAX_LOSS_FLOOR);
@@ -1261,6 +1315,8 @@ export default function StrategyFinderWorkspace({
     setPaperTradeDate(currentDate || new Date().toISOString().slice(0, 10));
     setPaperOrderState(null);
     setPaperOrderSaving(false);
+    setOptionPriceRefreshing(false);
+    setOptionPriceRefreshState(null);
   }, [currentDate, selectedRow?.id]);
 
   const datePresets = buildDatePresets(currentDate || finder?.filters?.dateRange?.from || "");
@@ -1272,6 +1328,7 @@ export default function StrategyFinderWorkspace({
   const productSummary = buildSelectionSummary(activeAssets, availableAssets, "Products");
   const strategySummary = buildSelectionSummary(activeStrategyTypes, availableStrategyTypes, "Strategy types");
   const biasSummary = buildSelectionSummary(activeBiasTags, availableBiasTags, "Tags");
+  const quoteSizeSummary = buildQuoteSizeFilterSummary(targetOptionQuoteSizeThreshold);
   const pnlSummary = buildPnlFilterSummary({
     maxProfitMin: minProfitThreshold,
     maxProfitMax: maxProfitThreshold,
@@ -1299,6 +1356,8 @@ export default function StrategyFinderWorkspace({
     const strike = Number(config.strike ?? leg.strike);
     const bid = Number(config.bid ?? leg.bid);
     const ask = Number(config.ask ?? leg.ask);
+    const bidSize = config.bidSize ?? leg.bidSize ?? null;
+    const askSize = config.askSize ?? leg.askSize ?? null;
 
     return {
       ...leg,
@@ -1308,7 +1367,13 @@ export default function StrategyFinderWorkspace({
       strike: Number.isFinite(strike) ? strike : Number(leg.strike),
       bid: Number.isFinite(bid) ? bid : null,
       ask: Number.isFinite(ask) ? ask : null,
-      spread: calculateSpreadPercent(config.bid ?? leg.bid, config.ask ?? leg.ask),
+      bidSize: bidSize != null ? Number(bidSize) : null,
+      askSize: askSize != null ? Number(askSize) : null,
+      hasRealBidAsk: config.hasRealBidAsk === true || leg.hasRealBidAsk === true,
+      spread:
+        config.hasRealBidAsk === true || leg.hasRealBidAsk === true
+          ? calculateSpreadPercent(config.bid ?? leg.bid, config.ask ?? leg.ask)
+          : null,
       contractSymbol: config.contractSymbol ?? leg.contractSymbol ?? "",
       impliedVolatility:
         Number(config.impliedVolatility ?? leg.impliedVolatility ?? 0) ||
@@ -1497,6 +1562,9 @@ export default function StrategyFinderWorkspace({
         assetLabel: selectedRow.assetLabel,
         strategyType: selectedRow.strategyType,
         purchaseDate: paperTradeDate || currentDate || new Date().toISOString().slice(0, 10),
+        polymarketMarketId: selectedRow.polymarketMarketId,
+        polymarketMarketSlug: selectedRow.polymarketMarketSlug,
+        polymarketEventSlug: selectedRow.polymarketEventSlug,
         polymarketQuestion: selectedRow.polymarketQuestion,
         polymarketUrl: selectedRow.polymarketUrl,
         polymarketSource: selectedRow.polymarketSource,
@@ -1690,12 +1758,12 @@ export default function StrategyFinderWorkspace({
 
   async function loadOptionChain({ expiration, optionType, strikeHint = 0, force = false }) {
     if (!optionRootSymbol || !expiration) {
-      return;
+      return null;
     }
 
     const requestKey = buildChainKey(optionRootSymbol, expiration, optionType);
     if (!force && (optionChains[requestKey] || optionChainStatus[requestKey]?.loading)) {
-      return;
+      return optionChains[requestKey] ?? null;
     }
 
     setOptionChainStatus((current) => ({
@@ -1729,6 +1797,7 @@ export default function StrategyFinderWorkspace({
           error: null
         }
       }));
+      return payload;
     } catch (error) {
       setOptionChainStatus((current) => ({
         ...current,
@@ -1737,6 +1806,7 @@ export default function StrategyFinderWorkspace({
           error: error.message
         }
       }));
+      return null;
     }
   }
 
@@ -1790,13 +1860,16 @@ export default function StrategyFinderWorkspace({
           strike: contract.strike,
           bid: contract.bid,
           ask: contract.ask,
+          bidSize: contract.bidSize ?? null,
+          askSize: contract.askSize ?? null,
           contractSymbol: contract.contractSymbol,
           impliedVolatility:
             Number(contract.impliedVolatility ?? 0) ||
             Number(current?.legConfigs?.[legId]?.impliedVolatility ?? 0) ||
             0.24,
           quoteSource: contract.sourceLabel ?? contract.source ?? "chain",
-          isLive: contract.isLive === true
+          isLive: contract.isLive === true,
+          hasRealBidAsk: contract.hasRealBidAsk === true
         }
       },
       legEdits: {
@@ -1818,6 +1891,100 @@ export default function StrategyFinderWorkspace({
         force: true
       });
     });
+  }
+
+  function selectRefreshContractForLeg(leg, contracts) {
+    if (!Array.isArray(contracts) || !contracts.length) {
+      return null;
+    }
+
+    if (leg.contractSymbol) {
+      const exactMatch = contracts.find((contract) => contract.contractSymbol === leg.contractSymbol);
+      if (exactMatch) {
+        return exactMatch;
+      }
+    }
+
+    const targetStrike = Number(leg.strike ?? 0);
+    return [...contracts]
+      .filter(
+        (contract) =>
+          String(contract.optionType ?? "") === String(leg.optionType ?? "") &&
+          String(contract.expiration ?? "") === String(leg.expiry ?? "")
+      )
+      .sort((left, right) => {
+        const leftDistance = Math.abs(Number(left.strike ?? 0) - targetStrike);
+        const rightDistance = Math.abs(Number(right.strike ?? 0) - targetStrike);
+
+        return (
+          leftDistance - rightDistance ||
+          Number(right.hasRealBidAsk === true) - Number(left.hasRealBidAsk === true)
+        );
+      })[0] ?? null;
+  }
+
+  async function refreshCalculatorOptionPrices() {
+    if (!effectiveOptionLegs.length || !optionRootSymbol) {
+      return;
+    }
+
+    setOptionPriceRefreshing(true);
+    setOptionPriceRefreshState(null);
+
+    try {
+      const uniqueRequests = Array.from(
+        new Map(
+          effectiveOptionLegs.map((leg) => [
+            buildChainKey(optionRootSymbol, leg.expiry, leg.optionType),
+            {
+              expiration: leg.expiry,
+              optionType: leg.optionType,
+              strikeHint: leg.strike,
+              force: true
+            }
+          ])
+        ).values()
+      );
+
+      const refreshedChains = await Promise.all(
+        uniqueRequests.map(async (request) => [
+          buildChainKey(optionRootSymbol, request.expiration, request.optionType),
+          await loadOptionChain(request)
+        ])
+      );
+      const refreshedChainMap = new Map(refreshedChains);
+      let updatedCount = 0;
+
+      effectiveOptionLegs.forEach((leg) => {
+        const requestKey = buildChainKey(optionRootSymbol, leg.expiry, leg.optionType);
+        const chainPayload = refreshedChainMap.get(requestKey) ?? optionChains[requestKey] ?? null;
+        const contract = selectRefreshContractForLeg(leg, chainPayload?.contracts ?? []);
+
+        if (!contract) {
+          return;
+        }
+
+        applyChainContractToLeg(leg.id, contract);
+        updatedCount += 1;
+      });
+
+      setOptionPriceRefreshState({
+        tone: updatedCount === effectiveOptionLegs.length ? "success" : "warning",
+        message:
+          updatedCount === 0
+            ? "No updated option prices were returned for the visible legs."
+            : updatedCount === effectiveOptionLegs.length
+              ? `Refreshed ${updatedCount} option leg${updatedCount === 1 ? "" : "s"}.`
+              : `Refreshed ${updatedCount} of ${effectiveOptionLegs.length} option legs.`
+      });
+    } catch (error) {
+      setOptionPriceRefreshState({
+        tone: "error",
+        message: error.message || "Unable to refresh option prices."
+      });
+    } finally {
+      setOptionPriceRefreshing(false);
+    }
   }
 
   const editorChainRequests = Array.from(
@@ -2134,6 +2301,42 @@ export default function StrategyFinderWorkspace({
 
         <details
           className="finder-menu"
+          ref={(node) => setFilterMenuRef("quoteSize", node)}
+          onToggle={() => handleFilterMenuToggle("quoteSize")}
+        >
+          <summary className="finder-control">
+            <span>{quoteSizeSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Target option size</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold)}
+              >
+                Default
+              </button>
+            </div>
+            <div className="finder-menu__list">
+              {quoteSizeThresholdOptions.map((threshold) => (
+                <button
+                  key={threshold}
+                  type="button"
+                  className={`finder-menu__option ${
+                    targetOptionQuoteSizeThreshold === threshold ? "finder-menu__option--active" : ""
+                  }`}
+                  onClick={() => setTargetOptionQuoteSizeThreshold(threshold)}
+                >
+                  {`>${threshold}`}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
+
+        <details
+          className="finder-menu"
           ref={(node) => setFilterMenuRef("pnl", node)}
           onToggle={() => handleFilterMenuToggle("pnl")}
         >
@@ -2349,7 +2552,10 @@ export default function StrategyFinderWorkspace({
                                     onChange={(event) =>
                                       updateLegConfig(leg.id, {
                                         optionType: event.target.value,
-                                        contractSymbol: ""
+                                        contractSymbol: "",
+                                        bidSize: null,
+                                        askSize: null,
+                                        hasRealBidAsk: false
                                       })
                                     }
                                   >
@@ -2366,7 +2572,10 @@ export default function StrategyFinderWorkspace({
                                     onChange={(event) =>
                                       updateLegConfig(leg.id, {
                                         expiry: event.target.value,
-                                        contractSymbol: ""
+                                        contractSymbol: "",
+                                        bidSize: null,
+                                        askSize: null,
+                                        hasRealBidAsk: false
                                       })
                                     }
                                   />
@@ -2478,7 +2687,7 @@ export default function StrategyFinderWorkspace({
                               </span>
                               <span>{formatNumber(leg.bid, 2)}</span>
                               <span>{formatNumber(leg.ask, 2)}</span>
-                              <span>{formatNumber(leg.spread, 2)}%</span>
+                              <span>{leg.spread != null ? `${formatNumber(leg.spread, 2)}%` : ""}</span>
                               <span className="leg-reference">
                                 {leg.kind === "binary" ? (
                                   <a href={leg.referenceUrl} target="_blank" rel="noreferrer">
@@ -2713,12 +2922,26 @@ export default function StrategyFinderWorkspace({
                             View holdings
                           </button>
                         ) : null}
+                        <button
+                          type="button"
+                          className={`chart-toggle chart-toggle--compact ${optionPriceRefreshing ? "chart-toggle--active" : ""}`}
+                          onClick={refreshCalculatorOptionPrices}
+                          disabled={optionPriceRefreshing || !effectiveOptionLegs.length || !optionRootSymbol}
+                          title="Refresh option prices"
+                        >
+                          {optionPriceRefreshing ? "Refreshing..." : "Refresh"}
+                        </button>
                       </div>
                     </div>
 
                     {paperOrderState ? (
                       <div className={`refresh-feedback refresh-feedback--${paperOrderState.tone}`}>
                         <span>{paperOrderState.message}</span>
+                      </div>
+                    ) : null}
+                    {optionPriceRefreshState ? (
+                      <div className={`refresh-feedback refresh-feedback--${optionPriceRefreshState.tone}`}>
+                        <span>{optionPriceRefreshState.message}</span>
                       </div>
                     ) : null}
 
@@ -3048,7 +3271,7 @@ export default function StrategyFinderWorkspace({
 
           {sortedRows.length === 0 ? (
             <div className="finder-empty">
-              No matched hedge combinations for the selected products, date range, and strategy types.
+              No matched hedge combinations for the selected products, date range, strategy types, and bid/ask size filter.
             </div>
           ) : (
             sortedRows.map((row) => (
@@ -3107,7 +3330,7 @@ export default function StrategyFinderWorkspace({
                 <span>{formatNumber(row.theoPrice, 2)}</span>
                 <span>{formatNumber(row.bid, 2)}</span>
                 <span>{formatNumber(row.ask, 2)}</span>
-                <span className="negative">{formatNumber(row.bidAskSpread, 2)}%</span>
+                <span className="negative">{row.bidAskSpread != null ? `${formatNumber(row.bidAskSpread, 2)}%` : ""}</span>
                 <span>{formatCurrency(row.expPayoff)}</span>
               </button>
             ))

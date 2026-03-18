@@ -104,6 +104,11 @@ function estimateBidAsk(midPrice) {
   };
 }
 
+function toQuoteSize(value) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : null;
+}
+
 function roundToIncrement(value, increment) {
   return Math.round(value / increment) * increment;
 }
@@ -180,13 +185,16 @@ function buildSyntheticOptionChain({
           optionType,
           bid: quotes.bid,
           ask: quotes.ask,
+          bidSize: null,
+          askSize: null,
           mark: quotes.mark,
           lastPrice: quotes.mark,
           impliedVolatility: volatility,
           openInterest: null,
           source: "modeled",
           sourceLabel: "Synthetic chain",
-          isLive: false
+          isLive: false,
+          hasRealBidAsk: false
         };
       })
   );
@@ -200,17 +208,20 @@ function normalizePolygonContract(item, fallbackType) {
 
   const bid = Number(item?.last_quote?.bid);
   const ask = Number(item?.last_quote?.ask);
+  const bidSize = toQuoteSize(item?.last_quote?.bid_size);
+  const askSize = toQuoteSize(item?.last_quote?.ask_size);
   const trade = Number(item?.last_trade?.price);
   const dayClose = Number(item?.day?.close);
-  const hasLiveQuote = Number.isFinite(bid) && Number.isFinite(ask) && (bid > 0 || ask > 0);
+  const hasBid = Number.isFinite(bid) && bid > 0;
+  const hasAsk = Number.isFinite(ask) && ask > 0;
+  const hasRealBidAsk = hasBid && hasAsk;
   const midpoint =
-    hasLiveQuote
-      ? (bid + ask) / 2
-      : Number.isFinite(trade) && trade > 0
-        ? trade
-        : Number.isFinite(dayClose) && dayClose > 0
-          ? dayClose
-          : null;
+    hasRealBidAsk ? (bid + ask) / 2
+    : hasBid ? bid
+    : hasAsk ? ask
+    : Number.isFinite(trade) && trade > 0 ? trade
+    : Number.isFinite(dayClose) && dayClose > 0 ? dayClose
+    : null;
   const fallbackQuotes = Number.isFinite(midpoint) && midpoint > 0 ? estimateBidAsk(midpoint) : null;
 
   return {
@@ -220,8 +231,10 @@ function normalizePolygonContract(item, fallbackType) {
     strike,
     expiration: item?.details?.expiration_date,
     optionType: item?.details?.contract_type ?? fallbackType,
-    bid: Number.isFinite(bid) && bid > 0 ? bid : fallbackQuotes?.bid ?? null,
-    ask: Number.isFinite(ask) && ask > 0 ? ask : fallbackQuotes?.ask ?? null,
+    bid: hasBid ? bid : fallbackQuotes?.bid ?? null,
+    ask: hasAsk ? ask : fallbackQuotes?.ask ?? null,
+    bidSize,
+    askSize,
     mark: Number.isFinite(midpoint) ? midpoint : null,
     lastPrice:
       Number.isFinite(trade) && trade > 0
@@ -233,7 +246,8 @@ function normalizePolygonContract(item, fallbackType) {
     openInterest: Number(item?.open_interest ?? 0) || null,
     source: "polygon",
     sourceLabel: "Polygon.io",
-    isLive: true
+    isLive: true,
+    hasRealBidAsk
   };
 }
 
@@ -274,9 +288,12 @@ function enrichContractWithFallbackQuotes(contract, currentSpot = 0) {
     ...contract,
     bid: Number.isFinite(contract.bid) && contract.bid > 0 ? contract.bid : fallbackQuotes.bid,
     ask: Number.isFinite(contract.ask) && contract.ask > 0 ? contract.ask : fallbackQuotes.ask,
+    bidSize: contract.bidSize ?? null,
+    askSize: contract.askSize ?? null,
     mark: Number.isFinite(contract.mark) && contract.mark > 0 ? contract.mark : fallbackQuotes.mark,
     lastPrice:
-      Number.isFinite(contract.lastPrice) && contract.lastPrice > 0 ? contract.lastPrice : fallbackQuotes.mark
+      Number.isFinite(contract.lastPrice) && contract.lastPrice > 0 ? contract.lastPrice : fallbackQuotes.mark,
+    hasRealBidAsk: contract.hasRealBidAsk === true
   };
 }
 
@@ -565,7 +582,10 @@ export async function fetchNearestCalls(symbol, targetStrike, desiredExpiry, lim
       optionType: contract.optionType,
       bid: contract.bid,
       ask: contract.ask,
+      bidSize: contract.bidSize ?? null,
+      askSize: contract.askSize ?? null,
       source: contract.source,
-      isLive: contract.isLive
+      isLive: contract.isLive,
+      hasRealBidAsk: contract.hasRealBidAsk === true
     }));
 }
