@@ -1,4 +1,5 @@
 import { pickOptionReferencePrice } from "./optionPricing.js";
+import { buildPayoffSummary } from "./strategyEngine.js";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -187,6 +188,80 @@ function quoteLookup(quotes) {
 
 function resolveQuotePrice(quotesBySymbol, symbol, fallback = 0) {
   return toNumber(quotesBySymbol.get(symbol)?.regularMarketPrice, fallback) ?? fallback;
+}
+
+function deriveOrderPayoffSummary({
+  order,
+  currentProxySpot,
+  currentUnderlyingSpot,
+  conversionRatio,
+  targetUnderlyingValue,
+  impliedVolatility,
+  riskFreeRate
+}) {
+  const normalizedLegs = (order.legs ?? []).map((leg) => {
+    if (leg.kind === "binary") {
+      return {
+        kind: "binary",
+        outcome: leg.outcome,
+        action: leg.action,
+        quantity: Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0),
+        entryPrice: toNumber(leg.entryPrice, 0) ?? 0
+      };
+    }
+
+    return {
+      kind: "option",
+      action: leg.action,
+      quantity: Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0),
+      entryPrice: toNumber(leg.entryPrice, 0) ?? 0,
+      optionType: String(leg.optionType ?? "call") === "put" ? "put" : "call",
+      strike: toNumber(leg.strike, 0) ?? 0,
+      expiration: String(leg.expiry ?? ""),
+      contractMultiplier: Math.max(toNumber(leg.contractMultiplier, 100) ?? 100, 1),
+      impliedVolatility: normalizeVolatility(leg.impliedVolatility, impliedVolatility),
+      riskFreeRate: toNumber(leg.riskFreeRate, riskFreeRate) ?? riskFreeRate
+    };
+  });
+
+  if (!normalizedLegs.length) {
+    return null;
+  }
+
+  const normalizedConversionRatio =
+    conversionRatio > 0
+      ? conversionRatio
+      : currentUnderlyingSpot > 0 && currentProxySpot > 0
+        ? currentProxySpot / currentUnderlyingSpot
+        : 1;
+  const binaryTargetThreshold =
+    targetUnderlyingValue > 0 ? targetUnderlyingValue : Math.max(currentUnderlyingSpot, 0.01);
+  const targetProxySpot =
+    binaryTargetThreshold > 0 && normalizedConversionRatio > 0
+      ? binaryTargetThreshold * normalizedConversionRatio
+      : Math.max(currentProxySpot, 0.01);
+  const strategyCloseDate =
+    String(order.strategyCloseDate ?? "").trim() ||
+    String(order.polymarketResolutionDate ?? "").trim() ||
+    String(
+      normalizedLegs.find((leg) => leg.kind === "option" && leg.expiration)?.expiration ?? ""
+    ).trim() ||
+    new Date().toISOString().slice(0, 10);
+
+  return buildPayoffSummary({
+    currentSpot: Math.max(currentProxySpot, 0.01),
+    targetSpot: Math.max(targetProxySpot, 0.01),
+    targetThreshold: Math.max(targetProxySpot, 0.01),
+    binaryTargetThreshold,
+    currentUnderlyingSpot: Math.max(currentUnderlyingSpot, 0.01),
+    conversionRatio: normalizedConversionRatio,
+    marketReferenceYesPrice: toNumber(order.marketReferenceYesPrice, 0.5) ?? 0.5,
+    strategyCloseDate,
+    polymarketResolutionDate: String(order.polymarketResolutionDate ?? "").trim() || strategyCloseDate,
+    volatility: normalizeVolatility(impliedVolatility, 0.24),
+    riskFreeRate: toNumber(riskFreeRate, 0.0425) ?? 0.0425,
+    legs: normalizedLegs
+  });
 }
 
 function inferPolymarketMarketId(order) {
@@ -499,6 +574,12 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     combinationLabel: String(source.combinationLabel ?? defaults.combinationLabel ?? "Paper trade"),
     assetLabel: String(source.assetLabel ?? defaults.assetLabel ?? ""),
     strategyType: String(source.strategyType ?? defaults.strategyType ?? ""),
+    marketBias: String(source.marketBias ?? defaults.marketBias ?? ""),
+    marketBiasTone: String(source.marketBiasTone ?? defaults.marketBiasTone ?? ""),
+    maxProfit: toNumber(source.maxProfit, defaults.maxProfit ?? null),
+    maxLoss: toNumber(source.maxLoss, defaults.maxLoss ?? null),
+    maxProfitUnbounded: source.maxProfitUnbounded === true || defaults.maxProfitUnbounded === true,
+    maxLossUnbounded: source.maxLossUnbounded === true || defaults.maxLossUnbounded === true,
     purchaseDate,
     polymarketMarketId,
     polymarketMarketSlug: String(source.polymarketMarketSlug ?? defaults.polymarketMarketSlug ?? ""),
@@ -766,6 +847,15 @@ export function buildPaperPortfolio({
     const targetUnderlyingValue = toNumber(order.marketContext?.targetUnderlyingValue, 0) ?? 0;
     const impliedVolatility = normalizeVolatility(order.marketContext?.impliedVolatility, 0.24);
     const riskFreeRate = toNumber(order.marketContext?.riskFreeRate, 0.0425) ?? 0.0425;
+    const payoffSummary = deriveOrderPayoffSummary({
+      order,
+      currentProxySpot,
+      currentUnderlyingSpot,
+      conversionRatio,
+      targetUnderlyingValue,
+      impliedVolatility,
+      riskFreeRate
+    });
     const liveMarket = findMatchingMarket(order, polymarketMarkets);
     const currentYesPrice = resolveBinaryYesPrice({
       order,
@@ -923,6 +1013,20 @@ export function buildPaperPortfolio({
       combinationLabel: order.combinationLabel,
       assetLabel: order.assetLabel,
       strategyType: order.strategyType,
+      marketBias: order.marketBias || payoffSummary?.marketBias?.label || "",
+      marketBiasTone: order.marketBiasTone || payoffSummary?.marketBias?.tone || "",
+      maxProfit:
+        payoffSummary?.maxProfit != null
+          ? payoffSummary.maxProfit
+          : toNumber(order.maxProfit, null),
+      maxLoss:
+        payoffSummary?.maxLoss != null
+          ? payoffSummary.maxLoss
+          : toNumber(order.maxLoss, null),
+      maxProfitUnbounded:
+        payoffSummary?.maxProfitUnbounded === true || order.maxProfitUnbounded === true,
+      maxLossUnbounded:
+        payoffSummary?.maxLossUnbounded === true || order.maxLossUnbounded === true,
       purchaseDate: order.purchaseDate,
       createdAt: record.createdAt ?? null,
       updatedAt: record.updatedAt ?? null,

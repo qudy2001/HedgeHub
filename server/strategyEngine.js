@@ -837,6 +837,52 @@ function approximateBreakevens(curve) {
   return values.filter((value, index, array) => value != null && array.indexOf(value) === index);
 }
 
+export function buildPayoffSummary({
+  currentSpot,
+  targetSpot,
+  targetThreshold,
+  binaryTargetThreshold = targetThreshold,
+  currentUnderlyingSpot = currentSpot,
+  conversionRatio = 1,
+  marketReferenceYesPrice = 0.5,
+  strategyCloseDate = null,
+  polymarketResolutionDate = null,
+  volatility = 0.24,
+  riskFreeRate = 0.0425,
+  legs
+}) {
+  const payoffCurve = buildPayoffCurve({
+    currentSpot,
+    targetSpot,
+    targetThreshold,
+    binaryTargetThreshold,
+    currentUnderlyingSpot,
+    conversionRatio,
+    marketReferenceYesPrice,
+    strategyCloseDate,
+    polymarketResolutionDate,
+    volatility,
+    riskFreeRate,
+    legs
+  });
+  const { maxProfit, maxLoss, maxProfitUnbounded, maxLossUnbounded } = evaluatePayoffExtremes(
+    payoffCurve,
+    legs
+  );
+  const breakevens = approximateBreakevens(payoffCurve);
+  const marketBias = classifyStrategyBias(payoffCurve, currentSpot);
+
+  return {
+    payoffCurve,
+    maxProfit,
+    maxLoss,
+    maxProfitUnbounded,
+    maxLossUnbounded,
+    breakevens,
+    marketBias
+  };
+}
+
 const polymarketStructures = [
   {
     id: "pm-yes",
@@ -940,7 +986,15 @@ function buildCombination({
     polymarketResolutionDate ||
     optionLegBlueprints[0]?.expiration ||
     defaultStrategyConfig.optionLeg.expiry;
-  const payoffCurve = buildPayoffCurve({
+  const {
+    payoffCurve,
+    maxProfit,
+    maxLoss,
+    maxProfitUnbounded,
+    maxLossUnbounded,
+    breakevens,
+    marketBias
+  } = buildPayoffSummary({
     currentSpot: currentOptionSpot,
     targetSpot: optionLegBlueprints[0]?.targetSpot || currentOptionSpot,
     targetThreshold: optionLegBlueprints[0]?.targetSpot || currentOptionSpot,
@@ -956,15 +1010,9 @@ function buildCombination({
       Number(optionLegBlueprints[0]?.riskFreeRate ?? optionLegBlueprints[1]?.riskFreeRate ?? 0) || 0.0425,
     legs: payoffLegs
   });
-  const { maxProfit, maxLoss, maxProfitUnbounded, maxLossUnbounded } = evaluatePayoffExtremes(
-    payoffCurve,
-    payoffLegs
-  );
-  const marketBias = classifyStrategyBias(payoffCurve, currentOptionSpot);
   const expPayoff =
     payoffCurve.find((point) => Math.abs(point.spot - (optionLegBlueprints[0]?.targetSpot || currentOptionSpot)) < 0.5)
       ?.totalPnL ?? null;
-  const breakevens = approximateBreakevens(payoffCurve);
   const positivePoints = payoffCurve.filter((point) => (point.totalPnL ?? 0) > 0).length;
   const probabilityOfProfit = (positivePoints / payoffCurve.length) * 100;
   const netBid = optionLegBlueprints.reduce(

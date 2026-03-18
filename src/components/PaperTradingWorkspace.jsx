@@ -223,9 +223,278 @@ function getPolymarketReferenceLine(order, leg) {
     : "";
 }
 
+function formatBoundedCurrency(value, isUnbounded = false) {
+  if (isUnbounded) {
+    return "Unbounded";
+  }
+
+  return formatCurrency(value);
+}
+
+function getOrderExpirationDate(order) {
+  return order.strategyCloseDate || order.polymarketResolutionDate || "";
+}
+
+function getOrderTagLabel(order) {
+  return order.marketBias || order.strategyName || "Open";
+}
+
+function OrderSummaryStrip({ items }) {
+  return (
+    <div className="paper-order-summary-strip">
+      {items.map((item) => (
+        <div key={item.label} className="paper-order-summary-cell">
+          <span>{item.label}</span>
+          {item.kind === "tag" ? (
+            <strong>
+              <span className={`bias-pill bias-pill--${item.tone ?? "neutral"}`}>{item.value}</span>
+            </strong>
+          ) : (
+            <strong className={item.tone ?? ""}>{item.value}</strong>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function OpenOrderCard({
+  order,
+  draft,
+  isDirty,
+  feedback,
+  orderBusy,
+  isExpanded,
+  lastUpdated,
+  onToggle,
+  onResetDraft,
+  onSave,
+  onClose,
+  onDelete,
+  onUpdateDraft,
+  onSaveCalculatorSnapshot
+}) {
+  const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
+  const expirationDate = getOrderExpirationDate(order);
+  const summaryItems = [
+    { label: "Initial cost", value: formatCurrency(order.initialPurchaseValue) },
+    { label: "Date in", value: formatDateLabel(order.purchaseDate) },
+    { label: "Expiration", value: formatDateLabel(expirationDate) },
+    { label: "Asset", value: order.assetLabel || "n/a" },
+    { label: "Strategy type", value: order.strategyType || "Custom" },
+    { label: "Tag", value: getOrderTagLabel(order), kind: "tag", tone: order.marketBiasTone ?? "neutral" },
+    { label: "Max profit", value: formatBoundedCurrency(order.maxProfit, order.maxProfitUnbounded) },
+    { label: "Max loss", value: formatBoundedCurrency(order.maxLoss, order.maxLossUnbounded) },
+    { label: "Unrealised P&L", value: formatCurrency(order.profitLossValue), tone: Number(order.profitLossValue) >= 0 ? "positive" : "negative" }
+  ];
+
+  return (
+    <article
+      className={`paper-order-card ${isExpanded ? "paper-order-card--expanded" : "paper-order-card--collapsed"}`}
+    >
+      <div className="paper-order-card__header">
+        <div>
+          <span className="brand__eyebrow">Open holding</span>
+          <h3>{order.combinationLabel}</h3>
+          <p className="paper-order-card__meta">
+            {order.assetLabel} · {order.strategyType || "Custom"} · Purchased {formatDateLabel(order.purchaseDate)}
+          </p>
+        </div>
+        <div className="paper-order-card__actions">
+          <span className={`pill ${Number(order.profitLossValue) >= 0 ? "pill--live" : "pill--ghost"}`}>
+            {formatCurrency(order.profitLossValue)}
+          </span>
+          {orderEventUrl ? (
+            <a href={orderEventUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
+              Open market
+            </a>
+          ) : null}
+          <button
+            type="button"
+            className={`chart-toggle ${isExpanded ? "chart-toggle--active" : ""}`}
+            onClick={onToggle}
+            disabled={orderBusy}
+          >
+            {isExpanded ? "Collapse" : "Expand"}
+          </button>
+        </div>
+      </div>
+
+      <OrderSummaryStrip items={summaryItems} />
+
+      {isExpanded ? (
+        <div className="paper-order-card__body">
+          <PaperTradeHistoryChart history={order.history} />
+          <PaperTradeScenarioPanel
+            order={order}
+            lastUpdated={lastUpdated}
+            onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+          />
+
+          <div className="paper-order-editbar">
+            <label>
+              <span>Purchase date</span>
+              <input
+                type="date"
+                value={draft.purchaseDate}
+                onChange={(event) =>
+                  onUpdateDraft(order.id, (current) => ({
+                    ...current,
+                    purchaseDate: event.target.value
+                  }))
+                }
+              />
+            </label>
+
+            <div className="paper-order-editbar__actions">
+              <button type="button" className="chart-toggle" onClick={onResetDraft} disabled={!isDirty || orderBusy}>
+                Reset
+              </button>
+              <button
+                type="button"
+                className={`chart-toggle ${isDirty ? "chart-toggle--active" : ""}`}
+                onClick={onSave}
+                disabled={!isDirty || orderBusy}
+              >
+                {orderBusy ? "Saving..." : "Save changes"}
+              </button>
+              <button type="button" className="chart-toggle" onClick={onDelete} disabled={orderBusy}>
+                Remove
+              </button>
+            </div>
+          </div>
+
+          <div className="paper-legs-table">
+            <div className="paper-legs-table__head">
+              <span>Sub item</span>
+              <span>Type</span>
+              <span>Purchase price</span>
+              <span>Contracts</span>
+              <span>Current mark</span>
+              <span>Current value</span>
+              <span>P&amp;L</span>
+            </div>
+            {order.legs.map((leg) => {
+              const legDraft = draft.legs?.[String(leg.id)] ?? {
+                entryPrice: String(leg.entryPrice ?? ""),
+                quantity: String(leg.quantity ?? "")
+              };
+              const legUrl = getLegUrl(order, leg);
+              const polymarketReferenceLine = getPolymarketReferenceLine(order, leg);
+
+              return (
+                <div key={leg.id} className="paper-legs-table__row">
+                  <span className="paper-legs-table__label">
+                    <strong>{getLegTitle(order, leg)}</strong>
+                    <small>{renderLegDescriptor(leg)}</small>
+                    {legUrl ? (
+                      <a href={legUrl} target="_blank" rel="noreferrer">
+                        {legUrl}
+                      </a>
+                    ) : null}
+                    {polymarketReferenceLine ? <small>{polymarketReferenceLine}</small> : null}
+                  </span>
+                  <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
+                  <span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={leg.kind === "binary" ? "1" : undefined}
+                      step="0.01"
+                      value={legDraft.entryPrice}
+                      onChange={(event) =>
+                        onUpdateDraft(order.id, (current) => ({
+                          ...current,
+                          legs: {
+                            ...current.legs,
+                            [String(leg.id)]: {
+                              ...(current.legs?.[String(leg.id)] ?? {}),
+                              entryPrice: event.target.value
+                            }
+                          }
+                        }))
+                      }
+                    />
+                  </span>
+                  <span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={legDraft.quantity}
+                      onChange={(event) =>
+                        onUpdateDraft(order.id, (current) => ({
+                          ...current,
+                          legs: {
+                            ...current.legs,
+                            [String(leg.id)]: {
+                              ...(current.legs?.[String(leg.id)] ?? {}),
+                              quantity: event.target.value
+                            }
+                          }
+                        }))
+                      }
+                    />
+                  </span>
+                  <span>{formatCurrency(leg.currentPrice, leg.kind === "binary" ? 4 : 2)}</span>
+                  <span>{formatCurrency(leg.currentExposure)}</span>
+                  <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
+                    {formatCurrency(leg.profitLossValue)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="paper-order-footer">
+            <span>
+              Live context: {order.valuationContext.proxySymbol || "Proxy"} {formatCurrency(order.valuationContext.currentProxySpot)}
+            </span>
+            <span>YES mark {formatPercent((order.valuationContext.currentYesPrice ?? 0) * 100)}</span>
+            <span>Target {formatCurrency(order.valuationContext.targetUnderlyingValue)}</span>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="paper-order-card__dock">
+        <div className="paper-order-card__dock-copy">
+          <span>{isExpanded ? "Expanded details" : "Collapsed by default"}</span>
+          <strong>{getOrderTagLabel(order)}</strong>
+        </div>
+        <div className="paper-order-card__dock-actions">
+          <button
+            type="button"
+            className={`chart-toggle ${isExpanded ? "chart-toggle--active" : ""}`}
+            onClick={onToggle}
+            disabled={orderBusy}
+          >
+            {isExpanded ? "Hide details" : "View details"}
+          </button>
+          <button
+            type="button"
+            className="chart-toggle paper-order-card__close-button"
+            onClick={onClose}
+            disabled={orderBusy}
+          >
+            {orderBusy ? "Working..." : "Close order"}
+          </button>
+        </div>
+      </div>
+
+      {feedback ? (
+        <div className={`refresh-feedback refresh-feedback--${feedback.tone}`}>
+          <span>{feedback.message}</span>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function ClosedOrderCard({
   order,
+  isExpanded,
   lastUpdated,
+  onToggle,
   onDeletePaperOrder,
   onSaveCalculatorSnapshot,
   busyOrderId,
@@ -261,9 +530,28 @@ function ClosedOrderCard({
 
   const orderBusy = busyOrderId === String(order.id);
   const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
+  const summaryItems = [
+    { label: "Date in", value: formatDateLabel(order.purchaseDate) },
+    { label: "Closed", value: formatDateLabel(order.closedDate || order.closedAt?.slice(0, 10)) },
+    { label: "Asset", value: order.assetLabel || "n/a" },
+    { label: "Strategy type", value: order.strategyType || "Custom" },
+    { label: "Tag", value: getOrderTagLabel(order), kind: "tag", tone: order.marketBiasTone ?? "neutral" },
+    { label: "Entry value", value: formatCurrency(order.initialPurchaseValue) },
+    { label: "Exit value", value: formatCurrency(order.currentHoldingValue) },
+    {
+      label: "Realized P&L",
+      value: formatCurrency(order.profitLossValue),
+      tone: Number(order.profitLossValue) >= 0 ? "positive" : "negative"
+    },
+    {
+      label: "Realized P&L %",
+      value: formatPercent(order.profitLossPercent),
+      tone: Number(order.profitLossValue) >= 0 ? "positive" : "negative"
+    }
+  ];
 
   return (
-    <article className="paper-order-card paper-order-card--closed">
+    <article className={`paper-order-card paper-order-card--closed ${isExpanded ? "paper-order-card--expanded" : "paper-order-card--collapsed"}`}>
       <div className="paper-order-card__header">
         <div>
           <span className="brand__eyebrow">Closed order</span>
@@ -282,79 +570,79 @@ function ClosedOrderCard({
               Open market
             </a>
           ) : null}
-          <button type="button" className="chart-toggle" onClick={handleDelete} disabled={orderBusy}>
+        </div>
+      </div>
+
+      <OrderSummaryStrip items={summaryItems} />
+
+      {isExpanded ? (
+        <div className="paper-order-card__body">
+          <PaperTradeHistoryChart history={order.history} />
+          <PaperTradeScenarioPanel
+            order={order}
+            lastUpdated={lastUpdated}
+            onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+          />
+
+          <div className="paper-legs-table paper-legs-table--history">
+            <div className="paper-legs-table__head">
+              <span>Sub item</span>
+              <span>Type</span>
+              <span>Entry price</span>
+              <span>Exit price</span>
+              <span>Contracts</span>
+              <span>Realized P&amp;L</span>
+            </div>
+            {order.legs.map((leg) => (
+              <div key={leg.id} className="paper-legs-table__row paper-legs-table__row--history">
+                <span className="paper-legs-table__label">
+                  <strong>{getLegTitle(order, leg)}</strong>
+                  <small>{renderLegDescriptor(leg)}</small>
+                  {getLegUrl(order, leg) ? (
+                    <a href={getLegUrl(order, leg)} target="_blank" rel="noreferrer">
+                      {getLegUrl(order, leg)}
+                    </a>
+                  ) : null}
+                </span>
+                <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
+                <span>{formatCurrency(leg.entryPrice, leg.kind === "binary" ? 4 : 2)}</span>
+                <span>{formatCurrency(leg.currentPrice, leg.kind === "binary" ? 4 : 2)}</span>
+                <span>{leg.quantity}</span>
+                <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
+                  {formatCurrency(leg.profitLossValue)}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="paper-order-footer">
+            <span>Bought date {formatDateLabel(order.purchaseDate)}</span>
+            <span>Bought time {formatDateTimeLabel(order.createdAt)}</span>
+            <span>Close time {formatDateTimeLabel(order.closedAt)}</span>
+            <span>Proxy {order.valuationContext.proxySymbol || "Proxy"}</span>
+            <span>Target {formatCurrency(order.valuationContext.targetUnderlyingValue)}</span>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="paper-order-card__dock">
+        <div className="paper-order-card__dock-copy">
+          <span>{isExpanded ? "Expanded details" : "Collapsed by default"}</span>
+          <strong>{getOrderTagLabel(order)}</strong>
+        </div>
+        <div className="paper-order-card__dock-actions">
+          <button
+            type="button"
+            className={`chart-toggle ${isExpanded ? "chart-toggle--active" : ""}`}
+            onClick={onToggle}
+            disabled={orderBusy}
+          >
+            {isExpanded ? "Hide details" : "View details"}
+          </button>
+          <button type="button" className="chart-toggle paper-order-card__close-button" onClick={handleDelete} disabled={orderBusy}>
             Remove history
           </button>
         </div>
-      </div>
-
-      <div className="paper-order-metrics">
-        <div className="paper-order-metric">
-          <span>Initial purchase value</span>
-          <strong>{formatCurrency(order.initialPurchaseValue)}</strong>
-        </div>
-        <div className="paper-order-metric">
-          <span>Exit value</span>
-          <strong>{formatCurrency(order.currentHoldingValue)}</strong>
-        </div>
-        <div className="paper-order-metric">
-          <span>Realized P&amp;L</span>
-          <strong className={Number(order.profitLossValue) >= 0 ? "positive" : "negative"}>
-            {formatCurrency(order.profitLossValue)}
-          </strong>
-        </div>
-        <div className="paper-order-metric">
-          <span>Realized P&amp;L %</span>
-          <strong className={Number(order.profitLossValue) >= 0 ? "positive" : "negative"}>
-            {formatPercent(order.profitLossPercent)}
-          </strong>
-        </div>
-      </div>
-
-      <PaperTradeHistoryChart history={order.history} />
-      <PaperTradeScenarioPanel
-        order={order}
-        lastUpdated={lastUpdated}
-        onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
-      />
-
-      <div className="paper-legs-table paper-legs-table--history">
-        <div className="paper-legs-table__head">
-          <span>Sub item</span>
-          <span>Type</span>
-          <span>Entry price</span>
-          <span>Exit price</span>
-          <span>Contracts</span>
-          <span>Realized P&amp;L</span>
-        </div>
-        {order.legs.map((leg) => (
-          <div key={leg.id} className="paper-legs-table__row paper-legs-table__row--history">
-            <span className="paper-legs-table__label">
-              <strong>{getLegTitle(order, leg)}</strong>
-              <small>{renderLegDescriptor(leg)}</small>
-              {getLegUrl(order, leg) ? (
-                <a href={getLegUrl(order, leg)} target="_blank" rel="noreferrer">
-                  {getLegUrl(order, leg)}
-                </a>
-              ) : null}
-            </span>
-            <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
-            <span>{formatCurrency(leg.entryPrice, leg.kind === "binary" ? 4 : 2)}</span>
-            <span>{formatCurrency(leg.currentPrice, leg.kind === "binary" ? 4 : 2)}</span>
-            <span>{leg.quantity}</span>
-            <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
-              {formatCurrency(leg.profitLossValue)}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <div className="paper-order-footer">
-        <span>Bought date {formatDateLabel(order.purchaseDate)}</span>
-        <span>Bought time {formatDateTimeLabel(order.createdAt)}</span>
-        <span>Close time {formatDateTimeLabel(order.closedAt)}</span>
-        <span>Proxy {order.valuationContext.proxySymbol || "Proxy"}</span>
-        <span>Target {formatCurrency(order.valuationContext.targetUnderlyingValue)}</span>
       </div>
 
       {feedback ? (
@@ -380,10 +668,17 @@ export default function PaperTradingWorkspace({
   const [drafts, setDrafts] = useState(() => buildDrafts(openOrders));
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
+  const [expandedOrderKey, setExpandedOrderKey] = useState(null);
 
   useEffect(() => {
     setDrafts(buildDrafts(openOrders));
   }, [openOrders]);
+
+  useEffect(() => {
+    setExpandedOrderKey((current) =>
+      [...openOrders, ...closedOrders].some((order) => current === `order:${order.id}`) ? current : null
+    );
+  }, [openOrders, closedOrders]);
 
   function updateDraft(orderId, updater) {
     setDrafts((current) => {
@@ -572,214 +867,36 @@ export default function PaperTradingWorkspace({
                       const isDirty = hasOrderDraftChanged(order, draft);
                       const feedback = feedbackByOrder[String(order.id)];
                       const orderBusy = busyOrderId === String(order.id);
+                      const orderKey = `order:${order.id}`;
+                      const isExpanded = expandedOrderKey === orderKey;
 
                       return (
-                        <article key={order.id} className="paper-order-card">
-                        <div className="paper-order-card__header">
-                          <div>
-                            <span className="brand__eyebrow">Open combination</span>
-                            <h3>{order.combinationLabel}</h3>
-                            <p className="paper-order-card__meta">
-                              {order.assetLabel} · {order.strategyType || "Custom"} · Purchased {formatDateLabel(order.purchaseDate)}
-                            </p>
-                          </div>
-                          <div className="paper-order-card__actions">
-                            <span className={`pill ${Number(order.profitLossValue) >= 0 ? "pill--live" : "pill--ghost"}`}>
-                              {formatCurrency(order.profitLossValue)}
-                            </span>
-                            {getPolymarketEventUrl(order.polymarketUrl) ? (
-                              <a
-                                href={getPolymarketEventUrl(order.polymarketUrl)}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="pill pill--ghost"
-                              >
-                                Open market
-                              </a>
-                            ) : null}
-                          </div>
-                        </div>
-
-                        <div className="paper-order-metrics">
-                          <div className="paper-order-metric">
-                            <span>Initial purchase value</span>
-                            <strong>{formatCurrency(order.initialPurchaseValue)}</strong>
-                          </div>
-                          <div className="paper-order-metric">
-                            <span>Current holding value</span>
-                            <strong>{formatCurrency(order.currentHoldingValue)}</strong>
-                          </div>
-                          <div className="paper-order-metric">
-                            <span>Net marked value</span>
-                            <strong>{formatCurrency(order.netMarkedValue)}</strong>
-                          </div>
-                          <div className="paper-order-metric">
-                            <span>P&amp;L %</span>
-                            <strong className={Number(order.profitLossValue) >= 0 ? "positive" : "negative"}>
-                              {formatPercent(order.profitLossPercent)}
-                            </strong>
-                          </div>
-                        </div>
-
-                        <PaperTradeHistoryChart history={order.history} />
-                        <PaperTradeScenarioPanel
+                        <OpenOrderCard
+                          key={order.id}
                           order={order}
+                          draft={draft}
+                          isDirty={isDirty}
+                          feedback={feedback}
+                          orderBusy={orderBusy}
+                          isExpanded={isExpanded}
                           lastUpdated={lastUpdated}
+                          onToggle={() =>
+                            setExpandedOrderKey((current) =>
+                              current === orderKey ? null : orderKey
+                            )
+                          }
+                          onResetDraft={() =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [String(order.id)]: buildDefaultDraft(order)
+                            }))
+                          }
+                          onSave={() => handleSave(order)}
+                          onClose={() => handleClose(order)}
+                          onDelete={() => handleDelete(order, "open order")}
+                          onUpdateDraft={updateDraft}
                           onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
                         />
-
-                        <div className="paper-order-editbar">
-                          <label>
-                            <span>Purchase date</span>
-                            <input
-                              type="date"
-                              value={draft.purchaseDate}
-                              onChange={(event) =>
-                                updateDraft(order.id, (current) => ({
-                                  ...current,
-                                  purchaseDate: event.target.value
-                                }))
-                              }
-                            />
-                          </label>
-
-                          <div className="paper-order-editbar__actions">
-                            <button
-                              type="button"
-                              className="chart-toggle"
-                              onClick={() =>
-                                setDrafts((current) => ({
-                                  ...current,
-                                  [String(order.id)]: buildDefaultDraft(order)
-                                }))
-                              }
-                              disabled={!isDirty || orderBusy}
-                            >
-                              Reset
-                            </button>
-                            <button
-                              type="button"
-                              className={`chart-toggle ${isDirty ? "chart-toggle--active" : ""}`}
-                              onClick={() => handleSave(order)}
-                              disabled={!isDirty || orderBusy}
-                            >
-                              {orderBusy ? "Saving..." : "Save changes"}
-                            </button>
-                            <button
-                              type="button"
-                              className="chart-toggle chart-toggle--active"
-                              onClick={() => handleClose(order)}
-                              disabled={orderBusy}
-                            >
-                              {orderBusy ? "Closing..." : "Close order"}
-                            </button>
-                            <button
-                              type="button"
-                              className="chart-toggle"
-                              onClick={() => handleDelete(order, "open order")}
-                              disabled={orderBusy}
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="paper-legs-table">
-                          <div className="paper-legs-table__head">
-                            <span>Sub item</span>
-                            <span>Type</span>
-                            <span>Purchase price</span>
-                            <span>Contracts</span>
-                            <span>Current mark</span>
-                            <span>Current value</span>
-                            <span>P&amp;L</span>
-                          </div>
-                          {order.legs.map((leg) => {
-                            const legDraft = draft.legs?.[String(leg.id)] ?? {
-                              entryPrice: String(leg.entryPrice ?? ""),
-                              quantity: String(leg.quantity ?? "")
-                            };
-                            const legUrl = getLegUrl(order, leg);
-                            const polymarketReferenceLine = getPolymarketReferenceLine(order, leg);
-
-                            return (
-                              <div key={leg.id} className="paper-legs-table__row">
-                                <span className="paper-legs-table__label">
-                                  <strong>{getLegTitle(order, leg)}</strong>
-                                  <small>{renderLegDescriptor(leg)}</small>
-                                  {legUrl ? (
-                                    <a href={legUrl} target="_blank" rel="noreferrer">
-                                      {legUrl}
-                                    </a>
-                                  ) : null}
-                                  {polymarketReferenceLine ? <small>{polymarketReferenceLine}</small> : null}
-                                </span>
-                                <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
-                                <span>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    max={leg.kind === "binary" ? "1" : undefined}
-                                    step="0.01"
-                                    value={legDraft.entryPrice}
-                                    onChange={(event) =>
-                                      updateDraft(order.id, (current) => ({
-                                        ...current,
-                                        legs: {
-                                          ...current.legs,
-                                          [String(leg.id)]: {
-                                            ...(current.legs?.[String(leg.id)] ?? {}),
-                                            entryPrice: event.target.value
-                                          }
-                                        }
-                                      }))
-                                    }
-                                  />
-                                </span>
-                                <span>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="1"
-                                    value={legDraft.quantity}
-                                    onChange={(event) =>
-                                      updateDraft(order.id, (current) => ({
-                                        ...current,
-                                        legs: {
-                                          ...current.legs,
-                                          [String(leg.id)]: {
-                                            ...(current.legs?.[String(leg.id)] ?? {}),
-                                            quantity: event.target.value
-                                          }
-                                        }
-                                      }))
-                                    }
-                                  />
-                                </span>
-                                <span>{formatCurrency(leg.currentPrice, leg.kind === "binary" ? 4 : 2)}</span>
-                                <span>{formatCurrency(leg.currentExposure)}</span>
-                                <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
-                                  {formatCurrency(leg.profitLossValue)}
-                                </span>
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        <div className="paper-order-footer">
-                          <span>
-                            Live context: {order.valuationContext.proxySymbol || "Proxy"} {formatCurrency(order.valuationContext.currentProxySpot)}
-                          </span>
-                          <span>YES mark {formatPercent((order.valuationContext.currentYesPrice ?? 0) * 100)}</span>
-                          <span>Target {formatCurrency(order.valuationContext.targetUnderlyingValue)}</span>
-                        </div>
-
-                        {feedback ? (
-                          <div className={`refresh-feedback refresh-feedback--${feedback.tone}`}>
-                            <span>{feedback.message}</span>
-                          </div>
-                        ) : null}
-                        </article>
                       );
                     })}
                   </div>
@@ -810,7 +927,13 @@ export default function PaperTradingWorkspace({
                     <ClosedOrderCard
                       key={order.id}
                       order={order}
+                      isExpanded={expandedOrderKey === `order:${order.id}`}
                       lastUpdated={lastUpdated}
+                      onToggle={() =>
+                        setExpandedOrderKey((current) =>
+                          current === `order:${order.id}` ? null : `order:${order.id}`
+                        )
+                      }
                       onDeletePaperOrder={onDeletePaperOrder}
                       onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
                       busyOrderId={busyOrderId}

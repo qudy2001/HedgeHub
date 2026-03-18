@@ -52,7 +52,7 @@ export default function StrategyRail({
                     {strategy.status}
                   </span>
                 </div>
-                <div className="strategy-card__asset">{strategy.assetLabel}</div>
+                {strategy.assetLabel ? <div className="strategy-card__asset">{strategy.assetLabel}</div> : null}
                 <p>{strategy.description}</p>
               </button>
             );

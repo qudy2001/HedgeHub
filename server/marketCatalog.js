@@ -343,10 +343,10 @@ export const calendarWidgets = {
 export const sidebarStrategies = [
   {
     id: "strategy-1",
-    name: "BTC Threshold Hedge",
+    name: "Threshold Hedge",
     status: "ready",
-    assetLabel: "BTC / IBIT",
-    description: "Buy a Bitcoin Polymarket contract and offset the cost with an IBIT call overlay."
+    assetLabel: "",
+    description: "Buy a Polymarket contract and place an options strategy to offset losses or maximize profit."
   },
   {
     id: "strategy-2",
