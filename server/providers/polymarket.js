@@ -2,6 +2,29 @@ const GAMMA_BASE_URL = "https://gamma-api.polymarket.com/markets";
 const MIN_TRADABLE_POLY_PRICE = 0.03;
 const MAX_TRADABLE_POLY_PRICE = 0.97;
 
+export function getPolymarketEventUrl(market) {
+  const url = String(market?.url ?? "").trim();
+  if (url.startsWith("https://polymarket.com/event/")) {
+    return url;
+  }
+
+  const eventSlug = String(market?.eventSlug ?? "").trim();
+  if (eventSlug) {
+    return `https://polymarket.com/event/${eventSlug}`;
+  }
+
+  const marketSlug = String(market?.slug ?? "").trim();
+  if (marketSlug) {
+    return `https://polymarket.com/event/${marketSlug}`;
+  }
+
+  return "";
+}
+
+export function hasPublicPolymarketEvent(market) {
+  return Boolean(getPolymarketEventUrl(market));
+}
+
 async function fetchWithTimeout(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
@@ -73,12 +96,7 @@ function normalizeMarket(rawMarket, overrides = {}) {
     endDate: rawMarket.endDate || rawMarket.end_date || rawMarket.closedTime || null,
     closed: rawMarket.closed ?? rawMarket.isClosed ?? false,
     active: rawMarket.active ?? rawMarket.isActive ?? true,
-    url: overrides.url ||
-      (eventSlug
-      ? `https://polymarket.com/event/${eventSlug}`
-      : slug
-        ? `https://polymarket.com/event/${slug}`
-        : "https://polymarket.com/"),
+    url: overrides.url || getPolymarketEventUrl({ slug, eventSlug }),
     source: overrides.source || rawMarket.source || "live"
   };
 }

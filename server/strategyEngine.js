@@ -1,10 +1,9 @@
 import {
   defaultStrategyConfig,
-  fallbackPolymarketMarkets,
   strategyAssetUniverse
 } from "./marketCatalog.js";
 import { pickOptionReferencePrice } from "./optionPricing.js";
-import { isTradablePolymarketMarket } from "./providers/polymarket.js";
+import { hasPublicPolymarketEvent, isTradablePolymarketMarket } from "./providers/polymarket.js";
 
 function erf(x) {
   const sign = x >= 0 ? 1 : -1;
@@ -418,22 +417,15 @@ function daysUntil(isoDate) {
 }
 
 function getAssetMarkets(asset, polymarketMarkets) {
-  const liveMatches = polymarketMarkets.filter((market) => {
+  return polymarketMarkets.filter((market) => {
     const question = market.question.toLowerCase();
     return (
       isTradablePolymarketMarket(market) &&
+      hasPublicPolymarketEvent(market) &&
       asset.polymarketQueries.some((query) => question.includes(query.split(" ")[0])) &&
       parseTargetFromQuestion(market.question)
     );
   });
-
-  if (liveMatches.length) {
-    return liveMatches;
-  }
-
-  return fallbackPolymarketMarkets.filter(
-    (market) => market.assetId === asset.id && isTradablePolymarketMarket(market)
-  );
 }
 
 function getOptionUniverseForMarket({
