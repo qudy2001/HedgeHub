@@ -1246,6 +1246,39 @@ app.post("/api/paper-orders", async (request, response) => {
   try {
     const order = sanitizePaperOrderPayload(request.body);
     const createdOrder = createPaperOrder(order);
+    const initialCalculatorSnapshotPayload = request.body?.initialCalculatorSnapshot?.payload;
+
+    if (initialCalculatorSnapshotPayload && typeof initialCalculatorSnapshotPayload === "object") {
+      const baseOrderSnapshot =
+        initialCalculatorSnapshotPayload.orderSnapshot &&
+        typeof initialCalculatorSnapshotPayload.orderSnapshot === "object"
+          ? initialCalculatorSnapshotPayload.orderSnapshot
+          : {};
+
+      createPaperCalculatorSnapshot(
+        Number(createdOrder.id),
+        String(request.body?.initialCalculatorSnapshot?.snapshotName ?? "Order placed").trim() || "Order placed",
+        {
+          ...initialCalculatorSnapshotPayload,
+          savedFromOrderId: Number(createdOrder.id),
+          orderSnapshot: {
+            ...baseOrderSnapshot,
+            id: Number(createdOrder.id),
+            purchaseDate: createdOrder.position?.purchaseDate ?? baseOrderSnapshot.purchaseDate ?? "",
+            createdAt: normalizeTimestamp(createdOrder.createdAt) || new Date().toISOString(),
+            closedAt: createdOrder.position?.closedAt ?? baseOrderSnapshot.closedAt ?? "",
+            status: createdOrder.position?.status ?? baseOrderSnapshot.status ?? "open",
+            polymarketResolutionDate:
+              createdOrder.position?.polymarketResolutionDate ?? baseOrderSnapshot.polymarketResolutionDate ?? "",
+            strategyCloseDate:
+              createdOrder.position?.strategyCloseDate ?? baseOrderSnapshot.strategyCloseDate ?? "",
+            marketReferenceYesPrice:
+              createdOrder.position?.marketReferenceYesPrice ?? baseOrderSnapshot.marketReferenceYesPrice ?? 0.5
+          }
+        }
+      );
+    }
+
     const valuedPaperPortfolio = buildPaperPortfolio({
       orders: [createdOrder],
       quotes: liveState.quotes,

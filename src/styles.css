@@ -2901,6 +2901,10 @@ a {
   justify-content: flex-end;
 }
 
+.paper-order-card__dock-actions {
+  margin-left: auto;
+}
+
 .paper-order-card__meta {
   margin: 8px 0 0;
   color: var(--muted);
@@ -2957,6 +2961,17 @@ a {
   display: block;
   font-size: 0.98rem;
   line-height: 1.35;
+}
+
+.paper-order-summary-note {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.paper-order-summary-note.warning {
+  color: var(--amber);
 }
 
 .paper-order-summary-cell .bias-pill {
@@ -3078,11 +3093,17 @@ a {
 
 .paper-scenario-card {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   padding: 16px;
   border-radius: var(--radius-panel);
   border: 1px solid rgba(56, 189, 248, 0.14);
   background: linear-gradient(180deg, rgba(8, 18, 31, 0.78), rgba(15, 23, 42, 0.44));
+}
+
+.paper-scenario-card > * {
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .paper-scenario-card__header {

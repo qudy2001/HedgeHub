@@ -9,7 +9,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
+import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
 import { getChartPalette } from "../theme.js";
 
 function normalCdf(x) {
@@ -1008,6 +1008,7 @@ export default function StrategyFinderWorkspace({
   const [strategyEditorOpen, setStrategyEditorOpen] = useState(false);
   const [chartMode, setChartMode] = useState("date");
   const [chartExpanded, setChartExpanded] = useState(false);
+  const [heatmapRangeMultiplier, setHeatmapRangeMultiplier] = useState(1);
   const [dateFrom, setDateFrom] = useState(finder?.filters?.dateRange?.from ?? "");
   const [dateTo, setDateTo] = useState(finder?.filters?.dateRange?.to ?? "");
   const [activeAssets, setActiveAssets] = useState(availableAssets);
@@ -1501,6 +1502,10 @@ export default function StrategyFinderWorkspace({
     setControls((current) => (current ? { ...current, valuationDate } : current));
   }, [controls, valuationDate]);
 
+  useEffect(() => {
+    setHeatmapRangeMultiplier(1);
+  }, [selectedRowId]);
+
   function updateUnderlyingPriceControl(value) {
     const numericValue = Number(value);
 
@@ -1614,7 +1619,7 @@ export default function StrategyFinderWorkspace({
     setPaperOrderState(null);
 
     try {
-      await onCreatePaperOrder({
+      const baseOrderPayload = {
         strategyId: strategyDefinition?.id ?? "strategy-1",
         strategyName: strategyDefinition?.name ?? "Strategy",
         combinationId: selectedRow.id,
@@ -1679,6 +1684,56 @@ export default function StrategyFinderWorkspace({
             isLive: true
           }))
         ]
+      };
+      const heatmapSnapshot = buildScenarioHeatmapSnapshot({
+        startDate: valuationMinDate,
+        endDate: strategyCloseDate,
+        currentPrice: currentProxySpot || underlyingPrice,
+        volatility: impliedVolatility,
+        spotLabel: proxySpotLabel,
+        priceDigits: proxySpotDigits,
+        secondarySpotLabel: converterRatio > 0 ? actualSpotLabel : "",
+        secondaryPriceDigits: actualSpotDigits,
+        getSecondarySpot: converterRatio > 0 ? (spot) => spot / converterRatio : null,
+        getCellPnL: calculateHeatmapPnL,
+        rangeMultiplier: heatmapRangeMultiplier
+      });
+      const controlsSnapshot = {
+        valuationDate,
+        underlyingPrice: String(underlyingPrice),
+        impliedVolatility: String(
+          controls?.impliedVolatility ?? Number((impliedVolatility * 100).toFixed(2))
+        )
+      };
+      const orderSnapshot = {
+        ...baseOrderPayload,
+        id: null,
+        status: "open",
+        createdAt: null,
+        closedAt: "",
+        valuationContext: {
+          proxySymbol: baseOrderPayload.marketContext.proxySymbol,
+          underlyingSymbol: baseOrderPayload.marketContext.underlyingSymbol,
+          currentProxySpot: baseOrderPayload.marketContext.currentProxySpot,
+          currentUnderlyingSpot: baseOrderPayload.marketContext.currentUnderlyingSpot,
+          conversionRatio: baseOrderPayload.marketContext.conversionRatio,
+          targetUnderlyingValue: baseOrderPayload.marketContext.targetUnderlyingValue,
+          currentYesPrice: estimatedYesPrice
+        }
+      };
+
+      await onCreatePaperOrder({
+        ...baseOrderPayload,
+        initialCalculatorSnapshot: {
+          snapshotName: "Order placed",
+          payload: {
+            savedFromCombinationId: selectedRow.id,
+            snapshotKind: "order-entry",
+            orderSnapshot,
+            controls: controlsSnapshot,
+            heatmapSnapshot
+          }
+        }
       });
 
       setPaperOrderState({
@@ -2880,81 +2935,6 @@ export default function StrategyFinderWorkspace({
                       </div>
                     </div>
 
-                    <div className="detail-chart">
-                      <div className="detail-chart__header">
-                        <div>
-                          <span className="brand__eyebrow">Strategy chart</span>
-                          <p className="detail-chart__copy">
-                            {chartMode === "date"
-                              ? "Date P&L holds the current proxy spot and volatility constant while repricing time decay."
-                              : "Expiry payoff shows how P&L changes across proxy spot levels at resolution."}
-                          </p>
-                        </div>
-                        <div className="chart-toggle-group">
-                          <button
-                            type="button"
-                            className={`chart-toggle ${chartExpanded ? "chart-toggle--active" : ""}`}
-                            onClick={() => setChartExpanded((current) => !current)}
-                          >
-                            {chartExpanded ? "Normal size" : "Expand 4x"}
-                          </button>
-                          <button
-                            type="button"
-                            className={`chart-toggle ${chartMode === "date" ? "chart-toggle--active" : ""}`}
-                            onClick={() => setChartMode("date")}
-                          >
-                            Date P&amp;L
-                          </button>
-                          <button
-                            type="button"
-                            className={`chart-toggle ${chartMode === "spot" ? "chart-toggle--active" : ""}`}
-                            onClick={() => setChartMode("spot")}
-                          >
-                            Expiry payoff
-                          </button>
-                        </div>
-                      </div>
-                      <ResponsiveContainer width="100%" height={chartHeight}>
-                        <ComposedChart data={chartData}>
-                          <CartesianGrid stroke={chartTheme.grid} />
-                          <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
-                          <YAxis
-                            domain={chartDomain}
-                            tickCount={chartTickCount}
-                            tick={{ fill: chartTheme.axis, fontSize: 11 }}
-                          />
-                          <Tooltip
-                            formatter={(value) => formatCurrency(value)}
-                            labelFormatter={(label, payload) =>
-                              chartMode === "date"
-                                ? payload?.[0]?.payload?.date
-                                  ? formatDateLabel(payload[0].payload.date)
-                                  : label
-                                : `Proxy spot ${label}`
-                            }
-                            contentStyle={{
-                              background: chartTheme.tooltipBackground,
-                              border: `1px solid ${chartTheme.tooltipBorder}`,
-                              borderRadius: "14px"
-                            }}
-                          />
-                          <Area
-                            type="monotone"
-                            dataKey="totalPnL"
-                            stroke={chartTheme.strategyAreaStroke}
-                            fill={chartTheme.strategyAreaFill}
-                            strokeWidth={2.2}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey="totalPnL"
-                            stroke={chartTheme.strategyLineStroke}
-                            dot={false}
-                            strokeWidth={1.5}
-                          />
-                        </ComposedChart>
-                      </ResponsiveContainer>
-                    </div>
                   </div>
                 </article>
               </section>
@@ -2973,8 +2953,86 @@ export default function StrategyFinderWorkspace({
                     secondaryPriceDigits={actualSpotDigits}
                     getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
                     getCellPnL={calculateHeatmapPnL}
+                    rangeMultiplier={heatmapRangeMultiplier}
+                    onRangeMultiplierChange={setHeatmapRangeMultiplier}
                     theme={theme}
                   />
+
+                  <section className="detail-chart calculator-section">
+                    <div className="detail-chart__header">
+                      <div>
+                        <span className="brand__eyebrow">Strategy chart</span>
+                        <p className="detail-chart__copy">
+                          {chartMode === "date"
+                            ? "Date P&L holds the current proxy spot and volatility constant while repricing time decay."
+                            : "Expiry payoff shows how P&L changes across proxy spot levels at resolution."}
+                        </p>
+                      </div>
+                      <div className="chart-toggle-group">
+                        <button
+                          type="button"
+                          className={`chart-toggle ${chartExpanded ? "chart-toggle--active" : ""}`}
+                          onClick={() => setChartExpanded((current) => !current)}
+                        >
+                          {chartExpanded ? "Normal size" : "Expand 4x"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`chart-toggle ${chartMode === "date" ? "chart-toggle--active" : ""}`}
+                          onClick={() => setChartMode("date")}
+                        >
+                          Date P&amp;L
+                        </button>
+                        <button
+                          type="button"
+                          className={`chart-toggle ${chartMode === "spot" ? "chart-toggle--active" : ""}`}
+                          onClick={() => setChartMode("spot")}
+                        >
+                          Expiry payoff
+                        </button>
+                      </div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={chartHeight}>
+                      <ComposedChart data={chartData}>
+                        <CartesianGrid stroke={chartTheme.grid} />
+                        <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
+                        <YAxis
+                          domain={chartDomain}
+                          tickCount={chartTickCount}
+                          tick={{ fill: chartTheme.axis, fontSize: 11 }}
+                        />
+                        <Tooltip
+                          formatter={(value) => formatCurrency(value)}
+                          labelFormatter={(label, payload) =>
+                            chartMode === "date"
+                              ? payload?.[0]?.payload?.date
+                                ? formatDateLabel(payload[0].payload.date)
+                                : label
+                              : `Proxy spot ${label}`
+                          }
+                          contentStyle={{
+                            background: chartTheme.tooltipBackground,
+                            border: `1px solid ${chartTheme.tooltipBorder}`,
+                            borderRadius: "14px"
+                          }}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="totalPnL"
+                          stroke={chartTheme.strategyAreaStroke}
+                          fill={chartTheme.strategyAreaFill}
+                          strokeWidth={2.2}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="totalPnL"
+                          stroke={chartTheme.strategyLineStroke}
+                          dot={false}
+                          strokeWidth={1.5}
+                        />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </section>
 
 		              <section className="calculator-section">
 		                <div className="section-heading">

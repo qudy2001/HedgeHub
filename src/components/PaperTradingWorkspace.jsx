@@ -23,13 +23,18 @@ function formatPercent(value) {
   return `${Number(value).toFixed(2)}%`;
 }
 
-function formatDateLabel(value) {
+function parseIsoDate(value) {
   if (!value) {
-    return "n/a";
+    return null;
   }
 
   const date = new Date(`${value}T00:00:00.000Z`);
-  if (Number.isNaN(date.getTime())) {
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatDateLabel(value) {
+  const date = parseIsoDate(value);
+  if (!date) {
     return "n/a";
   }
 
@@ -40,7 +45,36 @@ function formatDateLabel(value) {
   }).format(date);
 }
 
-function formatDateTimeLabel(value) {
+function getTodayIsoDate() {
+  const today = new Date();
+  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(
+    today.getDate()
+  ).padStart(2, "0")}`;
+}
+
+function formatTimeLabel(value, { includeSeconds = false } = {}) {
+  if (!value) {
+    return "n/a";
+  }
+
+  const normalizedValue =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+      ? `${value.replace(" ", "T")}Z`
+      : value;
+  const date = new Date(normalizedValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return "n/a";
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: includeSeconds ? "2-digit" : undefined
+  }).format(date);
+}
+
+function formatDateTimeLabel(value, { includeSeconds = false } = {}) {
   if (!value) {
     return "n/a";
   }
@@ -60,7 +94,8 @@ function formatDateTimeLabel(value) {
     month: "short",
     year: "numeric",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
+    second: includeSeconds ? "2-digit" : undefined
   }).format(date);
 }
 
@@ -252,12 +287,66 @@ function formatBoundedCurrency(value, isUnbounded = false) {
   return formatCurrency(value);
 }
 
+function formatPurchaseDateTimeLabel(order) {
+  const dateLabel = formatDateLabel(order.purchaseDate || order.createdAt?.slice(0, 10));
+  const timeLabel = formatTimeLabel(order.createdAt, { includeSeconds: true });
+
+  if (dateLabel === "n/a") {
+    return timeLabel;
+  }
+
+  if (timeLabel === "n/a") {
+    return dateLabel;
+  }
+
+  return `${dateLabel} ${timeLabel}`;
+}
+
 function getOrderExpirationDate(order) {
   return order.strategyCloseDate || order.polymarketResolutionDate || "";
 }
 
 function getOrderTagLabel(order) {
   return order.marketBias || order.strategyName || "Open";
+}
+
+function countTradingDaysUntil(dateValue, startValue = getTodayIsoDate()) {
+  const start = parseIsoDate(startValue);
+  const end = parseIsoDate(dateValue);
+
+  if (!start || !end || end.getTime() < start.getTime()) {
+    return 0;
+  }
+
+  const cursor = new Date(start);
+  cursor.setUTCDate(cursor.getUTCDate() + 1);
+
+  let tradingDays = 0;
+
+  while (cursor.getTime() <= end.getTime()) {
+    const day = cursor.getUTCDay();
+    if (day !== 0 && day !== 6) {
+      tradingDays += 1;
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  return tradingDays;
+}
+
+function getExpirationCountdown(order) {
+  const expirationDate = getOrderExpirationDate(order);
+
+  if (!expirationDate) {
+    return null;
+  }
+
+  const tradingDays = countTradingDaysUntil(expirationDate);
+
+  return {
+    label: `(${tradingDays} trading day${tradingDays === 1 ? "" : "s"})`,
+    tone: tradingDays < 3 ? "negative" : tradingDays < 10 ? "warning" : "positive"
+  };
 }
 
 function OrderSummaryStrip({ items }) {
@@ -273,6 +362,7 @@ function OrderSummaryStrip({ items }) {
           ) : (
             <strong className={item.tone ?? ""}>{item.value}</strong>
           )}
+          {item.note ? <small className={`paper-order-summary-note ${item.noteTone ?? ""}`}>{item.note}</small> : null}
         </div>
       ))}
     </div>
@@ -298,10 +388,16 @@ function OpenOrderCard({
 }) {
   const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
   const expirationDate = getOrderExpirationDate(order);
+  const expirationCountdown = getExpirationCountdown(order);
   const summaryItems = [
     { label: "Initial cost", value: formatCurrency(order.initialPurchaseValue) },
     { label: "Date in", value: formatDateLabel(order.purchaseDate) },
-    { label: "Expiration", value: formatDateLabel(expirationDate) },
+    {
+      label: "Expiration",
+      value: formatDateLabel(expirationDate),
+      note: expirationCountdown?.label ?? "",
+      noteTone: expirationCountdown?.tone ?? ""
+    },
     { label: "Asset", value: order.assetLabel || "n/a" },
     { label: "Strategy type", value: order.strategyType || "Custom" },
     { label: "Tag", value: getOrderTagLabel(order), kind: "tag", tone: order.marketBiasTone ?? "neutral" },
@@ -319,7 +415,7 @@ function OpenOrderCard({
           <span className="brand__eyebrow">Open holding</span>
           <h3>{order.combinationLabel}</h3>
           <p className="paper-order-card__meta">
-            {order.assetLabel} · {order.strategyType || "Custom"} · Purchased {formatDateLabel(order.purchaseDate)}
+            {order.assetLabel} · {order.strategyType || "Custom"} · Purchased {formatPurchaseDateTimeLabel(order)}
           </p>
         </div>
         <div className="paper-order-card__actions">
@@ -480,10 +576,6 @@ function OpenOrderCard({
       ) : null}
 
       <div className="paper-order-card__dock">
-        <div className="paper-order-card__dock-copy">
-          <span>{isExpanded ? "Expanded details" : "Collapsed by default"}</span>
-          <strong>{getOrderTagLabel(order)}</strong>
-        </div>
         <div className="paper-order-card__dock-actions">
           <button
             type="button"
@@ -557,8 +649,8 @@ function ClosedOrderCard({
           <span className="brand__eyebrow">Closed order</span>
           <h3>{order.combinationLabel}</h3>
           <p className="paper-order-card__meta">
-            {order.assetLabel} · {order.strategyType || "Custom"} · Bought {formatDateTimeLabel(order.createdAt)} · Closed{" "}
-            {formatDateTimeLabel(order.closedAt)}
+            {order.assetLabel} · {order.strategyType || "Custom"} · Bought {formatPurchaseDateTimeLabel(order)} · Closed{" "}
+            {formatDateTimeLabel(order.closedAt, { includeSeconds: true })}
           </p>
         </div>
         <div className="paper-order-card__actions">
@@ -690,8 +782,8 @@ function ClosedOrderCard({
 
           <div className="paper-order-footer">
             <span>Bought date {formatDateLabel(order.purchaseDate)}</span>
-            <span>Bought time {formatDateTimeLabel(order.createdAt)}</span>
-            <span>Close time {formatDateTimeLabel(order.closedAt)}</span>
+            <span>Bought time {formatDateTimeLabel(order.createdAt, { includeSeconds: true })}</span>
+            <span>Close time {formatDateTimeLabel(order.closedAt, { includeSeconds: true })}</span>
             <span>Proxy {order.valuationContext.proxySymbol || "Proxy"}</span>
             <span>Target {formatCurrency(order.valuationContext.targetUnderlyingValue)}</span>
           </div>
@@ -699,10 +791,6 @@ function ClosedOrderCard({
       ) : null}
 
       <div className="paper-order-card__dock">
-        <div className="paper-order-card__dock-copy">
-          <span>{isExpanded ? "Expanded details" : "Collapsed by default"}</span>
-          <strong>{getOrderTagLabel(order)}</strong>
-        </div>
         <div className="paper-order-card__dock-actions">
           <button
             type="button"

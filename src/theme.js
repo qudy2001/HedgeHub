@@ -93,6 +93,20 @@ export function getScenarioHeatmapCellStyle(value, maxAbsValue, theme) {
   const intensity = maxAbsValue > 0 ? Math.min(Math.abs(value) / maxAbsValue, 1) : 0;
   const nearFlat = Math.abs(value) < Math.max(maxAbsValue * 0.08, 25);
 
+  if (nearFlat && value >= 0) {
+    return isLightTheme(theme)
+      ? {
+          background: "#dcfce7",
+          borderColor: "#86efac",
+          color: "#166534"
+        }
+      : {
+          background: "#a7f3d0",
+          borderColor: "#6ee7b7",
+          color: "#052e16"
+        };
+  }
+
   if (nearFlat) {
     return {
       background: "#facc15",

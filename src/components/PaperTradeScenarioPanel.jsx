@@ -9,7 +9,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
+import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
 import { getChartPalette } from "../theme.js";
 
 function clamp(value, min, max) {
@@ -475,6 +475,7 @@ export default function PaperTradeScenarioPanel({
   const [activeSnapshotId, setActiveSnapshotId] = useState(null);
   const [controls, setControls] = useState(() => buildDefaultControls(order, lastUpdated));
   const [chartMode, setChartMode] = useState("date");
+  const [heatmapRangeMultiplier, setHeatmapRangeMultiplier] = useState(1);
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [chartPanelHeight, setChartPanelHeight] = useState(null);
@@ -496,6 +497,7 @@ export default function PaperTradeScenarioPanel({
   useEffect(() => {
     setActiveSnapshotId(null);
     setControls(buildDefaultControls(order, lastUpdated));
+    setHeatmapRangeMultiplier(1);
     setFeedback(null);
     setSavingSnapshot(false);
   }, [order.id]);
@@ -892,6 +894,20 @@ export default function PaperTradeScenarioPanel({
     setFeedback(null);
 
     try {
+      const heatmapSnapshot = buildScenarioHeatmapSnapshot({
+        startDate: valuationMinDate,
+        endDate: strategyCloseDate,
+        currentPrice: currentProxySpot || underlyingPrice,
+        volatility: impliedVolatility,
+        spotLabel: proxySpotLabel,
+        priceDigits: proxySpotDigits,
+        secondarySpotLabel: converterRatio > 0 ? actualSpotLabel : "",
+        secondaryPriceDigits: actualSpotDigits,
+        getSecondarySpot: converterRatio > 0 ? (spot) => spot / converterRatio : null,
+        getCellPnL: calculateHeatmapPnL,
+        rangeMultiplier: heatmapRangeMultiplier
+      });
+
       await onSaveCalculatorSnapshot(order.id, {
         snapshotName: order.combinationLabel,
         payload: {
@@ -901,7 +917,8 @@ export default function PaperTradeScenarioPanel({
             valuationDate,
             underlyingPrice: String(underlyingPrice),
             impliedVolatility: String(controls.impliedVolatility ?? "24")
-          }
+          },
+          heatmapSnapshot
         }
       });
 
@@ -922,6 +939,7 @@ export default function PaperTradeScenarioPanel({
 
   function handleLoadSnapshot(snapshot) {
     setActiveSnapshotId(snapshot.id);
+    setHeatmapRangeMultiplier(snapshot.payload?.heatmapSnapshot?.rangeMultiplier ?? 1);
     setControls(
       buildDefaultControls(
         snapshot.payload?.orderSnapshot ?? order,
@@ -939,6 +957,7 @@ export default function PaperTradeScenarioPanel({
   function handleResetToLive() {
     setActiveSnapshotId(null);
     setControls(buildDefaultControls(order, lastUpdated));
+    setHeatmapRangeMultiplier(1);
     setFeedback(null);
   }
 
@@ -1014,6 +1033,9 @@ export default function PaperTradeScenarioPanel({
             secondaryPriceDigits={actualSpotDigits}
             getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
             getCellPnL={calculateHeatmapPnL}
+            rangeMultiplier={heatmapRangeMultiplier}
+            onRangeMultiplierChange={setHeatmapRangeMultiplier}
+            snapshot={activeSnapshot?.payload?.heatmapSnapshot ?? null}
             theme={theme}
           />
           <div className="calculator-studio paper-scenario-card__studio">
