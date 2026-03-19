@@ -1187,7 +1187,8 @@ function buildStrategyFinder({
     eth: 0.56,
     gold: 0.18,
     oil: 0.3,
-    stocks: 0.22
+    stocks: 0.22,
+    "stocks-spy": 0.22
   };
 
   const rows = strategyAssetUniverse.flatMap((asset) => {
@@ -1642,7 +1643,8 @@ function buildAssetScans({
     eth: 0.58,
     gold: 0.18,
     oil: 0.32,
-    stocks: 0.22
+    stocks: 0.22,
+    "stocks-spy": 0.22
   };
 
   return strategyAssetUniverse

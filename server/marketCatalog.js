@@ -428,12 +428,21 @@ export const strategyAssetUniverse = [
   },
   {
     id: "stocks",
-    label: "US Stocks",
+    label: "US Stocks(VOO)",
     polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
     optionSymbol: "VOO",
     underlyingSymbol: "SPX-INDEX",
     referenceSymbol: "AMEX:VOO",
     conversionFallback: 0.091
+  },
+  {
+    id: "stocks-spy",
+    label: "US Stocks(SPY)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "SPY",
+    underlyingSymbol: "SPX-INDEX",
+    referenceSymbol: "AMEX:SPY",
+    conversionFallback: 0.1
   }
 ];
 
