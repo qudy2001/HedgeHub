@@ -1,6 +1,8 @@
 :root {
   color-scheme: dark;
   --bg: #0b0e11;
+  --bg-gradient-start: #131722;
+  --bg-gradient-end: #0b0e11;
   --panel: rgba(19, 23, 34, 0.9);
   --panel-strong: rgba(19, 23, 34, 0.98);
   --line: rgba(240, 243, 250, 0.12);
@@ -12,11 +14,58 @@
   --rose: #fb7185;
   --teal: #2dd4bf;
   --shadow: 0 18px 40px rgba(0, 0, 0, 0.24);
+  --surface-soft: rgba(15, 23, 42, 0.58);
+  --surface-muted: rgba(15, 23, 42, 0.5);
+  --surface-strong: rgba(2, 6, 23, 0.5);
+  --surface-emphasis: rgba(30, 41, 59, 0.82);
+  --button-bg: rgba(15, 23, 42, 0.5);
+  --button-hover: rgba(255, 255, 255, 0.06);
+  --button-border: rgba(148, 163, 184, 0.18);
+  --active-bg: rgba(56, 189, 248, 0.14);
+  --active-border: rgba(56, 189, 248, 0.45);
+  --header-bg: rgba(19, 23, 34, 0.98);
+  --header-border: rgba(240, 243, 250, 0.08);
+  --input-bg: rgba(15, 23, 42, 0.64);
+  --input-bg-strong: rgba(2, 6, 23, 0.46);
+  --page-glow:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 28%),
+    radial-gradient(circle at top right, rgba(245, 158, 11, 0.08), transparent 24%);
   --font-sans: -apple-system, BlinkMacSystemFont, "Trebuchet MS", "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   --radius-shell: 18px;
   --radius-panel: 12px;
   --radius-control: 8px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e7edf4;
+  --bg-gradient-start: #fbfdff;
+  --bg-gradient-end: #e7edf4;
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-strong: rgba(255, 255, 255, 0.96);
+  --line: rgba(148, 163, 184, 0.22);
+  --text: #0f172a;
+  --muted: #475569;
+  --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+  --surface-soft: rgba(255, 255, 255, 0.88);
+  --surface-muted: rgba(248, 250, 252, 0.94);
+  --surface-strong: rgba(241, 245, 249, 0.96);
+  --surface-emphasis: rgba(226, 232, 240, 0.88);
+  --button-bg: rgba(255, 255, 255, 0.72);
+  --button-hover: rgba(226, 232, 240, 0.82);
+  --button-border: rgba(148, 163, 184, 0.28);
+  --active-bg: rgba(14, 165, 233, 0.12);
+  --active-border: rgba(2, 132, 199, 0.38);
+  --header-bg: rgba(255, 255, 255, 0.92);
+  --header-border: rgba(148, 163, 184, 0.18);
+  --input-bg: rgba(255, 255, 255, 0.84);
+  --input-bg-strong: rgba(248, 250, 252, 0.95);
+  --surface-grey: rgba(233, 235, 239, 0.96);
+  --surface-grey-strong: rgba(226, 229, 234, 0.98);
+  --page-glow:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 32%),
+    radial-gradient(circle at top right, rgba(245, 158, 11, 0.1), transparent 28%);
 }
 
 * {
@@ -26,7 +75,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  background: linear-gradient(180deg, #131722 0%, #0b0e11 100%);
+  background: linear-gradient(180deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
   color: var(--text);
   font-family: var(--font-sans);
 }
@@ -36,7 +85,7 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background: none;
+  background: var(--page-glow);
 }
 
 button,
@@ -64,9 +113,40 @@ a {
   padding: 24px;
 }
 
+.app-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.theme-toggle {
+  min-height: 42px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--button-border);
+  background: var(--button-bg);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.theme-toggle:hover {
+  transform: translateY(-1px);
+  background: var(--button-hover);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+
 .app-header-banner {
-  border-bottom: 1px solid rgba(240, 243, 250, 0.08);
-  background: rgba(19, 23, 34, 0.98);
+  border-bottom: 1px solid var(--header-border);
+  background: var(--header-bg);
 }
 
 .app-grid {
@@ -3518,4 +3598,304 @@ a {
   .calendar-row {
     min-width: 720px;
   }
+}
+
+:root[data-theme="light"] :is(.sidebar, .workspace) {
+  background: var(--panel);
+}
+
+:root[data-theme="light"] .sidebar__section--summary {
+  background: linear-gradient(180deg, rgba(255, 251, 235, 0.96), rgba(255, 255, 255, 0.9));
+  border-color: rgba(245, 158, 11, 0.18);
+}
+
+:root[data-theme="light"] :is(
+  .metric-card,
+  .insight-card,
+  .chart-card,
+  .scan-card,
+  .watch-card,
+  .tv-card,
+  .market-panel,
+  .calendar-column,
+  .macro-layout-diagnostics,
+  .macro-atlas__total,
+  .macro-lookback,
+  .macro-atlas__legend,
+  .macro-flow-card,
+  .macro-heatmap-card,
+  .macro-methodology,
+  .macro-load-panel__item,
+  .macro-load-panel__empty,
+  .macro-layout-active,
+  .macro-layout-error,
+  .finder-table-card,
+  .finder-menu__panel,
+  .detail-panel,
+  .detail-chart,
+  .detail-panel--controls,
+  .calculator-card,
+  .calculator-line,
+  .calendar-panel,
+  .calendar-row,
+  .paper-history-card,
+  .paper-order-card,
+  .paper-order-editbar,
+  .paper-scenario-card__chart,
+  .paper-scenario-card__sliders,
+  .scenario-heatmap__frame,
+  .scenario-heatmap__table,
+  .paper-order-summary-cell,
+  .paper-legs-table__row,
+  .selection-banner
+) {
+  background: var(--surface-soft);
+  border-color: var(--line);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+:root[data-theme="light"] :is(.summary-row, .paper-order-summary-strip) {
+  background: var(--surface-grey);
+  border-color: rgba(148, 163, 184, 0.14);
+}
+
+:root[data-theme="light"] :is(.finder-row:hover, .finder-row--active) {
+  background: var(--surface-grey);
+}
+
+:root[data-theme="light"] .summary-row {
+  box-shadow: none;
+}
+
+:root[data-theme="light"] :is(.detail-panel, .detail-chart, .paper-history-card, .paper-scenario-card) {
+  background: var(--surface-grey);
+  border-color: rgba(148, 163, 184, 0.14);
+}
+
+:root[data-theme="light"] .paper-scenario-card__studio {
+  background:
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.06), transparent 26%),
+    linear-gradient(180deg, rgba(236, 239, 243, 0.98), rgba(230, 233, 238, 0.96));
+}
+
+:root[data-theme="light"] :is(
+  .macro-dashboard-bar,
+  .macro-atlas__header,
+  .macro-load-panel,
+  .macro-flow-card--summary,
+  .macro-flow-card--controls,
+  .calculator-studio
+) {
+  border-color: rgba(56, 189, 248, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.08), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(241, 245, 249, 0.94));
+}
+
+:root[data-theme="light"] .macro-flow-card--summary {
+  border-color: rgba(245, 158, 11, 0.2);
+  background:
+    radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 251, 235, 0.94));
+}
+
+:root[data-theme="light"] .calculator-studio {
+  border-color: rgba(168, 85, 247, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(168, 85, 247, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.94));
+}
+
+:root[data-theme="light"] .dashboard-button,
+:root[data-theme="light"] .strategy-card,
+:root[data-theme="light"] .pill,
+:root[data-theme="light"] .chart-toggle,
+:root[data-theme="light"] .chip,
+:root[data-theme="light"] .macro-layout-button,
+:root[data-theme="light"] .macro-lookback__button,
+:root[data-theme="light"] .finder-menu > summary,
+:root[data-theme="light"] .finder-menu__option,
+:root[data-theme="light"] .finder-menu__reset,
+:root[data-theme="light"] .finder-control,
+:root[data-theme="light"] .finder-control--static {
+  background: var(--button-bg);
+  border-color: var(--button-border);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .strategy-card--active {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.12), rgba(255, 255, 255, 0.96));
+}
+
+:root[data-theme="light"] :is(
+  .dashboard-button--active,
+  .chart-toggle--active,
+  .chip--active,
+  .macro-lookback__button--active,
+  .finder-row--active,
+  .finder-menu__option--active
+) {
+  background: var(--active-bg);
+  border-color: var(--active-border);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .pill--live {
+  border-color: rgba(22, 163, 74, 0.26);
+  background: rgba(22, 163, 74, 0.1);
+  color: #166534;
+}
+
+:root[data-theme="light"] .macro-layout-button--primary {
+  border-color: rgba(245, 158, 11, 0.32);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.18), rgba(255, 237, 213, 0.94));
+  color: #9a3412;
+}
+
+:root[data-theme="light"] .warning-strip span,
+:root[data-theme="light"] .refresh-feedback--error {
+  border-color: rgba(244, 63, 94, 0.2);
+  background: rgba(255, 241, 242, 0.96);
+  color: #9f1239;
+}
+
+:root[data-theme="light"] .refresh-feedback--info {
+  border-color: rgba(2, 132, 199, 0.22);
+  background: rgba(240, 249, 255, 0.96);
+  color: #075985;
+}
+
+:root[data-theme="light"] .refresh-feedback--success {
+  border-color: rgba(22, 163, 74, 0.2);
+  background: rgba(240, 253, 244, 0.96);
+  color: #166534;
+}
+
+:root[data-theme="light"] .refresh-feedback--warning {
+  border-color: rgba(245, 158, 11, 0.22);
+  background: rgba(255, 251, 235, 0.96);
+  color: #92400e;
+}
+
+:root[data-theme="light"] .metric-card--amber {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.14), rgba(255, 255, 255, 0.96));
+}
+
+:root[data-theme="light"] .metric-card--emerald {
+  background: linear-gradient(180deg, rgba(34, 197, 94, 0.14), rgba(255, 255, 255, 0.96));
+}
+
+:root[data-theme="light"] .metric-card--sky {
+  background: linear-gradient(180deg, rgba(14, 165, 233, 0.14), rgba(255, 255, 255, 0.96));
+}
+
+:root[data-theme="light"] .metric-card--rose {
+  background: linear-gradient(180deg, rgba(244, 63, 94, 0.14), rgba(255, 255, 255, 0.96));
+}
+
+:root[data-theme="light"] .metric-card--teal {
+  background: linear-gradient(180deg, rgba(20, 184, 166, 0.14), rgba(255, 255, 255, 0.96));
+}
+
+:root[data-theme="light"] :is(input, select, textarea) {
+  border-color: var(--button-border);
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+:root[data-theme="light"] input::placeholder,
+:root[data-theme="light"] textarea::placeholder {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .calculator-controls input,
+:root[data-theme="light"] .calculator-line__value input,
+:root[data-theme="light"] .calculator-slider__number,
+:root[data-theme="light"] .finder-menu__custom input {
+  background: var(--input-bg-strong);
+}
+
+:root[data-theme="light"] .macro-load-panel__item:hover {
+  border-color: rgba(2, 132, 199, 0.24);
+  background: rgba(239, 246, 255, 0.96);
+}
+
+:root[data-theme="light"] .macro-lookback__button:hover,
+:root[data-theme="light"] .macro-layout-button:hover:not(:disabled),
+:root[data-theme="light"] .dashboard-button:hover,
+:root[data-theme="light"] .strategy-card:hover,
+:root[data-theme="light"] .chip:hover,
+:root[data-theme="light"] .chart-toggle:hover {
+  background: var(--button-hover);
+}
+
+:root[data-theme="light"] .macro-watchlist-tile__eyebrow span:last-child,
+:root[data-theme="light"] .macro-group-block__header > span,
+:root[data-theme="light"] .macro-tile__value,
+:root[data-theme="light"] .finder-range-tag,
+:root[data-theme="light"] .calculator-line__calc,
+:root[data-theme="light"] .leg-reference code,
+:root[data-theme="light"] .calculator-line__reference code {
+  color: var(--text);
+}
+
+:root[data-theme="light"] .finder-range-tag {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+:root[data-theme="light"] :is(.formula-pill--market, .bias-pill--bull) {
+  background: rgba(22, 163, 74, 0.14);
+  color: #166534;
+}
+
+:root[data-theme="light"] :is(.formula-pill--market-short, .formula-pill--short, .bias-pill--bear) {
+  background: rgba(225, 29, 72, 0.14);
+  color: #9f1239;
+}
+
+:root[data-theme="light"] :is(.formula-pill--call, .bias-pill--breakout) {
+  background: rgba(59, 130, 246, 0.14);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .formula-pill--put {
+  background: rgba(168, 85, 247, 0.14);
+  color: #7c3aed;
+}
+
+:root[data-theme="light"] .bias-pill--range {
+  background: rgba(245, 158, 11, 0.14);
+  color: #92400e;
+}
+
+:root[data-theme="light"] .bias-pill--neutral {
+  background: rgba(148, 163, 184, 0.14);
+  color: #475569;
+}
+
+:root[data-theme="light"] .scenario-heatmap__row--current th {
+  background:
+    linear-gradient(90deg, rgba(2, 132, 199, 0.14), rgba(2, 132, 199, 0.04)),
+    var(--surface-grey);
+}
+
+:root[data-theme="light"] .scenario-heatmap__row--current .scenario-heatmap__row-label strong {
+  color: var(--text);
+}
+
+:root[data-theme="light"] .scenario-heatmap__row--current .scenario-heatmap__row-label small {
+  color: #0369a1;
+}
+
+:root[data-theme="light"] .scenario-heatmap__frame {
+  background: var(--surface-grey-strong);
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+:root[data-theme="light"] .scenario-heatmap__table thead th,
+:root[data-theme="light"] .scenario-heatmap__table th:first-child {
+  background: var(--surface-grey-strong);
 }

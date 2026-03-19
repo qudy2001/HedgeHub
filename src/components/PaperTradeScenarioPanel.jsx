@@ -10,6 +10,7 @@ import {
   YAxis
 } from "recharts";
 import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
+import { getChartPalette } from "../theme.js";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -466,8 +467,10 @@ function buildDefaultControls(order, referenceTimestamp, snapshotControls = null
 export default function PaperTradeScenarioPanel({
   order,
   lastUpdated,
-  onSaveCalculatorSnapshot
+  onSaveCalculatorSnapshot,
+  theme = "dark"
 }) {
+  const chartTheme = getChartPalette(theme);
   const [panelOpen, setPanelOpen] = useState(false);
   const [activeSnapshotId, setActiveSnapshotId] = useState(null);
   const [controls, setControls] = useState(() => buildDefaultControls(order, lastUpdated));
@@ -1011,6 +1014,7 @@ export default function PaperTradeScenarioPanel({
             secondaryPriceDigits={actualSpotDigits}
             getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
             getCellPnL={calculateHeatmapPnL}
+            theme={theme}
           />
           <div className="calculator-studio paper-scenario-card__studio">
           <div ref={mainLayoutRef} className="paper-scenario-card__main">
@@ -1047,9 +1051,9 @@ export default function PaperTradeScenarioPanel({
               <div className="paper-scenario-card__chart-frame">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={chartData}>
-                    <CartesianGrid stroke="rgba(148,163,184,0.12)" />
-                    <XAxis dataKey={chartXAxisKey} tick={{ fill: "rgba(226,232,240,0.65)", fontSize: 11 }} />
-                    <YAxis domain={chartDomain} tick={{ fill: "rgba(226,232,240,0.65)", fontSize: 11 }} />
+                    <CartesianGrid stroke={chartTheme.grid} />
+                    <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
+                    <YAxis domain={chartDomain} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
                     <Tooltip
                       formatter={(value) => formatCurrency(value)}
                       labelFormatter={(label, payload) =>
@@ -1060,22 +1064,22 @@ export default function PaperTradeScenarioPanel({
                           : `Proxy spot ${label}`
                       }
                       contentStyle={{
-                        background: "rgba(15, 23, 42, 0.96)",
-                        border: "1px solid rgba(148, 163, 184, 0.18)",
+                        background: chartTheme.tooltipBackground,
+                        border: `1px solid ${chartTheme.tooltipBorder}`,
                         borderRadius: "14px"
                       }}
                     />
                     <Area
                       type="monotone"
                       dataKey="totalPnL"
-                      stroke="#2dd4bf"
-                      fill="rgba(45, 212, 191, 0.15)"
+                      stroke={chartTheme.strategyAreaStroke}
+                      fill={chartTheme.strategyAreaFill}
                       strokeWidth={2.2}
                     />
                     <Line
                       type="monotone"
                       dataKey="totalPnL"
-                      stroke="#f59e0b"
+                      stroke={chartTheme.strategyLineStroke}
                       dot={false}
                       strokeWidth={1.5}
                     />

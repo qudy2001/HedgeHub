@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getScenarioHeatmapCellStyle } from "../theme.js";
 
 const DEFAULT_RANGE_MULTIPLIER = 1;
 const RANGE_OPTIONS = [1, 2, 3];
@@ -155,55 +156,8 @@ function buildPriceRows({ centerPrice, volatility, totalDays, rangeMultiplier, r
   });
 }
 
-function buildCellStyle(value, maxAbsValue) {
-  if (!Number.isFinite(value)) {
-    return {
-      background: "rgba(15, 23, 42, 0.54)",
-      borderColor: "rgba(148, 163, 184, 0.12)",
-      color: "#94a3b8"
-    };
-  }
-
-  const intensity = maxAbsValue > 0 ? clamp(Math.abs(value) / maxAbsValue, 0, 1) : 0;
-  const nearFlat = Math.abs(value) < Math.max(maxAbsValue * 0.08, 25);
-
-  if (nearFlat) {
-    return {
-      background: "#facc15",
-      borderColor: "#fcd34d",
-      color: "#1f2937"
-    };
-  }
-
-  if (value >= 0) {
-    if (intensity >= 0.55) {
-      return {
-        background: "#22c55e",
-        borderColor: "#4ade80",
-        color: "#052e16"
-      };
-    }
-
-    return {
-      background: "#86efac",
-      borderColor: "#bbf7d0",
-      color: "#14532d"
-    };
-  }
-
-  if (intensity >= 0.55) {
-    return {
-      background: "#ef4444",
-      borderColor: "#f87171",
-      color: "#450a0a"
-    };
-  }
-
-  return {
-    background: "#fb923c",
-    borderColor: "#fdba74",
-    color: "#431407"
-  };
+function buildCellStyle(value, maxAbsValue, theme) {
+  return getScenarioHeatmapCellStyle(value, maxAbsValue, theme);
 }
 
 export default function ScenarioHeatmap({
@@ -221,7 +175,8 @@ export default function ScenarioHeatmap({
   getSecondarySpot = null,
   rowCount = DEFAULT_ROW_COUNT,
   columnCount = DEFAULT_COLUMN_COUNT,
-  getCellPnL
+  getCellPnL,
+  theme = "dark"
 }) {
   const [rangeMultiplier, setRangeMultiplier] = useState(DEFAULT_RANGE_MULTIPLIER);
   const numericCurrentPrice = Number(currentPrice);
@@ -343,7 +298,7 @@ export default function ScenarioHeatmap({
                   <td
                     key={`${row.id}-${cell.date}`}
                     className="scenario-heatmap__cell"
-                    style={buildCellStyle(cell.pnl, maxAbsPnl)}
+                    style={buildCellStyle(cell.pnl, maxAbsPnl, theme)}
                     title={`${formatDateLabel(cell.date)} · ${spotLabel} ${formatCurrency(row.spot, "USD", priceDigits)} · P/L ${formatCurrency(cell.pnl)}`}
                   >
                     <span>{formatCellCurrency(cell.pnl)}</span>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import TradingViewWidget from "./TradingViewWidget.jsx";
+import { getMacroTileColors } from "../theme.js";
 
 const DEFAULT_SECTION_HEIGHTS = {
   "global-markets": 1200,
@@ -313,30 +314,8 @@ function buildBinaryTreemap(items, valueKey, x = 0, y = 0, width = 100, height =
   ];
 }
 
-function getTileColors(changePct) {
-  const intensity = Math.min(Math.abs(changePct ?? 0), 8) / 8;
-
-  if ((changePct ?? 0) >= 0) {
-    return {
-      background:
-        `radial-gradient(circle at top left, rgba(52, 211, 153, ${0.14 + intensity * 0.2}), transparent 64%), ` +
-        "linear-gradient(180deg, rgba(17, 24, 39, 0.92), rgba(2, 6, 23, 0.98))",
-      stroke: `rgba(167, 243, 208, ${0.24 + intensity * 0.26})`,
-      text: "#ecfdf5",
-      line: "#6ee7b7",
-      baseline: "rgba(167, 243, 208, 0.34)"
-    };
-  }
-
-  return {
-    background:
-      `radial-gradient(circle at top left, rgba(251, 113, 133, ${0.14 + intensity * 0.22}), transparent 64%), ` +
-      "linear-gradient(180deg, rgba(17, 24, 39, 0.92), rgba(2, 6, 23, 0.98))",
-    stroke: `rgba(253, 164, 175, ${0.24 + intensity * 0.28})`,
-    text: "#fff1f2",
-    line: "#fb7185",
-    baseline: "rgba(253, 164, 175, 0.34)"
-  };
+function getTileColors(changePct, theme) {
+  return getMacroTileColors(changePct, theme);
 }
 
 function getBoxStyle(layout, gapPx = 4) {
@@ -601,7 +580,7 @@ function FlowColumn({ title, accentClass, items }) {
   );
 }
 
-function LiveWatchlistSection({ items, timeframe }) {
+function LiveWatchlistSection({ items, timeframe, theme }) {
   if (!items.length) {
     return null;
   }
@@ -615,7 +594,7 @@ function LiveWatchlistSection({ items, timeframe }) {
 
       <div className="macro-watchlist__grid">
         {items.map((item) => {
-          const colors = getTileColors(item.changePercent);
+          const colors = getTileColors(item.changePercent, theme);
           const tradingViewSymbol = resolveWatchlistTradingViewSymbol(item);
           const dateRange = DISPLAY_LOOKBACK_TO_TV[timeframe] ?? "1M";
 
@@ -640,6 +619,7 @@ function LiveWatchlistSection({ items, timeframe }) {
                   bare
                   type="mini-chart"
                   scriptName="mini-symbol-overview"
+                  theme={theme}
                   config={{
                     symbol: tradingViewSymbol,
                     width: "100%",
@@ -916,7 +896,12 @@ function LookbackSelector({ lookbacks, selectedLookback, onChange, disabled = fa
   );
 }
 
-export default function MacroHeatmapDashboard({ macroDashboard, watchlist = [], streamDiagnostics = null }) {
+export default function MacroHeatmapDashboard({
+  macroDashboard,
+  watchlist = [],
+  streamDiagnostics = null,
+  theme = "dark"
+}) {
   const sections = macroDashboard?.sections ?? [];
   const liveWatchlist = Array.isArray(watchlist) ? watchlist : [];
   const lookbacks = DISPLAY_LOOKBACKS;
@@ -1213,7 +1198,7 @@ export default function MacroHeatmapDashboard({ macroDashboard, watchlist = [], 
         />
       </div>
 
-      <LiveWatchlistSection items={liveWatchlist} timeframe={selectedLookback} />
+      <LiveWatchlistSection items={liveWatchlist} timeframe={selectedLookback} theme={theme} />
 
       <div className="macro-heatmap-stack">
         {orderedSections.map((section) => {

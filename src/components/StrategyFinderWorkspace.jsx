@@ -10,6 +10,7 @@ import {
   YAxis
 } from "recharts";
 import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
+import { getChartPalette } from "../theme.js";
 
 function normalCdf(x) {
   const sign = x >= 0 ? 1 : -1;
@@ -969,8 +970,10 @@ export default function StrategyFinderWorkspace({
   refreshing = false,
   refreshNotice = null,
   onCreatePaperOrder = null,
-  onOpenPaperTrading = null
+  onOpenPaperTrading = null,
+  theme = "dark"
 }) {
+  const chartTheme = getChartPalette(theme);
   const finder = strategyPayload?.primaryStrategy?.finder;
   const currentDate = strategyPayload?.lastUpdated?.slice(0, 10) ?? finder?.filters?.dateRange?.from ?? "";
   const rows = useMemo(
@@ -2913,12 +2916,12 @@ export default function StrategyFinderWorkspace({
                       </div>
                       <ResponsiveContainer width="100%" height={chartHeight}>
                         <ComposedChart data={chartData}>
-                          <CartesianGrid stroke="rgba(148,163,184,0.12)" />
-                          <XAxis dataKey={chartXAxisKey} tick={{ fill: "rgba(226,232,240,0.65)", fontSize: 11 }} />
+                          <CartesianGrid stroke={chartTheme.grid} />
+                          <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
                           <YAxis
                             domain={chartDomain}
                             tickCount={chartTickCount}
-                            tick={{ fill: "rgba(226,232,240,0.65)", fontSize: 11 }}
+                            tick={{ fill: chartTheme.axis, fontSize: 11 }}
                           />
                           <Tooltip
                             formatter={(value) => formatCurrency(value)}
@@ -2930,22 +2933,22 @@ export default function StrategyFinderWorkspace({
                                 : `Proxy spot ${label}`
                             }
                             contentStyle={{
-                              background: "rgba(15, 23, 42, 0.96)",
-                              border: "1px solid rgba(148, 163, 184, 0.18)",
+                              background: chartTheme.tooltipBackground,
+                              border: `1px solid ${chartTheme.tooltipBorder}`,
                               borderRadius: "14px"
                             }}
                           />
                           <Area
                             type="monotone"
                             dataKey="totalPnL"
-                            stroke="#2dd4bf"
-                            fill="rgba(45, 212, 191, 0.15)"
+                            stroke={chartTheme.strategyAreaStroke}
+                            fill={chartTheme.strategyAreaFill}
                             strokeWidth={2.2}
                           />
                           <Line
                             type="monotone"
                             dataKey="totalPnL"
-                            stroke="#f59e0b"
+                            stroke={chartTheme.strategyLineStroke}
                             dot={false}
                             strokeWidth={1.5}
                           />
@@ -2970,6 +2973,7 @@ export default function StrategyFinderWorkspace({
                     secondaryPriceDigits={actualSpotDigits}
                     getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
                     getCellPnL={calculateHeatmapPnL}
+                    theme={theme}
                   />
 
 		              <section className="calculator-section">

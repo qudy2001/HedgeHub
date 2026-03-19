@@ -6,6 +6,7 @@ import PaperTradingWorkspace from "./components/PaperTradingWorkspace.jsx";
 import StrategyFinderWorkspace from "./components/StrategyFinderWorkspace.jsx";
 import StrategyRail from "./components/StrategyRail.jsx";
 import TradingViewWidget from "./components/TradingViewWidget.jsx";
+import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
 
 function readRoute() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
@@ -45,6 +46,7 @@ function buildPath(activeView, strategyId) {
 
 export default function App() {
   const initialRoute = readRoute();
+  const [theme, setTheme] = useState(() => getInitialTheme());
   const [dashboard, setDashboard] = useState(null);
   const [strategyPayload, setStrategyPayload] = useState(null);
   const [activeView, setActiveView] = useState(initialRoute.activeView);
@@ -218,6 +220,23 @@ export default function App() {
   }, [mutatePaperOrders]);
 
   useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = theme;
+
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch (_error) {
+      // Ignore storage failures and keep the theme in memory.
+    }
+
+    return () => {
+      if (root.dataset.theme === theme) {
+        delete root.dataset.theme;
+      }
+    };
+  }, [theme]);
+
+  useEffect(() => {
     let isActive = true;
 
     async function load() {
@@ -319,6 +338,7 @@ export default function App() {
   const showStrategyFinder = activeView === "strategy" && selectedStrategyId === "strategy-1";
   const showPlannedStrategy = activeView === "strategy" && selectedStrategyId !== "strategy-1";
   const showPaperTrading = activeView === "paper";
+  const nextThemeLabel = theme === "dark" ? "Light mode" : "Dark mode";
 
   return (
     <div className="app-root">
@@ -327,11 +347,23 @@ export default function App() {
           bare
           type={dashboard.calendarWidgets.tickerTape.type}
           config={dashboard.calendarWidgets.tickerTape.config}
+          theme={theme}
           containerClassName="app-header-banner tradingview-widget-container--ticker"
         />
       ) : null}
 
       <div className="app-shell">
+        <div className="app-toolbar">
+          <button
+            type="button"
+            className="theme-toggle"
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            onClick={() => setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"))}
+          >
+            {nextThemeLabel}
+          </button>
+        </div>
+
         <div className="app-grid">
           <StrategyRail
             activeView={activeView}
@@ -351,6 +383,7 @@ export default function App() {
               onClosePaperOrder={handleClosePaperOrder}
               onDeletePaperOrder={handleDeletePaperOrder}
               onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
+              theme={theme}
             />
           ) : showStrategyFinder ? (
             <StrategyFinderWorkspace
@@ -361,6 +394,7 @@ export default function App() {
               refreshNotice={refreshNotice}
               onCreatePaperOrder={handleCreatePaperOrder}
               onOpenPaperTrading={() => navigateTo("paper")}
+              theme={theme}
             />
           ) : showPlannedStrategy ? (
             <main className="workspace">
@@ -400,6 +434,7 @@ export default function App() {
                 macroDashboard={dashboard?.macroDashboard}
                 watchlist={dashboard?.watchlist ?? []}
                 streamDiagnostics={dashboard?.streamDiagnostics ?? null}
+                theme={theme}
               />
 
               <section className="scan-section">

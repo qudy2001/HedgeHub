@@ -293,7 +293,8 @@ function OpenOrderCard({
   onClose,
   onDelete,
   onUpdateDraft,
-  onSaveCalculatorSnapshot
+  onSaveCalculatorSnapshot,
+  theme
 }) {
   const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
   const expirationDate = getOrderExpirationDate(order);
@@ -345,11 +346,12 @@ function OpenOrderCard({
 
       {isExpanded ? (
         <div className="paper-order-card__body">
-          <PaperTradeHistoryChart history={order.history} />
+          <PaperTradeHistoryChart history={order.history} theme={theme} />
           <PaperTradeScenarioPanel
             order={order}
             lastUpdated={lastUpdated}
             onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+            theme={theme}
           />
 
           <div className="paper-order-editbar">
@@ -524,7 +526,8 @@ function ClosedOrderCard({
   onDelete,
   onUpdateDraft,
   onSaveCalculatorSnapshot,
-  feedback
+  feedback,
+  theme
 }) {
   const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
   const summaryItems = [
@@ -574,11 +577,12 @@ function ClosedOrderCard({
 
       {isExpanded ? (
         <div className="paper-order-card__body">
-          <PaperTradeHistoryChart history={order.history} />
+          <PaperTradeHistoryChart history={order.history} theme={theme} />
           <PaperTradeScenarioPanel
             order={order}
             lastUpdated={lastUpdated}
             onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+            theme={theme}
           />
 
           <div className="paper-order-editbar">
@@ -729,7 +733,8 @@ export default function PaperTradingWorkspace({
   onUpdatePaperOrder,
   onClosePaperOrder,
   onDeletePaperOrder,
-  onSaveCalculatorSnapshot
+  onSaveCalculatorSnapshot,
+  theme = "dark"
 }) {
   const openOrders = paperPortfolio?.openOrders ?? paperPortfolio?.orders ?? [];
   const closedOrders = paperPortfolio?.closedOrders ?? [];
@@ -966,6 +971,7 @@ export default function PaperTradingWorkspace({
                           onDelete={() => handleDelete(order, "open order")}
                           onUpdateDraft={updateDraft}
                           onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+                          theme={theme}
                         />
                       );
                     })}
@@ -1023,6 +1029,7 @@ export default function PaperTradingWorkspace({
                         onUpdateDraft={updateDraft}
                         onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
                         feedback={feedbackByOrder[String(order.id)]}
+                        theme={theme}
                       />
                     );
                   })}
