@@ -2953,6 +2953,36 @@ a {
   background: rgba(6, 11, 23, 0.54);
 }
 
+.paper-open-table__sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.paper-open-table__sort-indicator {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+.paper-open-table__sort--active,
+.paper-open-table__sort:hover {
+  color: var(--text);
+}
+
+.paper-open-table__sort--active .paper-open-table__sort-indicator,
+.paper-open-table__sort:hover .paper-open-table__sort-indicator {
+  color: var(--text);
+}
+
 .paper-open-table__row td {
   padding: 14px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);

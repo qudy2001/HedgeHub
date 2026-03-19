@@ -359,39 +359,195 @@ function buildPurchaseDateSummaryItem(order) {
   };
 }
 
-const OPEN_ORDER_TABLE_HEADERS = [
-  "Holding",
-  "Initial cost",
-  "Date in",
-  "Expiration",
-  "Asset",
-  "Strategy type",
-  "Tag",
-  "Max profit",
-  "Max loss",
-  "Unrealised P&L",
-  "View detail",
-  "Close order"
+const OPEN_ORDER_TABLE_COLUMNS = [
+  { key: "holding", label: "Holding", sortable: true },
+  { key: "initialCost", label: "Initial cost", sortable: true },
+  { key: "dateIn", label: "Date in", sortable: true },
+  { key: "expiration", label: "Expiration", sortable: true },
+  { key: "asset", label: "Asset", sortable: true },
+  { key: "strategyType", label: "Strategy type", sortable: true },
+  { key: "tag", label: "Tag", sortable: true },
+  { key: "maxProfit", label: "Max profit", sortable: true },
+  { key: "maxLoss", label: "Max loss", sortable: true },
+  { key: "unrealisedPnL", label: "Unrealised P&L", sortable: true },
+  { key: "viewDetail", label: "View detail", sortable: false },
+  { key: "closeOrder", label: "Close order", sortable: false }
 ];
 
-const OPEN_ORDER_TABLE_COLUMN_COUNT = OPEN_ORDER_TABLE_HEADERS.length;
+const OPEN_ORDER_TABLE_COLUMN_COUNT = OPEN_ORDER_TABLE_COLUMNS.length;
 
-const CLOSED_ORDER_TABLE_HEADERS = [
-  "Holding",
-  "Date in",
-  "Closed",
-  "Asset",
-  "Strategy type",
-  "Tag",
-  "Entry value",
-  "Exit value",
-  "Realized P&L",
-  "Realized P&L %",
-  "View detail",
-  "Remove history"
+const CLOSED_ORDER_TABLE_COLUMNS = [
+  { key: "holding", label: "Holding", sortable: true },
+  { key: "dateIn", label: "Date in", sortable: true },
+  { key: "closedAt", label: "Closed", sortable: true },
+  { key: "asset", label: "Asset", sortable: true },
+  { key: "strategyType", label: "Strategy type", sortable: true },
+  { key: "tag", label: "Tag", sortable: true },
+  { key: "entryValue", label: "Entry value", sortable: true },
+  { key: "exitValue", label: "Exit value", sortable: true },
+  { key: "realizedPnL", label: "Realized P&L", sortable: true },
+  { key: "realizedPnLPercent", label: "Realized P&L %", sortable: true },
+  { key: "viewDetail", label: "View detail", sortable: false },
+  { key: "removeHistory", label: "Remove history", sortable: false }
 ];
 
-const CLOSED_ORDER_TABLE_COLUMN_COUNT = CLOSED_ORDER_TABLE_HEADERS.length;
+const CLOSED_ORDER_TABLE_COLUMN_COUNT = CLOSED_ORDER_TABLE_COLUMNS.length;
+
+function getCreatedTimePart(value) {
+  const match = String(value ?? "").match(/(\d{2}:\d{2}:\d{2})/);
+  return match?.[1] ?? "00:00:00";
+}
+
+function getTimestampValue(value) {
+  if (!value) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const normalizedValue =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+      ? `${value.replace(" ", "T")}Z`
+      : value;
+  const date = new Date(normalizedValue);
+
+  return Number.isNaN(date.getTime()) ? Number.NEGATIVE_INFINITY : date.getTime();
+}
+
+function getPurchaseDateTimeSortValue(order) {
+  const datePart = order.purchaseDate || order.createdAt?.slice(0, 10);
+  if (!datePart) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  return getTimestampValue(`${datePart}T${getCreatedTimePart(order.createdAt)}Z`);
+}
+
+function getExpirationSortValue(order) {
+  const expirationDate = getOrderExpirationDate(order);
+  return expirationDate ? getTimestampValue(`${expirationDate}T00:00:00Z`) : Number.POSITIVE_INFINITY;
+}
+
+function getOpenOrderSortValue(order, key) {
+  switch (key) {
+    case "holding":
+      return order.combinationLabel || "";
+    case "initialCost":
+      return Number(order.initialPurchaseValue ?? 0);
+    case "dateIn":
+      return getPurchaseDateTimeSortValue(order);
+    case "expiration":
+      return getExpirationSortValue(order);
+    case "asset":
+      return order.assetLabel || "";
+    case "strategyType":
+      return order.strategyType || "";
+    case "tag":
+      return getOrderTagLabel(order);
+    case "maxProfit":
+      return order.maxProfitUnbounded ? Number.POSITIVE_INFINITY : Number(order.maxProfit ?? Number.NEGATIVE_INFINITY);
+    case "maxLoss":
+      return Number(order.maxLoss ?? Number.POSITIVE_INFINITY);
+    case "unrealisedPnL":
+      return Number(order.profitLossValue ?? 0);
+    default:
+      return "";
+  }
+}
+
+function getClosedOrderSortValue(order, key) {
+  switch (key) {
+    case "holding":
+      return order.combinationLabel || "";
+    case "dateIn":
+      return getPurchaseDateTimeSortValue(order);
+    case "closedAt":
+      return getTimestampValue(order.closedAt || order.closedDate || "");
+    case "asset":
+      return order.assetLabel || "";
+    case "strategyType":
+      return order.strategyType || "";
+    case "tag":
+      return getOrderTagLabel(order);
+    case "entryValue":
+      return Number(order.initialPurchaseValue ?? 0);
+    case "exitValue":
+      return Number(order.currentHoldingValue ?? 0);
+    case "realizedPnL":
+      return Number(order.profitLossValue ?? 0);
+    case "realizedPnLPercent":
+      return Number(order.profitLossPercent ?? 0);
+    default:
+      return "";
+  }
+}
+
+function compareSortValues(left, right) {
+  if (typeof left === "number" && typeof right === "number") {
+    return left - right;
+  }
+
+  return String(left ?? "").localeCompare(String(right ?? ""), undefined, {
+    numeric: true,
+    sensitivity: "base"
+  });
+}
+
+function sortOrders(orders, sortConfig, getValue) {
+  if (!sortConfig?.key) {
+    return orders;
+  }
+
+  return [...orders].sort((left, right) => {
+    const comparison = compareSortValues(
+      getValue(left, sortConfig.key),
+      getValue(right, sortConfig.key)
+    );
+
+    return sortConfig.direction === "desc" ? -comparison : comparison;
+  });
+}
+
+function getNextSortConfig(current, key) {
+  if (current.key === key) {
+    return {
+      key,
+      direction: current.direction === "asc" ? "desc" : "asc"
+    };
+  }
+
+  return {
+    key,
+    direction: "asc"
+  };
+}
+
+function getSortIndicator(sortConfig, key) {
+  if (sortConfig?.key !== key) {
+    return "↕";
+  }
+
+  return sortConfig.direction === "desc" ? "↓" : "↑";
+}
+
+function SortableTableHeader({ column, sortConfig, onToggle }) {
+  if (!column.sortable) {
+    return column.label;
+  }
+
+  const isActive = sortConfig?.key === column.key;
+
+  return (
+    <button
+      type="button"
+      className={`paper-open-table__sort ${isActive ? "paper-open-table__sort--active" : ""}`}
+      onClick={() => onToggle(column.key)}
+    >
+      <span>{column.label}</span>
+      <span className="paper-open-table__sort-indicator" aria-hidden="true">
+        {getSortIndicator(sortConfig, column.key)}
+      </span>
+    </button>
+  );
+}
 
 function renderOpenOrderMetricCell(item) {
   return (
@@ -935,6 +1091,8 @@ export default function PaperTradingWorkspace({
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
   const [expandedOrderKey, setExpandedOrderKey] = useState(null);
+  const [openSortConfig, setOpenSortConfig] = useState({ key: null, direction: "asc" });
+  const [closedSortConfig, setClosedSortConfig] = useState({ key: null, direction: "asc" });
 
   useEffect(() => {
     setDrafts(buildDrafts(allOrders));
@@ -1131,15 +1289,21 @@ export default function PaperTradingWorkspace({
                     <table className="paper-open-table">
                       <thead>
                         <tr>
-                          {OPEN_ORDER_TABLE_HEADERS.map((header) => (
-                            <th key={header} scope="col">
-                              {header}
+                          {OPEN_ORDER_TABLE_COLUMNS.map((column) => (
+                            <th key={column.key} scope="col">
+                              <SortableTableHeader
+                                column={column}
+                                sortConfig={openSortConfig}
+                                onToggle={(key) =>
+                                  setOpenSortConfig((current) => getNextSortConfig(current, key))
+                                }
+                              />
                             </th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {group.orders.map((order) => {
+                        {sortOrders(group.orders, openSortConfig, getOpenOrderSortValue).map((order) => {
                           const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
                           const isDirty = hasOrderDraftChanged(order, draft);
                           const feedback = feedbackByOrder[String(order.id)];
@@ -1206,15 +1370,21 @@ export default function PaperTradingWorkspace({
                   <table className="paper-open-table">
                     <thead>
                       <tr>
-                        {CLOSED_ORDER_TABLE_HEADERS.map((header) => (
-                          <th key={header} scope="col">
-                            {header}
+                        {CLOSED_ORDER_TABLE_COLUMNS.map((column) => (
+                          <th key={column.key} scope="col">
+                            <SortableTableHeader
+                              column={column}
+                              sortConfig={closedSortConfig}
+                              onToggle={(key) =>
+                                setClosedSortConfig((current) => getNextSortConfig(current, key))
+                              }
+                            />
                           </th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {group.orders.map((order) => {
+                      {sortOrders(group.orders, closedSortConfig, getClosedOrderSortValue).map((order) => {
                         const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
                         const isDirty = hasOrderDraftChanged(order, draft);
                         const orderBusy = busyOrderId === String(order.id);
