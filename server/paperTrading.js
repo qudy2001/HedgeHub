@@ -449,7 +449,14 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
   const quantity = Math.max(Math.round(toNumber(leg?.quantity, 0) ?? 0), 0);
   const rawEntryPrice = Math.max(toNumber(leg?.entryPrice, 0) ?? 0, 0);
   const entryPrice = kind === "binary" ? clamp(rawEntryPrice, 0, 1) : rawEntryPrice;
-  const rawClosedPrice = toNumber(leg?.closedPrice, null);
+  const rawClosedPrice = leg?.closedPrice == null ? null : toNumber(leg?.closedPrice, null);
+  const rawClosedExposure = leg?.closedExposure == null ? null : toNumber(leg?.closedExposure, null);
+  const rawClosedNetMarkedValue =
+    leg?.closedNetMarkedValue == null ? null : toNumber(leg?.closedNetMarkedValue, null);
+  const rawRealizedProfitLossValue =
+    leg?.realizedProfitLossValue == null ? null : toNumber(leg?.realizedProfitLossValue, null);
+  const rawRealizedProfitLossPercent =
+    leg?.realizedProfitLossPercent == null ? null : toNumber(leg?.realizedProfitLossPercent, null);
   const closedPrice =
     orderStatus === "closed"
       ? kind === "binary"
@@ -483,13 +490,17 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
     outcome: kind === "binary" ? (String(leg?.outcome ?? "YES").toUpperCase() === "NO" ? "NO" : "YES") : null,
     closedPrice,
     closedExposure:
-      orderStatus === "closed" ? Math.max(toNumber(leg?.closedExposure, 0) ?? 0, 0) : null,
+      orderStatus === "closed"
+        ? rawClosedExposure == null
+          ? null
+          : Math.max(rawClosedExposure, 0)
+        : null,
     closedNetMarkedValue:
-      orderStatus === "closed" ? toNumber(leg?.closedNetMarkedValue, null) : null,
+      orderStatus === "closed" ? rawClosedNetMarkedValue : null,
     realizedProfitLossValue:
-      orderStatus === "closed" ? toNumber(leg?.realizedProfitLossValue, 0) ?? 0 : null,
+      orderStatus === "closed" ? rawRealizedProfitLossValue : null,
     realizedProfitLossPercent:
-      orderStatus === "closed" ? toNumber(leg?.realizedProfitLossPercent, null) : null
+      orderStatus === "closed" ? rawRealizedProfitLossPercent : null
   };
 }
 
@@ -553,18 +564,22 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     0.001,
     0.999
   );
+  const closeSummarySource =
+    source.closeSummary === null ? null : source.closeSummary ?? defaults.closeSummary ?? null;
   const closeSummary =
     status === "closed"
-      ? {
-          currentHoldingValue:
-            Math.max(toNumber(source.closeSummary?.currentHoldingValue, defaults.closeSummary?.currentHoldingValue ?? 0) ?? 0, 0),
-          netMarkedValue:
-            toNumber(source.closeSummary?.netMarkedValue, defaults.closeSummary?.netMarkedValue ?? 0) ?? 0,
-          profitLossValue:
-            toNumber(source.closeSummary?.profitLossValue, defaults.closeSummary?.profitLossValue ?? 0) ?? 0,
-          profitLossPercent:
-            toNumber(source.closeSummary?.profitLossPercent, defaults.closeSummary?.profitLossPercent ?? null)
-        }
+      ? closeSummarySource == null
+        ? null
+        : {
+            currentHoldingValue:
+              Math.max(toNumber(closeSummarySource?.currentHoldingValue, 0) ?? 0, 0),
+            netMarkedValue:
+              toNumber(closeSummarySource?.netMarkedValue, 0) ?? 0,
+            profitLossValue:
+              toNumber(closeSummarySource?.profitLossValue, 0) ?? 0,
+            profitLossPercent:
+              toNumber(closeSummarySource?.profitLossPercent, null)
+          }
       : null;
 
   return {
@@ -602,30 +617,64 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
 }
 
 export function applyPaperOrderPatch(order, patch) {
+  const nextStatus = normalizePaperOrderStatus(patch?.status ?? order.status);
+  const isClosed = nextStatus === "closed";
+  const hasExplicitCloseSummary = Object.prototype.hasOwnProperty.call(patch ?? {}, "closeSummary");
+  let hasClosedLegOverrides = false;
   const patchLegs = new Map(
     Array.isArray(patch?.legs)
       ? patch.legs.map((leg) => [String(leg?.id ?? ""), leg])
       : []
   );
 
-  const mergedLegs = order.legs.map((leg) =>
-    patchLegs.has(String(leg.id))
-      ? {
-          ...leg,
-          entryPrice: patchLegs.get(String(leg.id))?.entryPrice ?? leg.entryPrice,
-          quantity: patchLegs.get(String(leg.id))?.quantity ?? leg.quantity
-        }
-      : leg
-  );
+  const mergedLegs = order.legs.map((leg) => {
+    if (!patchLegs.has(String(leg.id))) {
+      return leg;
+    }
+
+    const patchLeg = patchLegs.get(String(leg.id));
+    const resetsClosedMetrics =
+      isClosed &&
+      (Object.prototype.hasOwnProperty.call(patchLeg ?? {}, "entryPrice") ||
+        Object.prototype.hasOwnProperty.call(patchLeg ?? {}, "quantity") ||
+        Object.prototype.hasOwnProperty.call(patchLeg ?? {}, "closedPrice"));
+
+    if (resetsClosedMetrics) {
+      hasClosedLegOverrides = true;
+    }
+
+    return {
+      ...leg,
+      entryPrice: patchLeg?.entryPrice ?? leg.entryPrice,
+      quantity: patchLeg?.quantity ?? leg.quantity,
+      ...(isClosed
+        ? {
+            closedPrice: patchLeg?.closedPrice ?? leg.closedPrice
+          }
+        : {}),
+      ...(resetsClosedMetrics
+        ? {
+            closedExposure: null,
+            closedNetMarkedValue: null,
+            realizedProfitLossValue: null,
+            realizedProfitLossPercent: null
+          }
+        : {})
+    };
+  });
 
   return sanitizePaperOrderPayload(
     {
       ...order,
       purchaseDate: patch?.purchaseDate ?? order.purchaseDate,
-      status: patch?.status ?? order.status,
+      status: nextStatus,
       closedAt: patch?.closedAt ?? order.closedAt,
       closedDate: patch?.closedDate ?? order.closedDate,
-      closeSummary: patch?.closeSummary ?? order.closeSummary,
+      closeSummary: hasExplicitCloseSummary
+        ? patch?.closeSummary
+        : isClosed && hasClosedLegOverrides
+          ? null
+          : order.closeSummary,
       legs: mergedLegs
     },
     order
@@ -884,22 +933,28 @@ export function buildPaperPortfolio({
           leg.closedPrice != null
             ? toNumber(leg.closedPrice, 0) ?? 0
             : entryPrice;
+        const derivedClosedExposure = Math.abs(closedPrice * units);
         const currentExposure =
-          Math.max(toNumber(leg.closedExposure, entryExposure) ?? entryExposure, 0);
+          leg.closedExposure != null
+            ? Math.max(toNumber(leg.closedExposure, derivedClosedExposure) ?? derivedClosedExposure, 0)
+            : derivedClosedExposure;
         const netMarkedValue =
-          toNumber(leg.closedNetMarkedValue, direction * closedPrice * units) ??
-          direction * closedPrice * units;
+          leg.closedNetMarkedValue != null
+            ? toNumber(leg.closedNetMarkedValue, direction * closedPrice * units) ??
+              direction * closedPrice * units
+            : direction * closedPrice * units;
+        const derivedProfitLossValue =
+          (leg.action === "SHORT" ? entryPrice - closedPrice : closedPrice - entryPrice) * units;
         const profitLossValue =
-          toNumber(
-            leg.realizedProfitLossValue,
-            (leg.action === "SHORT" ? entryPrice - closedPrice : closedPrice - entryPrice) * units
-          ) ??
-          0;
+          leg.realizedProfitLossValue != null
+            ? toNumber(leg.realizedProfitLossValue, derivedProfitLossValue) ?? 0
+            : derivedProfitLossValue;
+        const derivedProfitLossPercent =
+          entryExposure > 0 ? (profitLossValue / entryExposure) * 100 : null;
         const profitLossPercent =
-          toNumber(
-            leg.realizedProfitLossPercent,
-            entryExposure > 0 ? (profitLossValue / entryExposure) * 100 : null
-          );
+          leg.realizedProfitLossPercent != null
+            ? toNumber(leg.realizedProfitLossPercent, derivedProfitLossPercent)
+            : derivedProfitLossPercent;
 
         return {
           ...leg,

@@ -250,18 +250,28 @@ function formatNumber(value, digits = 2) {
 const TARGET_OPTION_QUOTE_SIZE_THRESHOLDS = [10, 25, 50];
 const DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD = TARGET_OPTION_QUOTE_SIZE_THRESHOLDS[0];
 
-function quoteSizeMeetsThreshold(option, threshold = DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD) {
+function hasUsableQuoteSize(option) {
   const bidSize = Number(option?.bidSize);
   const askSize = Number(option?.askSize);
 
-  return Number.isFinite(bidSize) && Number.isFinite(askSize) && bidSize > threshold && askSize > threshold;
+  return Number.isFinite(bidSize) && bidSize > 0 && Number.isFinite(askSize) && askSize > 0;
+}
+
+function quoteSizeMeetsThreshold(option, threshold = DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD) {
+  if (!hasUsableQuoteSize(option)) {
+    return false;
+  }
+
+  const bidSize = Number(option?.bidSize);
+  const askSize = Number(option?.askSize);
+  return bidSize > threshold && askSize > threshold;
 }
 
 function getMinimumQuoteSize(optionLegBlueprints, side) {
   const sizeKey = side === "ask" ? "marketAskSize" : "marketBidSize";
   const sizes = optionLegBlueprints
     .map((leg) => Number(leg?.[sizeKey]))
-    .filter((size) => Number.isFinite(size));
+    .filter((size) => Number.isFinite(size) && size > 0);
 
   if (!sizes.length) {
     return null;
@@ -1184,12 +1194,13 @@ function buildStrategyFinder({
     const currentOptionSpot = getQuotePrice(quoteMap.get(asset.optionSymbol));
     const currentUnderlyingSpot = getQuotePrice(quoteMap.get(asset.underlyingSymbol));
     const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
+    const hasAssetQuoteSizeData = liveOptions.some((option) => hasUsableQuoteSize(option));
     const markets = getAssetMarkets(asset, polymarketMarkets);
 
-	    return markets.flatMap((market) => {
-	      const callUniverse = getOptionUniverseForMarket({
-	        asset,
-	        market,
+    return markets.flatMap((market) => {
+      const callUniverse = getOptionUniverseForMarket({
+        asset,
+        market,
         liveOptions,
         currentOptionSpot,
         currentUnderlyingSpot,
@@ -1206,20 +1217,20 @@ function buildStrategyFinder({
         optionType: "put"
       });
 
-	      if (callUniverse.length < 1 && putUniverse.length < 1) {
-	        return [];
-	      }
+      if (callUniverse.length < 1 && putUniverse.length < 1) {
+        return [];
+      }
 
-	      const callUniverseByExpiry = groupOptionsByExpiration(callUniverse);
-	      const putUniverseByExpiry = groupOptionsByExpiration(putUniverse);
-	      const expiries = [...new Set([...callUniverseByExpiry.keys(), ...putUniverseByExpiry.keys()])].sort();
+      const callUniverseByExpiry = groupOptionsByExpiration(callUniverse);
+      const putUniverseByExpiry = groupOptionsByExpiration(putUniverse);
+      const expiries = [...new Set([...callUniverseByExpiry.keys(), ...putUniverseByExpiry.keys()])].sort();
 
-	      const targetValue = parseTargetFromQuestion(market.question) || currentUnderlyingSpot || currentOptionSpot;
-	      const ratio =
-	        currentUnderlyingSpot > 0 && currentOptionSpot > 0
-	          ? currentOptionSpot / currentUnderlyingSpot
-	          : asset.conversionFallback;
-	      const targetSpot = Math.max(targetValue * ratio, currentOptionSpot || 1);
+      const targetValue = parseTargetFromQuestion(market.question) || currentUnderlyingSpot || currentOptionSpot;
+      const ratio =
+        currentUnderlyingSpot > 0 && currentOptionSpot > 0
+          ? currentOptionSpot / currentUnderlyingSpot
+          : asset.conversionFallback;
+      const targetSpot = Math.max(targetValue * ratio, currentOptionSpot || 1);
 
       const buildLeg = (option, action) => {
         const price = pickOptionReferencePrice(option, option.projectedTargetPrice ?? 0.05);
@@ -1251,117 +1262,149 @@ function buildStrategyFinder({
         };
       };
 
-	      return expiries.flatMap((expiry) => {
-	        const expiryCalls = [...(callUniverseByExpiry.get(expiry) ?? [])].sort((left, right) => left.strike - right.strike);
-	        const expiryPuts = [...(putUniverseByExpiry.get(expiry) ?? [])].sort((left, right) => left.strike - right.strike);
+      return expiries.flatMap((expiry) => {
+        const expiryCalls = [...(callUniverseByExpiry.get(expiry) ?? [])].sort(
+          (left, right) => left.strike - right.strike
+        );
+        const expiryPuts = [...(putUniverseByExpiry.get(expiry) ?? [])].sort(
+          (left, right) => left.strike - right.strike
+        );
 
-	        if (expiryCalls.length < 1 && expiryPuts.length < 1) {
-	          return [];
-	        }
+        if (expiryCalls.length < 1 && expiryPuts.length < 1) {
+          return [];
+        }
 
-	        const nearCall = pickNearestOption(expiryCalls, targetSpot);
-	        const higherCall = nearCall ? getHigherOption(expiryCalls, nearCall.strike) : null;
-	        const lowerCall = nearCall ? getLowerOption(expiryCalls, nearCall.strike) : null;
-	        const nearPut = pickNearestOption(expiryPuts, targetSpot);
-	        const higherPut = nearPut ? getHigherOption(expiryPuts, nearPut.strike) : null;
-	        const lowerPut = nearPut ? getLowerOption(expiryPuts, nearPut.strike) : null;
-	        const distinctHigherCall = higherCall && nearCall && higherCall.strike !== nearCall.strike ? higherCall : null;
-	        const distinctLowerCall = lowerCall && nearCall && lowerCall.strike !== nearCall.strike ? lowerCall : null;
-	        const distinctHigherPut = higherPut && nearPut && higherPut.strike !== nearPut.strike ? higherPut : null;
-	        const distinctLowerPut = lowerPut && nearPut && lowerPut.strike !== nearPut.strike ? lowerPut : null;
+        const nearCall = pickNearestOption(expiryCalls, targetSpot);
+        const higherCall = nearCall ? getHigherOption(expiryCalls, nearCall.strike) : null;
+        const lowerCall = nearCall ? getLowerOption(expiryCalls, nearCall.strike) : null;
+        const nearPut = pickNearestOption(expiryPuts, targetSpot);
+        const higherPut = nearPut ? getHigherOption(expiryPuts, nearPut.strike) : null;
+        const lowerPut = nearPut ? getLowerOption(expiryPuts, nearPut.strike) : null;
+        const distinctHigherCall = higherCall && nearCall && higherCall.strike !== nearCall.strike ? higherCall : null;
+        const distinctLowerCall = lowerCall && nearCall && lowerCall.strike !== nearCall.strike ? lowerCall : null;
+        const distinctHigherPut = higherPut && nearPut && higherPut.strike !== nearPut.strike ? higherPut : null;
+        const distinctLowerPut = lowerPut && nearPut && lowerPut.strike !== nearPut.strike ? lowerPut : null;
 
-	        const optionStrategies = [
-	          nearCall ? { label: "Long Call", legs: [buildLeg(nearCall, "LONG")] } : null,
-	          nearCall ? { label: "Short Call", legs: [buildLeg(nearCall, "SHORT")] } : null,
-	          nearPut ? { label: "Long Put", legs: [buildLeg(nearPut, "LONG")] } : null,
-	          nearPut ? { label: "Short Put", legs: [buildLeg(nearPut, "SHORT")] } : null,
-	          distinctLowerCall && nearCall
-	            ? { label: "Bull Call Spread", legs: [buildLeg(distinctLowerCall, "LONG"), buildLeg(nearCall, "SHORT")] }
-	            : null,
-	          nearCall && distinctHigherCall
-	            ? { label: "Bear Call Spread", legs: [buildLeg(nearCall, "SHORT"), buildLeg(distinctHigherCall, "LONG")] }
-	            : null,
-	          nearPut && distinctLowerPut
-	            ? { label: "Bear Put Spread", legs: [buildLeg(nearPut, "LONG"), buildLeg(distinctLowerPut, "SHORT")] }
-	            : null,
-	          distinctHigherPut && distinctLowerPut && distinctHigherPut.strike !== distinctLowerPut.strike
-	            ? { label: "Bull Put Spread", legs: [buildLeg(distinctHigherPut, "SHORT"), buildLeg(distinctLowerPut, "LONG")] }
-	            : null,
-	          nearCall && nearPut
-	            ? { label: "Long Straddle", legs: [buildLeg(nearCall, "LONG"), buildLeg(nearPut, "LONG")] }
-	            : null,
-	          nearCall && nearPut
-	            ? { label: "Short Straddle", legs: [buildLeg(nearCall, "SHORT"), buildLeg(nearPut, "SHORT")] }
-	            : null,
-	          distinctHigherCall && distinctLowerPut
-	            ? { label: "Long Strangle", legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "LONG")] }
-	            : null,
-	          distinctHigherCall && distinctLowerPut
-	            ? { label: "Short Strangle", legs: [buildLeg(distinctHigherCall, "SHORT"), buildLeg(distinctLowerPut, "SHORT")] }
-	            : null,
-	          distinctHigherCall && distinctLowerPut
-	            ? { label: "Bull Risk Reversal", legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "SHORT")] }
-	            : null,
-	          nearPut && nearCall
-	            ? { label: "Bear Risk Reversal", legs: [buildLeg(nearPut, "LONG"), buildLeg(nearCall, "SHORT")] }
-	            : null,
-	          distinctLowerPut && nearPut && nearCall && distinctHigherCall
-	            ? {
-	                label: "Iron Condor",
-	                legs: [
-	                  buildLeg(distinctLowerPut, "LONG"),
-	                  buildLeg(nearPut, "SHORT"),
-	                  buildLeg(nearCall, "SHORT"),
-	                  buildLeg(distinctHigherCall, "LONG")
-	                ]
-	              }
-	            : null
-	        ]
-	          .filter(Boolean)
-	          .filter((strategy) =>
-	            strategy.legs.every((leg) =>
-	              quoteSizeMeetsThreshold(
-	                {
-	                  bidSize: leg.marketBidSize,
-	                  askSize: leg.marketAskSize
-	                },
-	                DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
-	              )
-	            )
-	          )
-	          .filter((strategy, index, array) => {
-	            const signature = `${expiry}:${strategy.label}:${strategy.legs
-	              .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
-	              .join("|")}`;
-	            return array.findIndex((item) => {
-	              const itemSignature = `${expiry}:${item.label}:${item.legs
-	                .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
-	                .join("|")}`;
-	              return itemSignature === signature;
-	            }) === index;
-	          });
+        const optionStrategies = [
+          nearCall ? { label: "Long Call", legs: [buildLeg(nearCall, "LONG")] } : null,
+          nearCall ? { label: "Short Call", legs: [buildLeg(nearCall, "SHORT")] } : null,
+          nearPut ? { label: "Long Put", legs: [buildLeg(nearPut, "LONG")] } : null,
+          nearPut ? { label: "Short Put", legs: [buildLeg(nearPut, "SHORT")] } : null,
+          distinctLowerCall && nearCall
+            ? {
+                label: "Bull Call Spread",
+                legs: [buildLeg(distinctLowerCall, "LONG"), buildLeg(nearCall, "SHORT")]
+              }
+            : null,
+          nearCall && distinctHigherCall
+            ? {
+                label: "Bear Call Spread",
+                legs: [buildLeg(nearCall, "SHORT"), buildLeg(distinctHigherCall, "LONG")]
+              }
+            : null,
+          nearPut && distinctLowerPut
+            ? {
+                label: "Bear Put Spread",
+                legs: [buildLeg(nearPut, "LONG"), buildLeg(distinctLowerPut, "SHORT")]
+              }
+            : null,
+          distinctHigherPut && distinctLowerPut && distinctHigherPut.strike !== distinctLowerPut.strike
+            ? {
+                label: "Bull Put Spread",
+                legs: [buildLeg(distinctHigherPut, "SHORT"), buildLeg(distinctLowerPut, "LONG")]
+              }
+            : null,
+          nearCall && nearPut
+            ? { label: "Long Straddle", legs: [buildLeg(nearCall, "LONG"), buildLeg(nearPut, "LONG")] }
+            : null,
+          nearCall && nearPut
+            ? { label: "Short Straddle", legs: [buildLeg(nearCall, "SHORT"), buildLeg(nearPut, "SHORT")] }
+            : null,
+          distinctHigherCall && distinctLowerPut
+            ? {
+                label: "Long Strangle",
+                legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "LONG")]
+              }
+            : null,
+          distinctHigherCall && distinctLowerPut
+            ? {
+                label: "Short Strangle",
+                legs: [buildLeg(distinctHigherCall, "SHORT"), buildLeg(distinctLowerPut, "SHORT")]
+              }
+            : null,
+          distinctHigherCall && distinctLowerPut
+            ? {
+                label: "Bull Risk Reversal",
+                legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "SHORT")]
+              }
+            : null,
+          nearPut && nearCall
+            ? { label: "Bear Risk Reversal", legs: [buildLeg(nearPut, "LONG"), buildLeg(nearCall, "SHORT")] }
+            : null,
+          distinctLowerPut && nearPut && nearCall && distinctHigherCall
+            ? {
+                label: "Iron Condor",
+                legs: [
+                  buildLeg(distinctLowerPut, "LONG"),
+                  buildLeg(nearPut, "SHORT"),
+                  buildLeg(nearCall, "SHORT"),
+                  buildLeg(distinctHigherCall, "LONG")
+                ]
+              }
+            : null
+        ]
+          .filter(Boolean)
+          .filter((strategy) =>
+            !hasAssetQuoteSizeData ||
+            strategy.legs.every((leg) =>
+              quoteSizeMeetsThreshold(
+                {
+                  bidSize: leg.marketBidSize,
+                  askSize: leg.marketAskSize
+                },
+                DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
+              )
+            )
+          )
+          .filter((strategy, index, array) => {
+            const signature = `${expiry}:${strategy.label}:${strategy.legs
+              .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
+              .join("|")}`;
+            return (
+              array.findIndex((item) => {
+                const itemSignature = `${expiry}:${item.label}:${item.legs
+                  .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
+                  .join("|")}`;
+                return itemSignature === signature;
+              }) === index
+            );
+          });
 
-	        return polymarketStructures.flatMap((polymarketStructure) => {
-	          const polymarketBlueprints = buildPolymarketBlueprints(market, polymarketStructure);
+        return polymarketStructures.flatMap((polymarketStructure) => {
+          const polymarketBlueprints = buildPolymarketBlueprints(market, polymarketStructure);
 
-	          return optionStrategies.map((strategy) =>
-	            buildCombination({
-	              asset,
-	              market,
-	              polymarketBlueprints,
-	              polymarketStructureId: polymarketStructure.id,
-	              strategyType: strategy.label,
-	              optionLegBlueprints: strategy.legs,
-	              currentOptionSpot,
-	              currentUnderlyingSpot
-	            })
-	          );
-	        });
-	      });
-	    });
-	  });
+          return optionStrategies.map((strategy) =>
+            buildCombination({
+              asset,
+              market,
+              polymarketBlueprints,
+              polymarketStructureId: polymarketStructure.id,
+              strategyType: strategy.label,
+              optionLegBlueprints: strategy.legs,
+              currentOptionSpot,
+              currentUnderlyingSpot
+            })
+          );
+        });
+      });
+    });
+  });
 
   const selectedRow = rows[0] ?? null;
+  const quoteSizeDataAvailable = rows.some((row) => {
+    const quoteSize = Number(row.targetOptionQuoteSize);
+    return Number.isFinite(quoteSize) && quoteSize > 0;
+  });
 
   return {
     filters: {
@@ -1371,6 +1414,7 @@ function buildStrategyFinder({
       },
       priceRange: "+5% to +10%",
       strategyTypes: [...new Set(rows.map((row) => row.strategyType))],
+      quoteSizeDataAvailable,
       targetOptionQuoteSizeThresholds: TARGET_OPTION_QUOTE_SIZE_THRESHOLDS,
       defaultTargetOptionQuoteSizeThreshold: DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
     },
@@ -1612,8 +1656,8 @@ function buildAssetScans({
       const underlyingQuote = quoteMap.get(asset.underlyingSymbol);
       const currentOptionSpot = getQuotePrice(optionQuote);
       const currentUnderlyingSpot = getQuotePrice(underlyingQuote);
-
-	      const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
+      const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
+      const hasAssetQuoteSizeData = liveOptions.some((option) => hasUsableQuoteSize(option));
 
       const opportunities = matches
         .slice(0, 3)
@@ -1633,7 +1677,11 @@ function buildAssetScans({
             currentUnderlyingSpot,
             fallbackVolatility: fallbackVolatility[asset.id] || 0.25,
             optionType: "call"
-          }).filter((option) => quoteSizeMeetsThreshold(option, DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD));
+          }).filter(
+            (option) =>
+              !hasAssetQuoteSizeData ||
+              quoteSizeMeetsThreshold(option, DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD)
+          );
           const option = optionUniverse
             .sort((left, right) => {
               const leftDistance = Math.abs(

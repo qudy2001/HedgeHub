@@ -75,7 +75,11 @@ function buildDrafts(orders) {
             String(leg.id),
             {
               entryPrice: String(leg.entryPrice ?? ""),
-              quantity: String(leg.quantity ?? "")
+              quantity: String(leg.quantity ?? ""),
+              closedPrice:
+                leg.closedPrice != null
+                  ? String(leg.closedPrice)
+                  : String(leg.currentPrice ?? "")
             }
           ])
         )
@@ -99,7 +103,11 @@ function buildDefaultDraft(order) {
         String(leg.id),
         {
           entryPrice: String(leg.entryPrice ?? ""),
-          quantity: String(leg.quantity ?? "")
+          quantity: String(leg.quantity ?? ""),
+          closedPrice:
+            leg.closedPrice != null
+              ? String(leg.closedPrice)
+              : String(leg.currentPrice ?? "")
         }
       ])
     )
@@ -123,7 +131,9 @@ function hasOrderDraftChanged(order, draft) {
 
     return (
       String(legDraft.entryPrice ?? "") !== String(leg.entryPrice ?? "") ||
-      String(legDraft.quantity ?? "") !== String(leg.quantity ?? "")
+      String(legDraft.quantity ?? "") !== String(leg.quantity ?? "") ||
+      (String(order.status ?? "").toLowerCase() === "closed" &&
+        String(legDraft.closedPrice ?? "") !== String(leg.closedPrice ?? leg.currentPrice ?? ""))
     );
   });
 }
@@ -147,12 +157,23 @@ function groupOrdersByStrategy(orders) {
 }
 
 function buildPatchFromDraft(order, draft) {
+  const isClosed = String(order.status ?? "").toLowerCase() === "closed";
+
   return {
     purchaseDate: draft.purchaseDate,
     legs: order.legs.map((leg) => ({
       id: leg.id,
       entryPrice: draft.legs?.[String(leg.id)]?.entryPrice ?? leg.entryPrice,
-      quantity: draft.legs?.[String(leg.id)]?.quantity ?? leg.quantity
+      quantity: draft.legs?.[String(leg.id)]?.quantity ?? leg.quantity,
+      ...(isClosed
+        ? {
+            closedPrice:
+              draft.legs?.[String(leg.id)]?.closedPrice ??
+              leg.closedPrice ??
+              leg.currentPrice ??
+              null
+          }
+        : {})
     }))
   };
 }
@@ -492,43 +513,19 @@ function OpenOrderCard({
 
 function ClosedOrderCard({
   order,
+  draft,
+  isDirty,
+  orderBusy,
   isExpanded,
   lastUpdated,
   onToggle,
-  onDeletePaperOrder,
+  onResetDraft,
+  onSave,
+  onDelete,
+  onUpdateDraft,
   onSaveCalculatorSnapshot,
-  busyOrderId,
-  setBusyOrderId,
-  setFeedbackByOrder,
   feedback
 }) {
-  async function handleDelete() {
-    if (!window.confirm(`Remove closed order "${order.combinationLabel}" from history?`)) {
-      return;
-    }
-
-    setBusyOrderId(String(order.id));
-    setFeedbackByOrder((current) => ({
-      ...current,
-      [String(order.id)]: null
-    }));
-
-    try {
-      await onDeletePaperOrder(order.id);
-    } catch (error) {
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "error",
-          message: error.message
-        }
-      }));
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
-  const orderBusy = busyOrderId === String(order.id);
   const orderEventUrl = getPolymarketEventUrl(order.polymarketUrl);
   const summaryItems = [
     { label: "Date in", value: formatDateLabel(order.purchaseDate) },
@@ -584,6 +581,27 @@ function ClosedOrderCard({
             onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
           />
 
+          <div className="paper-order-editbar">
+            <div className="paper-order-editbar__copy">
+              <span className="brand__eyebrow">Closed contract values</span>
+              <p>Edit the recorded entry and exit prices to correct the realized fill marks.</p>
+            </div>
+
+            <div className="paper-order-editbar__actions">
+              <button type="button" className="chart-toggle" onClick={onResetDraft} disabled={!isDirty || orderBusy}>
+                Reset
+              </button>
+              <button
+                type="button"
+                className={`chart-toggle ${isDirty ? "chart-toggle--active" : ""}`}
+                onClick={onSave}
+                disabled={!isDirty || orderBusy}
+              >
+                {orderBusy ? "Saving..." : "Save changes"}
+              </button>
+            </div>
+          </div>
+
           <div className="paper-legs-table paper-legs-table--history">
             <div className="paper-legs-table__head">
               <span>Sub item</span>
@@ -593,26 +611,77 @@ function ClosedOrderCard({
               <span>Contracts</span>
               <span>Realized P&amp;L</span>
             </div>
-            {order.legs.map((leg) => (
-              <div key={leg.id} className="paper-legs-table__row paper-legs-table__row--history">
-                <span className="paper-legs-table__label">
-                  <strong>{getLegTitle(order, leg)}</strong>
-                  <small>{renderLegDescriptor(leg)}</small>
-                  {getLegUrl(order, leg) ? (
-                    <a href={getLegUrl(order, leg)} target="_blank" rel="noreferrer">
-                      {getLegUrl(order, leg)}
-                    </a>
-                  ) : null}
-                </span>
-                <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
-                <span>{formatCurrency(leg.entryPrice, leg.kind === "binary" ? 4 : 2)}</span>
-                <span>{formatCurrency(leg.currentPrice, leg.kind === "binary" ? 4 : 2)}</span>
-                <span>{leg.quantity}</span>
-                <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
-                  {formatCurrency(leg.profitLossValue)}
-                </span>
-              </div>
-            ))}
+            {order.legs.map((leg) => {
+              const legDraft = draft.legs?.[String(leg.id)] ?? {
+                entryPrice: String(leg.entryPrice ?? ""),
+                quantity: String(leg.quantity ?? ""),
+                closedPrice:
+                  leg.closedPrice != null
+                    ? String(leg.closedPrice)
+                    : String(leg.currentPrice ?? "")
+              };
+
+              return (
+                <div key={leg.id} className="paper-legs-table__row paper-legs-table__row--history">
+                  <span className="paper-legs-table__label">
+                    <strong>{getLegTitle(order, leg)}</strong>
+                    <small>{renderLegDescriptor(leg)}</small>
+                    {getLegUrl(order, leg) ? (
+                      <a href={getLegUrl(order, leg)} target="_blank" rel="noreferrer">
+                        {getLegUrl(order, leg)}
+                      </a>
+                    ) : null}
+                  </span>
+                  <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
+                  <span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={leg.kind === "binary" ? "1" : undefined}
+                      step={leg.kind === "binary" ? "0.0001" : "0.01"}
+                      value={legDraft.entryPrice}
+                      onChange={(event) =>
+                        onUpdateDraft(order.id, (current) => ({
+                          ...current,
+                          legs: {
+                            ...current.legs,
+                            [String(leg.id)]: {
+                              ...(current.legs?.[String(leg.id)] ?? {}),
+                              entryPrice: event.target.value
+                            }
+                          }
+                        }))
+                      }
+                    />
+                  </span>
+                  <span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={leg.kind === "binary" ? "1" : undefined}
+                      step={leg.kind === "binary" ? "0.0001" : "0.01"}
+                      value={legDraft.closedPrice}
+                      onChange={(event) =>
+                        onUpdateDraft(order.id, (current) => ({
+                          ...current,
+                          legs: {
+                            ...current.legs,
+                            [String(leg.id)]: {
+                              ...(current.legs?.[String(leg.id)] ?? {}),
+                              closedPrice: event.target.value
+                            }
+                          }
+                        }))
+                      }
+                    />
+                  </span>
+                  <span>{leg.quantity}</span>
+                  <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
+                    {formatCurrency(leg.profitLossValue)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
 
           <div className="paper-order-footer">
@@ -639,7 +708,7 @@ function ClosedOrderCard({
           >
             {isExpanded ? "Hide details" : "View details"}
           </button>
-          <button type="button" className="chart-toggle paper-order-card__close-button" onClick={handleDelete} disabled={orderBusy}>
+          <button type="button" className="chart-toggle paper-order-card__close-button" onClick={onDelete} disabled={orderBusy}>
             Remove history
           </button>
         </div>
@@ -664,15 +733,16 @@ export default function PaperTradingWorkspace({
 }) {
   const openOrders = paperPortfolio?.openOrders ?? paperPortfolio?.orders ?? [];
   const closedOrders = paperPortfolio?.closedOrders ?? [];
+  const allOrders = [...openOrders, ...closedOrders];
   const summary = paperPortfolio?.summary ?? {};
-  const [drafts, setDrafts] = useState(() => buildDrafts(openOrders));
+  const [drafts, setDrafts] = useState(() => buildDrafts(allOrders));
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
   const [expandedOrderKey, setExpandedOrderKey] = useState(null);
 
   useEffect(() => {
-    setDrafts(buildDrafts(openOrders));
-  }, [openOrders]);
+    setDrafts(buildDrafts(allOrders));
+  }, [openOrders, closedOrders]);
 
   useEffect(() => {
     setExpandedOrderKey((current) =>
@@ -684,7 +754,7 @@ export default function PaperTradingWorkspace({
     setDrafts((current) => {
       const existing =
         current[String(orderId)] ??
-        buildDefaultDraft(openOrders.find((order) => String(order.id) === String(orderId)));
+        buildDefaultDraft(allOrders.find((order) => String(order.id) === String(orderId)));
       const nextDraft = updater(existing);
 
       return {
@@ -923,25 +993,39 @@ export default function PaperTradingWorkspace({
                 </div>
 
                 <div className="paper-order-list">
-                  {group.orders.map((order) => (
-                    <ClosedOrderCard
-                      key={order.id}
-                      order={order}
-                      isExpanded={expandedOrderKey === `order:${order.id}`}
-                      lastUpdated={lastUpdated}
-                      onToggle={() =>
-                        setExpandedOrderKey((current) =>
-                          current === `order:${order.id}` ? null : `order:${order.id}`
-                        )
-                      }
-                      onDeletePaperOrder={onDeletePaperOrder}
-                      onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
-                      busyOrderId={busyOrderId}
-                      setBusyOrderId={setBusyOrderId}
-                      setFeedbackByOrder={setFeedbackByOrder}
-                      feedback={feedbackByOrder[String(order.id)]}
-                    />
-                  ))}
+                  {group.orders.map((order) => {
+                    const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
+                    const isDirty = hasOrderDraftChanged(order, draft);
+                    const orderBusy = busyOrderId === String(order.id);
+
+                    return (
+                      <ClosedOrderCard
+                        key={order.id}
+                        order={order}
+                        draft={draft}
+                        isDirty={isDirty}
+                        orderBusy={orderBusy}
+                        isExpanded={expandedOrderKey === `order:${order.id}`}
+                        lastUpdated={lastUpdated}
+                        onToggle={() =>
+                          setExpandedOrderKey((current) =>
+                            current === `order:${order.id}` ? null : `order:${order.id}`
+                          )
+                        }
+                        onResetDraft={() =>
+                          setDrafts((current) => ({
+                            ...current,
+                            [String(order.id)]: buildDefaultDraft(order)
+                          }))
+                        }
+                        onSave={() => handleSave(order)}
+                        onDelete={() => handleDelete(order, "closed order")}
+                        onUpdateDraft={updateDraft}
+                        onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+                        feedback={feedbackByOrder[String(order.id)]}
+                      />
+                    );
+                  })}
                 </div>
               </section>
             ))}

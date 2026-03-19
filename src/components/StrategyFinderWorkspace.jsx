@@ -117,14 +117,19 @@ function formatWholeNumber(value) {
 }
 
 function formatQuoteSizePair(bidSize, askSize) {
-  const bidSizeLabel = formatWholeNumber(bidSize);
-  const askSizeLabel = formatWholeNumber(askSize);
+  const numericBidSize = Number(bidSize);
+  const numericAskSize = Number(askSize);
 
-  if (!bidSizeLabel || !askSizeLabel) {
+  if (
+    !Number.isFinite(numericBidSize) ||
+    numericBidSize <= 0 ||
+    !Number.isFinite(numericAskSize) ||
+    numericAskSize <= 0
+  ) {
     return null;
   }
 
-  return `${bidSizeLabel}/${askSizeLabel}`;
+  return `${formatWholeNumber(numericBidSize)}/${formatWholeNumber(numericAskSize)}`;
 }
 
 function compareValues(left, right, direction) {
@@ -454,7 +459,11 @@ function buildPnlFilterSummary({ maxProfitMin, maxProfitMax, maxLossMin, maxLoss
   return activeFilters.length === 1 ? activeFilters[0] : `P&L filters (${activeFilters.length})`;
 }
 
-function buildQuoteSizeFilterSummary(threshold) {
+function buildQuoteSizeFilterSummary(threshold, quoteSizeDataAvailable = true) {
+  if (!quoteSizeDataAvailable) {
+    return "Bid/ask size unavailable";
+  }
+
   const thresholdLabel = formatWholeNumber(threshold);
   return thresholdLabel ? `Bid/ask size > ${thresholdLabel}` : "Bid/ask size";
 }
@@ -978,6 +987,7 @@ export default function StrategyFinderWorkspace({
     rows.some((row) => (row.marketBias ?? "Neutral") === tag)
   );
   const quoteSizeThresholdOptions = finder?.filters?.targetOptionQuoteSizeThresholds ?? [10, 25, 50];
+  const quoteSizeDataAvailable = finder?.filters?.quoteSizeDataAvailable !== false;
   const defaultQuoteSizeThreshold =
     Number(finder?.filters?.defaultTargetOptionQuoteSizeThreshold ?? quoteSizeThresholdOptions[0]) || 10;
   const availableStrategyTypesKey = availableStrategyTypes.join("|");
@@ -1087,7 +1097,8 @@ export default function StrategyFinderWorkspace({
     const numericMaxProfit = Number(row.maxProfit);
     const numericMaxLoss = Number(row.maxLoss);
     const quoteSizeMatch =
-      Number.isFinite(numericTargetOptionQuoteSize) && numericTargetOptionQuoteSize > targetOptionQuoteSizeThreshold;
+      !quoteSizeDataAvailable ||
+      (Number.isFinite(numericTargetOptionQuoteSize) && numericTargetOptionQuoteSize > targetOptionQuoteSizeThreshold);
     const maxProfitMatch =
       (minProfitThreshold == null ||
         row.maxProfitUnbounded === true ||
@@ -1366,7 +1377,7 @@ export default function StrategyFinderWorkspace({
   const productSummary = buildSelectionSummary(activeAssets, availableAssets, "Products");
   const strategySummary = buildSelectionSummary(activeStrategyTypes, availableStrategyTypes, "Strategy types");
   const biasSummary = buildSelectionSummary(activeBiasTags, availableBiasTags, "Tags");
-  const quoteSizeSummary = buildQuoteSizeFilterSummary(targetOptionQuoteSizeThreshold);
+  const quoteSizeSummary = buildQuoteSizeFilterSummary(targetOptionQuoteSizeThreshold, quoteSizeDataAvailable);
   const pnlSummary = buildPnlFilterSummary({
     maxProfitMin: minProfitThreshold,
     maxProfitMax: maxProfitThreshold,
@@ -2370,28 +2381,36 @@ export default function StrategyFinderWorkspace({
           <div className="finder-menu__panel">
             <div className="finder-menu__header">
               <strong>Target option size</strong>
-              <button
-                type="button"
-                className="finder-menu__reset"
-                onClick={() => setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold)}
-              >
-                Default
-              </button>
-            </div>
-            <div className="finder-menu__list">
-              {quoteSizeThresholdOptions.map((threshold) => (
+              {quoteSizeDataAvailable ? (
                 <button
-                  key={threshold}
                   type="button"
-                  className={`finder-menu__option ${
-                    targetOptionQuoteSizeThreshold === threshold ? "finder-menu__option--active" : ""
-                  }`}
-                  onClick={() => setTargetOptionQuoteSizeThreshold(threshold)}
+                  className="finder-menu__reset"
+                  onClick={() => setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold)}
                 >
-                  {`>${threshold}`}
+                  Default
                 </button>
-              ))}
+              ) : null}
             </div>
+            {quoteSizeDataAvailable ? (
+              <div className="finder-menu__list">
+                {quoteSizeThresholdOptions.map((threshold) => (
+                  <button
+                    key={threshold}
+                    type="button"
+                    className={`finder-menu__option ${
+                      targetOptionQuoteSizeThreshold === threshold ? "finder-menu__option--active" : ""
+                    }`}
+                    onClick={() => setTargetOptionQuoteSizeThreshold(threshold)}
+                  >
+                    {`>${threshold}`}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="finder-menu__notice">
+                Live option quote sizes are unavailable right now, so this filter is temporarily paused.
+              </div>
+            )}
           </div>
         </details>
 
