@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import TradingViewWidget from "./TradingViewWidget.jsx";
 import { getMacroTileColors } from "../theme.js";
 
 const DEFAULT_SECTION_HEIGHTS = {
@@ -18,15 +17,6 @@ const DISPLAY_LOOKBACK_TO_HEATMAP = {
   "5Y": "MAX",
   ALL: "MAX"
 };
-const DISPLAY_LOOKBACK_TO_TV = {
-  "1D": "1D",
-  "1W": "1W",
-  "1M": "1M",
-  "6M": "6M",
-  "1Y": "12M",
-  "5Y": "60M",
-  ALL: "ALL"
-};
 const LEGACY_LOOKBACK_TO_DISPLAY = {
   "24H": "1D",
   "7D": "1W",
@@ -34,28 +24,6 @@ const LEGACY_LOOKBACK_TO_DISPLAY = {
   "180D": "6M",
   "365D": "1Y",
   MAX: "ALL"
-};
-const WATCHLIST_TRADINGVIEW_SYMBOLS = {
-  SPX: "SPREADEX:SPX",
-  RUT: "AMEX:IWM",
-  US2K: "AMEX:IWM",
-  DJI: "AMEX:DIA",
-  QQQ: "NASDAQ:QQQ",
-  SPY: "AMEX:SPY",
-  VIX: "CAPITALCOM:VIX",
-  VOO: "AMEX:VOO",
-  EWU: "AMEX:EWU",
-  VGK: "AMEX:VGK",
-  GLD: "AMEX:GLD",
-  USO: "AMEX:USO",
-  TLT: "NASDAQ:TLT",
-  "BTC-USD": "BINANCE:BTCUSDT",
-  "ETH-USD": "BINANCE:ETHUSDT",
-  FXE: "AMEX:FXE",
-  FXB: "AMEX:FXB",
-  UUP: "AMEX:UUP",
-  SEA: "AMEX:SEA",
-  IBIT: "NASDAQ:IBIT"
 };
 
 function clamp(value, min, max) {
@@ -247,10 +215,6 @@ function getStreamStateLabel(state) {
     default:
       return "Idle";
   }
-}
-
-function resolveWatchlistTradingViewSymbol(item) {
-  return WATCHLIST_TRADINGVIEW_SYMBOLS[item.symbol] ?? item.symbol;
 }
 
 function splitBalanced(items, valueKey) {
@@ -470,9 +434,9 @@ function getTileTypography(layout, density, label) {
   };
 }
 
-function HeatmapTile({ tile, layout, lookback }) {
+function HeatmapTile({ tile, layout, lookback, theme }) {
   const density = getTileDensity(layout);
-  const colors = getTileColors(tile.changePct);
+  const colors = getTileColors(tile.changePct, theme);
   const tileLabel =
     density === "tiny" || (density === "small" && tile.label.length > 16) ? abbreviateLabel(tile.label) : tile.label;
   const typeScale = getTileTypography(layout, density, tile.label);
@@ -513,7 +477,7 @@ function HeatmapTile({ tile, layout, lookback }) {
   );
 }
 
-function HeatmapGroup({ group, layout, lookback }) {
+function HeatmapGroup({ group, layout, lookback, theme }) {
   const tileLayouts = buildBinaryTreemap(group.tiles, "valueUsd");
 
   return (
@@ -534,20 +498,20 @@ function HeatmapGroup({ group, layout, lookback }) {
 
       <div className="macro-group-block__body">
         {tileLayouts.map((tile) => (
-          <HeatmapTile key={tile.id} tile={tile} layout={tile} lookback={lookback} />
+          <HeatmapTile key={tile.id} tile={tile} layout={tile} lookback={lookback} theme={theme} />
         ))}
       </div>
     </section>
   );
 }
 
-function HeatmapSurface({ section, lookback, surfaceHeight }) {
+function HeatmapSurface({ section, lookback, surfaceHeight, theme }) {
   const groupLayouts = buildBinaryTreemap(section.groups, "totalValueUsd");
 
   return (
     <div className="macro-surface" style={{ height: `${surfaceHeight}px` }}>
       {groupLayouts.map((group) => (
-        <HeatmapGroup key={group.id} group={group} layout={group} lookback={lookback} />
+        <HeatmapGroup key={group.id} group={group} layout={group} lookback={lookback} theme={theme} />
       ))}
     </div>
   );
@@ -577,73 +541,6 @@ function FlowColumn({ title, accentClass, items }) {
         ))}
       </div>
     </article>
-  );
-}
-
-function LiveWatchlistSection({ items, timeframe, theme }) {
-  if (!items.length) {
-    return null;
-  }
-
-  return (
-    <section className="macro-watchlist">
-      <div className="section-heading">
-        <span>Live watchlist</span>
-        <span className="pill pill--ghost">{items.length} instruments</span>
-      </div>
-
-      <div className="macro-watchlist__grid">
-        {items.map((item) => {
-          const colors = getTileColors(item.changePercent, theme);
-          const tradingViewSymbol = resolveWatchlistTradingViewSymbol(item);
-          const dateRange = DISPLAY_LOOKBACK_TO_TV[timeframe] ?? "1M";
-
-          return (
-            <article
-              key={`${item.symbol}-${item.label}`}
-              className="macro-tile macro-tile--large macro-watchlist-tile"
-              style={{
-                background: colors.background,
-                borderColor: colors.stroke,
-                color: colors.text
-              }}
-              title={`${item.symbol}\n${item.label}\n${formatPercent(item.changePercent)}`}
-            >
-              <div className="macro-watchlist-tile__eyebrow">
-                <span>{item.group}</span>
-                <span>{item.symbol}</span>
-              </div>
-
-              <div className="macro-tile__spark macro-tile__spark--large">
-                <TradingViewWidget
-                  bare
-                  type="mini-chart"
-                  scriptName="mini-symbol-overview"
-                  theme={theme}
-                  config={{
-                    symbol: tradingViewSymbol,
-                    width: "100%",
-                    height: "100%",
-                    locale: "en",
-                    dateRange,
-                    colorTheme: "dark",
-                    isTransparent: false,
-                    autosize: true,
-                    largeChartUrl: "",
-                    chartOnly: false,
-                    noTimeScale: true,
-                    trendLineColor: colors.line,
-                    underLineColor: colors.baseline,
-                    underLineBottomColor: "rgba(0, 0, 0, 0)"
-                  }}
-                  containerClassName="macro-watchlist-tile__chart"
-                />
-              </div>
-            </article>
-          );
-        })}
-      </div>
-    </section>
   );
 }
 
@@ -813,6 +710,7 @@ function AtlasControlsCard({
 function HeatmapSection({
   section,
   lookback,
+  theme,
   surfaceHeight,
   editMode,
   isDragging,
@@ -857,7 +755,7 @@ function HeatmapSection({
             </div>
           </div>
         </div>
-        <HeatmapSurface section={section} lookback={lookback} surfaceHeight={surfaceHeight} />
+        <HeatmapSurface section={section} lookback={lookback} surfaceHeight={surfaceHeight} theme={theme} />
       </article>
 
       {editMode ? (
@@ -896,14 +794,8 @@ function LookbackSelector({ lookbacks, selectedLookback, onChange, disabled = fa
   );
 }
 
-export default function MacroHeatmapDashboard({
-  macroDashboard,
-  watchlist = [],
-  streamDiagnostics = null,
-  theme = "dark"
-}) {
+export default function MacroHeatmapDashboard({ macroDashboard, streamDiagnostics = null, theme = "dark" }) {
   const sections = macroDashboard?.sections ?? [];
-  const liveWatchlist = Array.isArray(watchlist) ? watchlist : [];
   const lookbacks = DISPLAY_LOOKBACKS;
   const defaultLookback = normalizeDisplayLookback(macroDashboard?.defaultLookback ?? "30D", "1M");
   const [selectedLookback, setSelectedLookback] = useState(defaultLookback);
@@ -1198,8 +1090,6 @@ export default function MacroHeatmapDashboard({
         />
       </div>
 
-      <LiveWatchlistSection items={liveWatchlist} timeframe={selectedLookback} theme={theme} />
-
       <div className="macro-heatmap-stack">
         {orderedSections.map((section) => {
           const surfaceHeight = sectionLayout.heights[section.id] ?? getDefaultSectionHeight(section.id);
@@ -1209,6 +1099,7 @@ export default function MacroHeatmapDashboard({
               key={section.id}
               section={section}
               lookback={DISPLAY_LOOKBACK_TO_HEATMAP[selectedLookback] ?? "30D"}
+              theme={theme}
               surfaceHeight={surfaceHeight}
               editMode={editMode}
               isDragging={draggedSectionId === section.id}

@@ -432,7 +432,6 @@ export default function App() {
 
               <MacroHeatmapDashboard
                 macroDashboard={dashboard?.macroDashboard}
-                watchlist={dashboard?.watchlist ?? []}
                 streamDiagnostics={dashboard?.streamDiagnostics ?? null}
                 theme={theme}
               />
