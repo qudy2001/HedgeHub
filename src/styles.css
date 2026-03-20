@@ -2993,7 +2993,17 @@ a {
   background: rgba(255, 255, 255, 0.02);
 }
 
-.paper-open-table__row--expanded td {
+.paper-open-table__row--detail-open td,
+.paper-open-table__row--tree-open td {
+  border-bottom: 0;
+}
+
+.paper-open-table__branch-row td {
+  padding: 0 14px 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.paper-open-table__branch-row--detail-open td {
   border-bottom: 0;
 }
 
@@ -3061,6 +3071,100 @@ a {
 
 .paper-open-table__expanded-body {
   gap: 18px;
+}
+
+.paper-contract-tree {
+  position: relative;
+  padding-left: 22px;
+}
+
+.paper-contract-tree::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 12px;
+  bottom: 12px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.34), rgba(148, 163, 184, 0.14));
+}
+
+.paper-contract-tree::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 24px;
+  width: 14px;
+  height: 1px;
+  background: rgba(56, 189, 248, 0.34);
+}
+
+.paper-contract-tree--inline {
+  padding-left: 20px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.paper-contract-tree__table-wrap {
+  overflow-x: auto;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: calc(var(--radius-control) + 2px);
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.paper-contract-tree__table {
+  width: 100%;
+  min-width: 1240px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.paper-contract-tree__table thead th {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.paper-contract-tree__table tbody td {
+  padding: 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  font-size: 0.92rem;
+  line-height: 1.45;
+  vertical-align: middle;
+}
+
+.paper-contract-tree__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.paper-contract-tree__table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.paper-contract-tree__name-cell {
+  min-width: 290px;
+  font-weight: 600;
+}
+
+.paper-contract-tree__name-cell a,
+.paper-contract-tree__name-cell span {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.paper-contract-tree__name-cell a:hover {
+  color: var(--brand);
+  text-decoration: underline;
+}
+
+.paper-contract-tree__table td .pill {
+  width: fit-content;
 }
 
 .paper-open-table__feedback-row .refresh-feedback {
@@ -3819,6 +3923,30 @@ a {
 :root[data-theme="light"] :is(.summary-row, .paper-order-summary-strip) {
   background: var(--surface-grey);
   border-color: rgba(148, 163, 184, 0.14);
+}
+
+:root[data-theme="light"] .paper-contract-tree {
+  background: transparent;
+}
+
+:root[data-theme="light"] .paper-contract-tree::before,
+:root[data-theme="light"] .paper-contract-tree::after {
+  background: rgba(59, 130, 246, 0.26);
+}
+
+:root[data-theme="light"] .paper-contract-tree__table-wrap {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(148, 163, 184, 0.14);
+  box-shadow: var(--shadow);
+}
+
+:root[data-theme="light"] .paper-contract-tree__table thead th {
+  background: rgba(248, 250, 252, 0.96);
+  border-color: rgba(148, 163, 184, 0.14);
+}
+
+:root[data-theme="light"] .paper-contract-tree__table tbody tr:hover td {
+  background: rgba(148, 163, 184, 0.04);
 }
 
 :root[data-theme="light"] .paper-open-table-wrap {

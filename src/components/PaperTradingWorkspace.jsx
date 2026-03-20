@@ -99,6 +99,16 @@ function formatDateTimeLabel(value, { includeSeconds = false } = {}) {
   }).format(date);
 }
 
+function formatSignedPercentValue(value, digits = 2) {
+  if (value == null || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+
+  const numericValue = Number(value);
+  const prefix = numericValue > 0 ? "+" : numericValue < 0 ? "-" : "";
+  return `${prefix}${Math.abs(numericValue).toFixed(digits)}%`;
+}
+
 function buildDrafts(orders) {
   return Object.fromEntries(
     (orders ?? []).map((order) => [
@@ -371,6 +381,7 @@ const OPEN_ORDER_TABLE_COLUMNS = [
   { key: "maxLoss", label: "Max loss", sortable: true },
   { key: "unrealisedPnL", label: "Unrealised P&L", sortable: true },
   { key: "viewDetail", label: "View detail", sortable: false },
+  { key: "orderTree", label: "Order tree", sortable: false },
   { key: "closeOrder", label: "Close order", sortable: false }
 ];
 
@@ -562,6 +573,120 @@ function renderOpenOrderMetricCell(item) {
   );
 }
 
+function buildActiveLegRow(order, leg) {
+  const proxySymbol = order.valuationContext?.proxySymbol || order.assetLabel || "Asset";
+  const currentProxySpot = Number(order.valuationContext?.currentProxySpot ?? 0);
+  const currentUnderlyingSpot = Number(order.valuationContext?.currentUnderlyingSpot ?? currentProxySpot);
+  const targetUnderlyingValue = Number(order.valuationContext?.targetUnderlyingValue ?? 0);
+  const profitLossValue = Number(leg.profitLossValue ?? NaN);
+  const profitLossPercent = Number(leg.profitLossPercent ?? NaN);
+  const profitLossTone =
+    Number.isNaN(profitLossValue) || profitLossValue === 0 ? "" : profitLossValue > 0 ? "positive" : "negative";
+
+  if (leg.kind === "binary") {
+    return {
+      id: leg.id,
+      contractLabel: order.polymarketQuestion || leg.label || "Polymarket",
+      contractHref: getLegUrl(order, leg),
+      type: "Polymarket",
+      asset: order.assetLabel || proxySymbol,
+      expiration: order.polymarketResolutionDate || order.strategyCloseDate || "n/a",
+      reference: targetUnderlyingValue > 0 ? formatCurrency(targetUnderlyingValue) : "n/a",
+      underlyingNow: formatCurrency(currentUnderlyingSpot || currentProxySpot),
+      quantity: String(leg.quantity ?? "n/a"),
+      entryPrice: formatCurrency(leg.entryPrice, 4),
+      currentMark: formatCurrency(leg.currentPrice, 4),
+      currentValue: formatCurrency(leg.currentExposure),
+      profitLossPercent: formatSignedPercentValue(profitLossPercent),
+      profitLossValue: formatCurrency(profitLossValue),
+      profitLossTone
+    };
+  }
+
+  const strike = Number(leg.strike ?? 0);
+
+  return {
+    id: leg.id,
+    contractLabel: leg.contractSymbol || leg.label || "n/a",
+    contractHref: "",
+    type: "Option",
+    asset: leg.rootSymbol || order.assetLabel || proxySymbol,
+    expiration: leg.expiry || order.strategyCloseDate || "n/a",
+    reference: Number.isFinite(strike) && strike > 0 ? `${strike.toFixed(1)}${leg.optionType === "put" ? "P" : "C"}` : "n/a",
+    underlyingNow: formatCurrency(currentProxySpot),
+    quantity: String(leg.quantity ?? "n/a"),
+    entryPrice: formatCurrency(leg.entryPrice),
+    currentMark: formatCurrency(leg.currentPrice),
+    currentValue: formatCurrency(leg.currentExposure),
+    profitLossPercent: formatSignedPercentValue(profitLossPercent),
+    profitLossValue: formatCurrency(profitLossValue),
+    profitLossTone
+  };
+}
+
+function ActiveContractsTree({ order, compact = false }) {
+  if (!(order.legs ?? []).length) {
+    return null;
+  }
+
+  const rows = order.legs.map((leg) => buildActiveLegRow(order, leg));
+
+  return (
+    <section className={`paper-contract-tree ${compact ? "paper-contract-tree--inline" : ""}`}>
+      <div className="paper-contract-tree__table-wrap">
+        <table className="paper-contract-tree__table">
+          <thead>
+            <tr>
+              <th scope="col">Contract / market</th>
+              <th scope="col">Type</th>
+              <th scope="col">Asset</th>
+              <th scope="col">Expiration</th>
+              <th scope="col">Strike / target</th>
+              <th scope="col">Underlying now</th>
+              <th scope="col">Quantity</th>
+              <th scope="col">Entry price</th>
+              <th scope="col">Current mark</th>
+              <th scope="col">Current value</th>
+              <th scope="col">P/L%</th>
+              <th scope="col">P/L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td className="paper-contract-tree__name-cell">
+                  {row.contractHref ? (
+                    <a href={row.contractHref} target="_blank" rel="noreferrer">
+                      {row.contractLabel}
+                    </a>
+                  ) : (
+                    <span>{row.contractLabel}</span>
+                  )}
+                </td>
+                <td>
+                  <span className={`pill ${row.type === "Polymarket" ? "pill--ghost" : "pill--live"}`}>
+                    {row.type}
+                  </span>
+                </td>
+                <td>{row.asset}</td>
+                <td>{row.expiration}</td>
+                <td>{row.reference}</td>
+                <td>{row.underlyingNow}</td>
+                <td>{row.quantity}</td>
+                <td>{row.entryPrice}</td>
+                <td>{row.currentMark}</td>
+                <td>{row.currentValue}</td>
+                <td className={row.profitLossTone}>{row.profitLossPercent}</td>
+                <td className={row.profitLossTone}>{row.profitLossValue}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function OpenOrderDetails({
   order,
   draft,
@@ -718,8 +843,10 @@ function OpenOrderTableRows({
   feedback,
   orderBusy,
   isExpanded,
+  isTreeExpanded,
   lastUpdated,
   onToggle,
+  onToggleTree,
   onResetDraft,
   onSave,
   onClose,
@@ -753,7 +880,15 @@ function OpenOrderTableRows({
 
   return (
     <Fragment>
-      <tr className={`paper-open-table__row ${isExpanded ? "paper-open-table__row--expanded" : ""}`}>
+      <tr
+        className={[
+          "paper-open-table__row",
+          isExpanded ? "paper-open-table__row--detail-open" : "",
+          isTreeExpanded ? "paper-open-table__row--tree-open" : ""
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <td className="paper-open-table__cell paper-open-table__cell--holding">
           <div className="paper-open-table__holding">
             <strong>{order.combinationLabel}</strong>
@@ -778,6 +913,16 @@ function OpenOrderTableRows({
         <td className="paper-open-table__cell paper-open-table__cell--action">
           <button
             type="button"
+            className={`chart-toggle ${isTreeExpanded ? "chart-toggle--active" : ""}`}
+            onClick={onToggleTree}
+            disabled={orderBusy}
+          >
+            {isTreeExpanded ? "Collapse order tree" : "Expand order tree"}
+          </button>
+        </td>
+        <td className="paper-open-table__cell paper-open-table__cell--action">
+          <button
+            type="button"
             className="chart-toggle paper-order-card__close-button"
             onClick={onClose}
             disabled={orderBusy}
@@ -786,6 +931,16 @@ function OpenOrderTableRows({
           </button>
         </td>
       </tr>
+
+      {isTreeExpanded ? (
+        <tr
+          className={`paper-open-table__branch-row ${isExpanded ? "paper-open-table__branch-row--detail-open" : ""}`}
+        >
+          <td colSpan={OPEN_ORDER_TABLE_COLUMN_COUNT}>
+            <ActiveContractsTree order={order} compact />
+          </td>
+        </tr>
+      ) : null}
 
       {isExpanded ? (
         <tr className="paper-open-table__detail-row">
@@ -1091,6 +1246,7 @@ export default function PaperTradingWorkspace({
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
   const [expandedOrderKey, setExpandedOrderKey] = useState(null);
+  const [expandedTreeOrderIds, setExpandedTreeOrderIds] = useState([]);
   const [openSortConfig, setOpenSortConfig] = useState({ key: null, direction: "asc" });
   const [closedSortConfig, setClosedSortConfig] = useState({ key: null, direction: "asc" });
 
@@ -1103,6 +1259,11 @@ export default function PaperTradingWorkspace({
       [...openOrders, ...closedOrders].some((order) => current === `order:${order.id}`) ? current : null
     );
   }, [openOrders, closedOrders]);
+
+  useEffect(() => {
+    const validOpenIds = new Set((openOrders ?? []).map((order) => String(order.id)));
+    setExpandedTreeOrderIds((current) => current.filter((orderId) => validOpenIds.has(String(orderId))));
+  }, [openOrders]);
 
   function updateDraft(orderId, updater) {
     setDrafts((current) => {
@@ -1310,6 +1471,7 @@ export default function PaperTradingWorkspace({
                           const orderBusy = busyOrderId === String(order.id);
                           const orderKey = `order:${order.id}`;
                           const isExpanded = expandedOrderKey === orderKey;
+                          const isTreeExpanded = expandedTreeOrderIds.includes(String(order.id));
 
                           return (
                             <OpenOrderTableRows
@@ -1320,10 +1482,18 @@ export default function PaperTradingWorkspace({
                               feedback={feedback}
                               orderBusy={orderBusy}
                               isExpanded={isExpanded}
+                              isTreeExpanded={isTreeExpanded}
                               lastUpdated={lastUpdated}
                               onToggle={() =>
                                 setExpandedOrderKey((current) =>
                                   current === orderKey ? null : orderKey
+                                )
+                              }
+                              onToggleTree={() =>
+                                setExpandedTreeOrderIds((current) =>
+                                  current.includes(String(order.id))
+                                    ? current.filter((orderId) => orderId !== String(order.id))
+                                    : [...current, String(order.id)]
                                 )
                               }
                               onResetDraft={() =>
