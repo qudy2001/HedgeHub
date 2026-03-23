@@ -543,92 +543,145 @@ export default function StrategyScreeningWorkspace({
 
       {selectedRow ? (
         <section className="screening-v2__selected-layout">
-          <article className="insight-card screening-v2__selected-summary">
-            <div className="section-heading">
-              <span>Selected setup</span>
-              <span className="pill pill--live">{selectedRow.strategyName}</span>
-            </div>
-            <h3>{selectedRow.marketQuestion}</h3>
-            <div className="screening-v2__detail-meta">
-              <span>{selectedRow.assetLabel}</span>
-              <span>{selectedRow.optionRootSymbol}</span>
-              <span>{selectedRow.settlementType}</span>
-              <span>{selectedRow.exerciseStyle}</span>
-            </div>
-            <div className="summary-stack">
-              <div className="summary-row">
-                <span>Composite score</span>
-                <strong>{selectedRow.compositeScore?.toFixed?.(2) ?? "n/a"}</strong>
-              </div>
-              <div className="summary-row">
-                <span>Expected value</span>
-                <strong>{formatCurrency(selectedRow.expectedValue)}</strong>
-              </div>
-              <div className="summary-row">
-                <span>Scenario: event happens</span>
-                <strong className={Number(selectedRow.scenarioEventPnL ?? 0) >= 0 ? "positive" : "negative"}>
-                  {formatCurrency(selectedRow.scenarioEventPnL)}
-                </strong>
-              </div>
-              <div className="summary-row">
-                <span>Scenario: event fails</span>
-                <strong className={Number(selectedRow.scenarioFailPnL ?? 0) >= 0 ? "positive" : "negative"}>
-                  {formatCurrency(selectedRow.scenarioFailPnL)}
-                </strong>
-              </div>
-              <div className="summary-row">
-                <span>Expected-range payoff</span>
-                <strong className={Number(selectedRangeWindow?.min ?? 0) >= 0 ? "positive" : "negative"}>
-                  {selectedRangeWindow
-                    ? `${formatCurrency(selectedRangeWindow.min)} to ${formatCurrency(selectedRangeWindow.max)}`
-                    : "n/a"}
-                </strong>
-              </div>
-              <div className="summary-row">
-                <span>Debug reason</span>
-                <strong>{selectedRow.failureReason ?? "ranked_edge"}</strong>
-              </div>
-              <div className="summary-row">
-                <span>Max loss</span>
-                <strong>{formatCurrency(selectedRow.maxLossValue)}</strong>
-              </div>
-              <div className="summary-row">
-                <span>Capital exposure</span>
-                <strong>{formatCurrency(selectedRow.capitalExposure)}</strong>
-              </div>
-            </div>
-
-            <div className="screening-v2__leg-list">
-              <div className="screening-v2__leg-item">
-                <div>
-                  <strong>{selectedRow.polymarketLeg.side === "YES" ? "Long YES" : "Long NO"}</strong>
-                  <span>Polymarket hedge</span>
+          <article className="insight-card screening-v2__selected-top">
+            <div className="screening-v2__selected-head">
+              <div className="screening-v2__selected-copy">
+                <h3>{selectedRow.strategyName}</h3>
+                <p className="screening-v2__selected-question">{selectedRow.marketQuestion}</p>
+                <div className="detail-badges">
+                  <span className="pill pill--ghost">{selectedRow.assetLabel}</span>
+                  {selectedRow.eventDate ? <span className="pill pill--ghost">{selectedRow.eventDate}</span> : null}
+                  {selectedRow.optionRootSymbol ? (
+                    <span className="pill pill--ghost">{selectedRow.optionRootSymbol}</span>
+                  ) : null}
+                  {selectedRow.settlementType ? (
+                    <span className="pill pill--ghost">{selectedRow.settlementType}</span>
+                  ) : null}
+                  {selectedRow.exerciseStyle ? (
+                    <span className="pill pill--live">{selectedRow.exerciseStyle}</span>
+                  ) : null}
                 </div>
-                <span>
-                  {selectedRow.polymarketLeg.quantity} @ {formatPercent(selectedRow.polymarketLeg.entryPrice * 100)}
-                </span>
               </div>
 
-              {selectedRow.optionLegs.map((leg) => (
-                <div key={`${leg.contractSymbol}-${leg.action}-${leg.strike}`} className="screening-v2__leg-item">
-                  <div>
-                    <strong>
-                      {leg.action} {leg.optionType.toUpperCase()} {leg.strike}
-                    </strong>
-                    <span>{leg.expiration}</span>
+              <div className="detail-card__actions">
+                {selectedRow.polymarketUrl ? (
+                  <a href={selectedRow.polymarketUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
+                    Open Polymarket
+                  </a>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="screening-v2__selected-grid">
+              <section className="screening-v2__selected-panel">
+                <h4>Strategy overview</h4>
+                <div className="summary-stack">
+                  <div className="summary-row">
+                    <span>Composite score</span>
+                    <strong>{selectedRow.compositeScore?.toFixed?.(2) ?? "n/a"}</strong>
                   </div>
-                  <span>
-                    {leg.quantity}x @ {formatCurrency(leg.entryPrice * 100)}
-                  </span>
+                  <div className="summary-row">
+                    <span>Expected value</span>
+                    <strong>{formatCurrency(selectedRow.expectedValue)}</strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Scenario: event happens</span>
+                    <strong className={Number(selectedRow.scenarioEventPnL ?? 0) >= 0 ? "positive" : "negative"}>
+                      {formatCurrency(selectedRow.scenarioEventPnL)}
+                    </strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Scenario: event fails</span>
+                    <strong className={Number(selectedRow.scenarioFailPnL ?? 0) >= 0 ? "positive" : "negative"}>
+                      {formatCurrency(selectedRow.scenarioFailPnL)}
+                    </strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Expected-range payoff</span>
+                    <strong className={Number(selectedRangeWindow?.min ?? 0) >= 0 ? "positive" : "negative"}>
+                      {selectedRangeWindow
+                        ? `${formatCurrency(selectedRangeWindow.min)} to ${formatCurrency(selectedRangeWindow.max)}`
+                        : "n/a"}
+                    </strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Debug reason</span>
+                    <strong>{selectedRow.failureReason ?? "ranked_edge"}</strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Max loss</span>
+                    <strong>{formatCurrency(selectedRow.maxLossValue)}</strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Capital exposure</span>
+                    <strong>{formatCurrency(selectedRow.capitalExposure)}</strong>
+                  </div>
                 </div>
-              ))}
-            </div>
+              </section>
 
-            {selectedRow.polymarketUrl ? (
-              <a href={selectedRow.polymarketUrl} target="_blank" rel="noreferrer" className="screening-v2__link">
-                Open Polymarket event
-              </a>
-            ) : null}
+              <section className="screening-v2__selected-panel screening-v2__selected-panel--contracts">
+                <h4>Contract details</h4>
+                <div className="screening-v2__contract-table-wrap">
+                  <table className="screening-v2__contract-table">
+                    <thead>
+                      <tr>
+                        <th>Action</th>
+                        <th>Qty</th>
+                        <th>Strike / market</th>
+                        <th>Entry</th>
+                        <th>Bid</th>
+                        <th>Ask</th>
+                        <th>Spread</th>
+                        <th>Code / link</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedRow.polymarketLeg ? (
+                        <tr>
+                          <td>{selectedRow.polymarketLeg.side === "YES" ? "Long YES" : "Long NO"}</td>
+                          <td>{selectedRow.polymarketLeg.quantity}</td>
+                          <td>{selectedRow.marketQuestion}</td>
+                          <td>{formatPercent(selectedRow.polymarketLeg.entryPrice * 100)}</td>
+                          <td>{formatPercent(selectedRow.polymarketLeg.entryPrice * 100)}</td>
+                          <td>{formatPercent(selectedRow.polymarketLeg.entryPrice * 100)}</td>
+                          <td>0.00%</td>
+                          <td>
+                            {selectedRow.polymarketUrl ? (
+                              <a href={selectedRow.polymarketUrl} target="_blank" rel="noreferrer">
+                                Open Polymarket event
+                              </a>
+                            ) : (
+                              <span>Polymarket hedge</span>
+                            )}
+                          </td>
+                        </tr>
+                      ) : null}
+
+                      {selectedRow.optionLegs.map((leg) => (
+                        <tr key={`${leg.contractSymbol}-${leg.action}-${leg.strike}`}>
+                          <td>{leg.action}</td>
+                          <td>{leg.quantity}</td>
+                          <td>
+                            {leg.strike}
+                            {String(leg.optionType ?? "call").toUpperCase()} · {leg.expiration}
+                          </td>
+                          <td>{formatCurrency(leg.entryPrice * 100)}</td>
+                          <td>{leg.bid != null ? formatCurrency(Number(leg.bid) * 100) : "n/a"}</td>
+                          <td>{leg.ask != null ? formatCurrency(Number(leg.ask) * 100) : "n/a"}</td>
+                          <td>{leg.spread != null ? formatPercent(leg.spread) : "n/a"}</td>
+                          <td>
+                            <div className="screening-v2__contract-link">
+                              <strong>{leg.contractSymbol || `${leg.action} ${leg.optionType} ${leg.strike}`}</strong>
+                              <span>{leg.quoteSource ?? "modeled"}</span>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
           </article>
 
           {selectedScenarioOrder ? (
