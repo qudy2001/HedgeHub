@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import PaperTradeHistoryChart from "./PaperTradeHistoryChart.jsx";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import { countTradingDaysBetween } from "../tradingCalendar.js";
 
 function formatCurrency(value, digits = 2) {
   if (value == null || Number.isNaN(Number(value))) {
@@ -321,27 +322,10 @@ function getOrderTagLabel(order) {
 }
 
 function countTradingDaysUntil(dateValue, startValue = getTodayIsoDate()) {
-  const start = parseIsoDate(startValue);
-  const end = parseIsoDate(dateValue);
-
-  if (!start || !end || end.getTime() < start.getTime()) {
-    return 0;
-  }
-
-  const cursor = new Date(start);
-  cursor.setUTCDate(cursor.getUTCDate() + 1);
-
-  let tradingDays = 0;
-
-  while (cursor.getTime() <= end.getTime()) {
-    const day = cursor.getUTCDay();
-    if (day !== 0 && day !== 6) {
-      tradingDays += 1;
-    }
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-
-  return tradingDays;
+  return countTradingDaysBetween(startValue, dateValue, {
+    includeStart: false,
+    includeEnd: true
+  });
 }
 
 function getExpirationCountdown(order) {
@@ -589,6 +573,8 @@ function buildActiveLegRow(order, leg) {
       contractLabel: order.polymarketQuestion || leg.label || "Polymarket",
       contractHref: getLegUrl(order, leg),
       type: "Polymarket",
+      side: leg.action === "SHORT" ? "Short" : "Long",
+      sideTone: leg.action === "SHORT" ? "short" : "long",
       asset: order.assetLabel || proxySymbol,
       expiration: order.polymarketResolutionDate || order.strategyCloseDate || "n/a",
       reference: targetUnderlyingValue > 0 ? formatCurrency(targetUnderlyingValue) : "n/a",
@@ -610,6 +596,8 @@ function buildActiveLegRow(order, leg) {
     contractLabel: leg.contractSymbol || leg.label || "n/a",
     contractHref: "",
     type: "Option",
+    side: leg.action === "SHORT" ? "Short" : "Long",
+    sideTone: leg.action === "SHORT" ? "short" : "long",
     asset: leg.rootSymbol || order.assetLabel || proxySymbol,
     expiration: leg.expiry || order.strategyCloseDate || "n/a",
     reference: Number.isFinite(strike) && strike > 0 ? `${strike.toFixed(1)}${leg.optionType === "put" ? "P" : "C"}` : "n/a",
@@ -639,6 +627,7 @@ function ActiveContractsTree({ order, compact = false }) {
             <tr>
               <th scope="col">Contract / market</th>
               <th scope="col">Type</th>
+              <th scope="col">Side</th>
               <th scope="col">Asset</th>
               <th scope="col">Expiration</th>
               <th scope="col">Strike / target</th>
@@ -666,6 +655,11 @@ function ActiveContractsTree({ order, compact = false }) {
                 <td>
                   <span className={`pill ${row.type === "Polymarket" ? "pill--ghost" : "pill--live"}`}>
                     {row.type}
+                  </span>
+                </td>
+                <td>
+                  <span className={`pill ${row.sideTone === "short" ? "pill--short" : "pill--long"}`}>
+                    {row.side}
                   </span>
                 </td>
                 <td>{row.asset}</td>

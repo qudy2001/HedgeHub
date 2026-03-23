@@ -8,7 +8,8 @@ import {
   fallbackPolymarketMarkets,
   marketSections,
   quoteWatchlist,
-  strategyAssetUniverse
+  strategyAssetUniverse,
+  strategyScreenerV2AssetUniverse
 } from "./marketCatalog.js";
 import { buildMacroDashboardPayload, buildMacroHeroStats } from "./macroDashboard.js";
 import {
@@ -50,6 +51,7 @@ import {
   buildStrategySummary,
   parseTargetFromQuestion
 } from "./strategyEngine.js";
+import { buildStrategyScreenerV2 } from "./strategyScreenerV2.js";
 import {
   applyPaperOrderPatch,
   attachPaperOrderHistory,
@@ -806,7 +808,12 @@ function withDerivedQuotes(quotes) {
   const quoteMap = new Map(quotes.map((quote) => [quote.symbol, quote]));
   const glD = quoteMap.get("GLD");
   const uso = quoteMap.get("USO");
+  const spx = quoteMap.get("SPX");
   const spy = quoteMap.get("SPY");
+  const spxIndexPrice = Number(
+    spx?.regularMarketPrice ??
+      (spy?.regularMarketPrice != null ? Number((spy.regularMarketPrice / 0.1).toFixed(2)) : 0)
+  );
 
   return [
     ...quotes,
@@ -826,12 +833,20 @@ function withDerivedQuotes(quotes) {
           regularMarketPrice: Number(uso.regularMarketPrice.toFixed(2))
         }
       : null,
-    spy
+    spxIndexPrice > 0
       ? {
-          ...spy,
+          ...(spx ?? spy),
           symbol: "SPX-INDEX",
           shortName: "S&P 500 index proxy",
-          regularMarketPrice: Number((spy.regularMarketPrice / 0.1).toFixed(2))
+          regularMarketPrice: spxIndexPrice
+        }
+      : null,
+    spxIndexPrice > 0
+      ? {
+          ...(spx ?? spy),
+          symbol: "XSP",
+          shortName: "Mini-SPX proxy",
+          regularMarketPrice: Number((spxIndexPrice * 0.1).toFixed(2))
         }
       : null
   ].filter(Boolean);
@@ -940,13 +955,17 @@ async function refreshLiveState({ includeOptions = true } = {}) {
   if (includeOptions) {
     try {
       const quoteMap = new Map(quotes.map((quote) => [quote.symbol, quote]));
+      const optionRefreshAssets = deduplicateBy(
+        [...strategyAssetUniverse, ...strategyScreenerV2AssetUniverse],
+        (asset) => `${asset.optionSymbol}:${asset.underlyingSymbol}`
+      );
 
       const optionResults = await Promise.allSettled(
-        strategyAssetUniverse.map(async (asset) => {
+        optionRefreshAssets.map(async (asset) => {
           const assetMarkets = polymarketMarkets.filter((market) => matchesAsset(asset, market));
           const leadMarket = assetMarkets[0] ?? null;
           const optionSpot = Number(quoteMap.get(asset.optionSymbol)?.regularMarketPrice ?? 0);
-          const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? 0);
+          const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? optionSpot ?? 0);
           const targetUnderlyings = assetMarkets
             .map((market) => parseTargetFromQuestion(market.question))
             .filter((value) => Number.isFinite(value) && value > 0);
@@ -955,7 +974,8 @@ async function refreshLiveState({ includeOptions = true } = {}) {
             parseTargetFromQuestion(leadMarket?.question ?? "") ||
             underlyingSpot ||
             optionSpot;
-          const ratio = underlyingSpot > 0 ? optionSpot / underlyingSpot : 1;
+          const ratio =
+            underlyingSpot > 0 && optionSpot > 0 ? optionSpot / underlyingSpot : Number(asset.conversionFallback ?? 1) || 1;
           const targetStrikes = (targetUnderlyings.length ? targetUnderlyings : [targetUnderlying]).map((value) =>
             Math.max(Math.round(value * ratio), 1)
           );
@@ -1005,12 +1025,19 @@ async function refreshLiveState({ includeOptions = true } = {}) {
             ask: contract.ask,
             bidSize: contract.bidSize ?? null,
             askSize: contract.askSize ?? null,
+            volume: contract.volume ?? null,
+            openInterest: contract.openInterest ?? null,
+            exerciseStyle: contract.exerciseStyle ?? asset.exerciseStyle ?? null,
+            settlementType: asset.settlementType ?? null,
             source: contract.source,
             sourceLabel: contract.sourceLabel,
             isLive: contract.isLive === true,
             hasRealBidAsk: contract.hasRealBidAsk === true,
             rootSymbol: asset.optionSymbol,
-            assetId: asset.id
+            assetId: asset.id,
+            assetLabel: asset.label,
+            underlyingSymbol: asset.underlyingSymbol,
+            referenceSymbol: asset.referenceSymbol ?? ""
           }));
         })
       );
@@ -1043,11 +1070,18 @@ async function refreshLiveState({ includeOptions = true } = {}) {
 }
 
 async function buildStrategiesResponse() {
-  const strategySummary = await buildStrategySummary({
-    quotes: liveState.quotes,
-    polymarketMarkets: liveState.polymarketMarkets,
-    optionMatches: liveState.optionMatches
-  });
+  const [strategySummary, v2Screener] = await Promise.all([
+    buildStrategySummary({
+      quotes: liveState.quotes,
+      polymarketMarkets: liveState.polymarketMarkets,
+      optionMatches: liveState.optionMatches
+    }),
+    buildStrategyScreenerV2({
+      quotes: liveState.quotes,
+      polymarketMarkets: liveState.polymarketMarkets,
+      optionMatches: liveState.optionMatches
+    })
+  ]);
   const paperPortfolio = buildPaperPortfolioResponse();
 
   return {
@@ -1056,6 +1090,7 @@ async function buildStrategiesResponse() {
     strategies: getStrategies(),
     recentRuns: getRecentRuns(),
     primaryStrategy: strategySummary,
+    v2Screener,
     paperPortfolio
   };
 }

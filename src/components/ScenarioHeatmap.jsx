@@ -1,5 +1,10 @@
 import { useState } from "react";
 import { getScenarioHeatmapCellStyle } from "../theme.js";
+import {
+  buildTradingDateColumns,
+  countTradingDaysBetween,
+  tradingDaysToYears
+} from "../tradingCalendar.js";
 
 const DEFAULT_RANGE_MULTIPLIER = 1;
 const RANGE_OPTIONS = [1, 2, 3];
@@ -17,27 +22,6 @@ function parseIsoDate(value) {
 
   const date = new Date(`${value}T00:00:00.000Z`);
   return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function differenceInDays(startValue, endValue) {
-  const start = parseIsoDate(startValue);
-  const end = parseIsoDate(endValue);
-
-  if (!start || !end) {
-    return 0;
-  }
-
-  return Math.round((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
-}
-
-function addDays(dateValue, days) {
-  const date = parseIsoDate(dateValue);
-  if (!date) {
-    return "";
-  }
-
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
 }
 
 function formatCurrency(value, currency = "USD", digits = 2) {
@@ -100,46 +84,12 @@ function formatDateLabel(value) {
 }
 
 function buildDateColumns(startDate, endDate, columnCount) {
-  const totalDays = Math.max(differenceInDays(startDate, endDate), 0);
-
-  if (totalDays === 0) {
-    return [
-      {
-        date: startDate,
-        offsetDays: 0,
-        isStart: true,
-        isEnd: true
-      }
-    ];
-  }
-
-  const targetCount = Math.min(totalDays + 1, Math.max(columnCount, 2));
-  const offsets = Array.from({ length: targetCount }, (_value, index) =>
-    Math.round((totalDays * index) / (targetCount - 1))
-  );
-  const uniqueOffsets = offsets.filter((offset, index, array) => array.indexOf(offset) === index);
-
-  if (uniqueOffsets[0] !== 0) {
-    uniqueOffsets.unshift(0);
-  }
-
-  if (uniqueOffsets[uniqueOffsets.length - 1] !== totalDays) {
-    uniqueOffsets.push(totalDays);
-  }
-
-  return uniqueOffsets.map((offsetDays, index, array) => ({
-    date: addDays(startDate, offsetDays),
-    offsetDays,
-    isStart: offsetDays === 0,
-    isEnd: offsetDays === totalDays,
-    index,
-    size: array.length
-  }));
+  return buildTradingDateColumns(startDate, endDate, columnCount);
 }
 
 function buildPriceRows({ centerPrice, volatility, totalDays, rangeMultiplier, rowCount }) {
   const halfSteps = Math.floor(rowCount / 2);
-  const timeYears = Math.max(totalDays, 1) / 365;
+  const timeYears = Math.max(tradingDaysToYears(totalDays), 1 / 252);
   const sigmaMove = Math.max(centerPrice * volatility * Math.sqrt(timeYears), Math.max(centerPrice * 0.04, 1));
 
   return Array.from({ length: rowCount }, (_value, index) => {
@@ -188,7 +138,10 @@ export function buildScenarioHeatmapSnapshot({
     return null;
   }
 
-  const totalDays = Math.max(differenceInDays(startDate, endDate), 0);
+  const totalDays = countTradingDaysBetween(startDate, endDate, {
+    includeStart: false,
+    includeEnd: true
+  });
   const columns = buildDateColumns(startDate, endDate, columnCount);
   const rows = buildPriceRows({
     centerPrice: numericCurrentPrice,

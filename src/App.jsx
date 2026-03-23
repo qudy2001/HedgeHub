@@ -5,6 +5,7 @@ import MacroHeatmapDashboard from "./components/MacroHeatmapDashboard.jsx";
 import PaperTradingWorkspace from "./components/PaperTradingWorkspace.jsx";
 import StrategyFinderWorkspace from "./components/StrategyFinderWorkspace.jsx";
 import StrategyRail from "./components/StrategyRail.jsx";
+import StrategyScreeningWorkspace from "./components/StrategyScreeningWorkspace.jsx";
 import TradingViewWidget from "./components/TradingViewWidget.jsx";
 import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
 
@@ -15,6 +16,13 @@ function readRoute() {
   if (pathname === "/paper-trading") {
     return {
       activeView: "paper",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
+  if (pathname === "/screening") {
+    return {
+      activeView: "screening",
       selectedStrategyId: "strategy-1"
     };
   }
@@ -35,6 +43,10 @@ function readRoute() {
 function buildPath(activeView, strategyId) {
   if (activeView === "paper") {
     return "/paper-trading";
+  }
+
+  if (activeView === "screening") {
+    return "/screening";
   }
 
   if (activeView === "strategy" && strategyId) {
@@ -271,7 +283,9 @@ export default function App() {
       return;
     }
 
-    if (activeView !== "strategy" || selectedStrategyId !== "strategy-1") {
+    if (
+      !(activeView === "screening" || (activeView === "strategy" && selectedStrategyId === "strategy-1"))
+    ) {
       strategyRefreshKeyRef.current = null;
       return;
     }
@@ -332,9 +346,11 @@ export default function App() {
 
   const strategies = strategyPayload?.strategies ?? [];
   const primaryStrategy = strategyPayload?.primaryStrategy;
+  const v2Screener = strategyPayload?.v2Screener;
   const paperPortfolio = strategyPayload?.paperPortfolio;
   const selectedStrategy = strategies.find((strategy) => strategy.id === selectedStrategyId) ?? null;
   const heroStats = dashboard?.heroStats ?? [];
+  const showScreening = activeView === "screening";
   const showStrategyFinder = activeView === "strategy" && selectedStrategyId === "strategy-1";
   const showPlannedStrategy = activeView === "strategy" && selectedStrategyId !== "strategy-1";
   const showPaperTrading = activeView === "paper";
@@ -370,9 +386,11 @@ export default function App() {
             strategies={strategies}
             selectedStrategyId={selectedStrategyId}
             onOpenDashboard={() => navigateTo("dashboard")}
+            onOpenScreening={() => navigateTo("screening")}
             onOpenPaperTrading={() => navigateTo("paper")}
             onSelect={(strategyId) => navigateTo("strategy", strategyId)}
             paperPortfolio={paperPortfolio}
+            screeningSummary={v2Screener?.summary ?? null}
           />
 
           {showPaperTrading ? (
@@ -383,6 +401,14 @@ export default function App() {
               onClosePaperOrder={handleClosePaperOrder}
               onDeletePaperOrder={handleDeletePaperOrder}
               onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
+              theme={theme}
+            />
+          ) : showScreening ? (
+            <StrategyScreeningWorkspace
+              screenerPayload={v2Screener}
+              onManualRefresh={handleManualRefresh}
+              refreshing={refreshing}
+              refreshNotice={refreshNotice}
               theme={theme}
             />
           ) : showStrategyFinder ? (

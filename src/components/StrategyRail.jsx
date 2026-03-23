@@ -3,9 +3,11 @@ export default function StrategyRail({
   strategies,
   selectedStrategyId,
   onOpenDashboard,
+  onOpenScreening,
   onOpenPaperTrading,
   onSelect,
-  paperPortfolio
+  paperPortfolio,
+  screeningSummary
 }) {
   const paperSummary = paperPortfolio?.summary ?? null;
   const paperPnL = Number(paperSummary?.profitLossValue ?? 0);
@@ -36,10 +38,9 @@ export default function StrategyRail({
         </div>
 
         <div className="strategy-list">
-          {strategies.map((strategy) => {
+          {strategies.flatMap((strategy) => {
             const isActive = activeView === "strategy" && strategy.id === selectedStrategyId;
-
-            return (
+            const cards = [
               <button
                 key={strategy.id}
                 type="button"
@@ -55,7 +56,28 @@ export default function StrategyRail({
                 {strategy.assetLabel ? <div className="strategy-card__asset">{strategy.assetLabel}</div> : null}
                 <p>{strategy.description}</p>
               </button>
-            );
+            ];
+
+            if (strategy.id === "strategy-1") {
+              cards.push(
+                <button
+                  key="screening-v2"
+                  type="button"
+                  className={`sidebar-nav-card ${activeView === "screening" ? "sidebar-nav-card--active" : ""}`}
+                  onClick={onOpenScreening}
+                >
+                  <div className="strategy-card__topline">
+                    <span className="strategy-card__name">Probability Mismatch</span>
+                    <span className={`pill ${(screeningSummary?.executableEdges ?? 0) > 0 ? "pill--live" : "pill--ghost"}`}>
+                      {screeningSummary?.executableEdges ?? 0} live
+                    </span>
+                  </div>
+                  <p>Rank probability mismatch trades by execution quality, liquidity, and hedge strength.</p>
+                </button>
+              );
+            }
+
+            return cards;
           })}
         </div>
       </div>

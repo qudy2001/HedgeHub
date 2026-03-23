@@ -446,6 +446,81 @@ export const strategyAssetUniverse = [
   }
 ];
 
+export const strategyScreenerV2AssetUniverse = [
+  {
+    id: "btc-v2",
+    label: "Bitcoin",
+    polymarketQueries: ["bitcoin above", "bitcoin march", "btc above"],
+    optionSymbol: "IBIT",
+    underlyingSymbol: "BTC-USD",
+    referenceSymbol: "NASDAQ:IBIT",
+    conversionFallback: 0.00057,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "eth-v2",
+    label: "Ethereum",
+    polymarketQueries: ["ethereum above", "eth march", "ethereum march"],
+    optionSymbol: "ETHA",
+    underlyingSymbol: "ETH-USD",
+    referenceSymbol: "NASDAQ:ETHA",
+    conversionFallback: 0.01,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "gold-v2",
+    label: "Gold",
+    polymarketQueries: ["gold above", "gold march", "gold price"],
+    optionSymbol: "GLD",
+    underlyingSymbol: "XAU-USD",
+    referenceSymbol: "AMEX:GLD",
+    conversionFallback: 0.1,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "oil-v2",
+    label: "Oil",
+    polymarketQueries: ["oil above", "wti march", "brent march"],
+    optionSymbol: "USO",
+    underlyingSymbol: "WTI-USD",
+    referenceSymbol: "AMEX:USO",
+    conversionFallback: 1,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "stocks-xsp-v2",
+    label: "US Stocks (XSP)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "XSP",
+    underlyingSymbol: "SPX",
+    referenceSymbol: "CBOE:XSP",
+    conversionFallback: 0.1,
+    settlementType: "cash",
+    exerciseStyle: "european",
+    preferenceRank: 1
+  },
+  {
+    id: "stocks-spx-v2",
+    label: "US Stocks (SPX)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "SPX",
+    underlyingSymbol: "SPX",
+    referenceSymbol: "SP:SPX",
+    conversionFallback: 1,
+    settlementType: "cash",
+    exerciseStyle: "european",
+    preferenceRank: 2
+  }
+];
+
 export const fallbackPolymarketMarkets = [
   {
     id: "seed-btc-mar-31",

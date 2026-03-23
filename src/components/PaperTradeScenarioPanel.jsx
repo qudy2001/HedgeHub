@@ -11,6 +11,12 @@ import {
 } from "recharts";
 import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
 import { getChartPalette } from "../theme.js";
+import {
+  buildTradingDateRange,
+  coerceToTradingDate,
+  countTradingDaysBetween,
+  tradingDaysToYears
+} from "../tradingCalendar.js";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -353,8 +359,8 @@ function estimatePolymarketYesPrice({
     return spot >= strike ? 1 : 0;
   }
 
-  const effectiveTimeYears = Math.max(timeYears, 1 / 365);
-  const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 365);
+  const effectiveTimeYears = Math.max(timeYears, 1 / 252);
+  const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 252);
   const rawEstimatedYesPrice =
     strike > 0 && spot > 0
       ? binaryCallPrice({
@@ -468,10 +474,12 @@ export default function PaperTradeScenarioPanel({
   order,
   lastUpdated,
   onSaveCalculatorSnapshot,
+  className = "",
+  defaultOpen = false,
   theme = "dark"
 }) {
   const chartTheme = getChartPalette(theme);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(defaultOpen);
   const [activeSnapshotId, setActiveSnapshotId] = useState(null);
   const [controls, setControls] = useState(() => buildDefaultControls(order, lastUpdated));
   const [chartMode, setChartMode] = useState("date");
@@ -500,7 +508,8 @@ export default function PaperTradeScenarioPanel({
     setHeatmapRangeMultiplier(1);
     setFeedback(null);
     setSavingSnapshot(false);
-  }, [order.id]);
+    setPanelOpen(defaultOpen);
+  }, [defaultOpen, order.id]);
 
   useEffect(() => {
     if (!panelOpen || typeof window === "undefined") {
@@ -562,10 +571,17 @@ export default function PaperTradeScenarioPanel({
     (scenarioOrder.status === "closed" ? scenarioOrder.closedAt?.slice(0, 10) : null) ||
     lastUpdated?.slice(0, 10) ||
     strategyCloseDate;
-  const valuationMinDate = marketDate <= strategyCloseDate ? marketDate : strategyCloseDate;
-  const valuationDate = clampIsoDate(controls.valuationDate, valuationMinDate, strategyCloseDate);
-  const maxDateOffset = Math.max(differenceInDays(valuationMinDate, strategyCloseDate), 0);
-  const currentDateOffset = clamp(differenceInDays(valuationMinDate, valuationDate), 0, maxDateOffset);
+  const valuationMinBaseDate = marketDate <= strategyCloseDate ? marketDate : strategyCloseDate;
+  const valuationDateOptions = buildTradingDateRange(valuationMinBaseDate, strategyCloseDate);
+  const valuationMinDate = valuationDateOptions[0] ?? valuationMinBaseDate;
+  const valuationMaxDate = valuationDateOptions[valuationDateOptions.length - 1] ?? strategyCloseDate;
+  const valuationDate = coerceToTradingDate(
+    clampIsoDate(controls.valuationDate, valuationMinDate, valuationMaxDate),
+    valuationDateOptions.length ? valuationDateOptions : [valuationMaxDate].filter(Boolean),
+    "previous"
+  );
+  const maxDateOffset = Math.max(valuationDateOptions.length - 1, 0);
+  const currentDateOffset = Math.max(valuationDateOptions.indexOf(valuationDate), 0);
   const currentProxySpot = Number(scenarioOrder.valuationContext?.currentProxySpot ?? 0);
   const currentUnderlyingSpot = Number(scenarioOrder.valuationContext?.currentUnderlyingSpot ?? 0);
   const converterRatio =
@@ -604,13 +620,24 @@ export default function PaperTradeScenarioPanel({
     scenarioOrder.valuationContext?.underlyingSymbol,
     scenarioOrder.assetLabel || "Underlying"
   );
-  const daysToMarketResolution = Math.max(differenceInDays(valuationDate, scenarioOrder.polymarketResolutionDate), 0);
-  const currentDaysToMarketResolution = Math.max(
-    differenceInDays(marketDate || valuationDate, scenarioOrder.polymarketResolutionDate),
-    0
+  const daysToMarketResolution = countTradingDaysBetween(
+    valuationDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
   );
-  const timeToMarketResolutionYears = daysToMarketResolution / 365;
-  const currentTimeToMarketResolutionYears = currentDaysToMarketResolution / 365;
+  const currentDaysToMarketResolution = countTradingDaysBetween(
+    marketDate || valuationDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
+  );
+  const timeToMarketResolutionYears = tradingDaysToYears(daysToMarketResolution);
+  const currentTimeToMarketResolutionYears = tradingDaysToYears(currentDaysToMarketResolution);
   const referenceYesLeg = polymarketLegs.find((leg) => leg.outcome === "YES") ?? null;
   const referenceNoLeg = polymarketLegs.find((leg) => leg.outcome === "NO") ?? null;
   const marketReferenceYesPrice = Number(
@@ -631,15 +658,11 @@ export default function PaperTradeScenarioPanel({
 
   const repricedOptionLegs = optionLegs.map((leg) => {
     const contractUnits = Number(leg.quantity ?? 0) * Number(leg.contractMultiplier ?? 100);
-    const daysToExpiry = Math.max(
-      Math.round(
-        (new Date(`${leg.expiry}T00:00:00.000Z`).getTime() -
-          new Date(`${valuationDate}T00:00:00.000Z`).getTime()) /
-          (24 * 60 * 60 * 1000)
-      ),
-      0
-    );
-    const timeYears = Math.max(daysToExpiry / 365, 1 / 365);
+    const daysToExpiry = countTradingDaysBetween(valuationDate, leg.expiry, {
+      includeStart: false,
+      includeEnd: true
+    });
+    const timeYears = Math.max(tradingDaysToYears(daysToExpiry), 1 / 252);
     const modelPrice = blackScholesPrice({
       type: leg.optionType,
       spot: underlyingPrice,
@@ -703,20 +726,27 @@ export default function PaperTradeScenarioPanel({
     targetThreshold: payoffTargetProxy,
     optionLegs: repricedOptionLegs
   });
-  const daysToMarketResolutionAtClose = Math.max(
-    differenceInDays(strategyCloseDate, scenarioOrder.polymarketResolutionDate),
-    0
+  const daysToMarketResolutionAtClose = countTradingDaysBetween(
+    valuationMaxDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
   );
   const spotPayoffSeries = spotEvaluationGrid.map((spot) => {
     const optionPnL = repricedOptionLegs.reduce((sum, leg) => {
-      const optionRemainingDaysAtClose = Math.max(differenceInDays(strategyCloseDate, leg.expiry), 0);
+      const optionRemainingDaysAtClose = countTradingDaysBetween(valuationMaxDate, leg.expiry, {
+        includeStart: false,
+        includeEnd: true
+      });
       const optionMarkPrice =
         optionRemainingDaysAtClose > 0
           ? blackScholesPrice({
               type: leg.optionType,
               spot,
               strike: Number(leg.strike),
-              timeYears: Math.max(optionRemainingDaysAtClose / 365, 1 / 365),
+              timeYears: Math.max(tradingDaysToYears(optionRemainingDaysAtClose), 1 / 252),
               volatility: Number(leg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
               riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
             })
@@ -744,7 +774,7 @@ export default function PaperTradeScenarioPanel({
               estimatePolymarketYesPrice({
                 spot: settleUnderlying,
                 strike: targetUnderlyingValue,
-                timeYears: daysToMarketResolutionAtClose / 365,
+                timeYears: tradingDaysToYears(daysToMarketResolutionAtClose),
                 volatility: impliedVolatility,
                 riskFreeRate,
                 marketReferenceYesPrice,
@@ -769,19 +799,18 @@ export default function PaperTradeScenarioPanel({
   });
 
   const dateProfitSeries = [];
-  if (valuationMinDate && strategyCloseDate) {
-    let cursor = parseIsoDate(valuationMinDate);
-    const endDate = parseIsoDate(strategyCloseDate);
-
-    while (cursor && endDate && cursor.getTime() <= endDate.getTime()) {
-      const dateIso = toIsoDate(cursor);
+  if (valuationDateOptions.length) {
+    valuationDateOptions.forEach((dateIso) => {
       const optionsValue = repricedOptionLegs.reduce((sum, leg) => {
-        const optionRemainingDays = Math.max(differenceInDays(dateIso, leg.expiry), 0);
+        const optionRemainingDays = countTradingDaysBetween(dateIso, leg.expiry, {
+          includeStart: false,
+          includeEnd: true
+        });
         const modelPrice = blackScholesPrice({
           type: leg.optionType,
           spot: underlyingPrice,
           strike: Number(leg.strike),
-          timeYears: Math.max(optionRemainingDays / 365, 1 / 365),
+          timeYears: Math.max(tradingDaysToYears(optionRemainingDays), 1 / 252),
           volatility: impliedVolatility,
           riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
         });
@@ -791,11 +820,18 @@ export default function PaperTradeScenarioPanel({
         return sum + (pnlPerUnit * leg.contractUnits);
       }, 0);
 
-      const remainingPolymarketDays = Math.max(differenceInDays(dateIso, scenarioOrder.polymarketResolutionDate), 0);
+      const remainingPolymarketDays = countTradingDaysBetween(
+        dateIso,
+        scenarioOrder.polymarketResolutionDate,
+        {
+          includeStart: false,
+          includeEnd: true
+        }
+      );
       const timelineYesPrice = estimatePolymarketYesPrice({
         spot: equivalentUnderlyingSpot,
         strike: targetUnderlyingValue,
-        timeYears: remainingPolymarketDays / 365,
+        timeYears: tradingDaysToYears(remainingPolymarketDays),
         volatility: impliedVolatility,
         riskFreeRate,
         marketReferenceYesPrice,
@@ -817,9 +853,7 @@ export default function PaperTradeScenarioPanel({
         dateLabel: formatShortDate(dateIso),
         totalPnL: formatNumber(optionsValue + timelineBinaryPnL, 2)
       });
-
-      cursor = addDays(dateIso, 1) ? parseIsoDate(addDays(dateIso, 1)) : null;
-    }
+    });
   }
 
   const chartData = chartMode === "date" ? dateProfitSeries : spotPayoffSeries;
@@ -832,14 +866,17 @@ export default function PaperTradeScenarioPanel({
 
   function calculateHeatmapPnL({ spot, date }) {
     const optionPnL = repricedOptionLegs.reduce((sum, leg) => {
-      const remainingDays = Math.max(differenceInDays(date, leg.expiry), 0);
+      const remainingDays = countTradingDaysBetween(date, leg.expiry, {
+        includeStart: false,
+        includeEnd: true
+      });
       const optionMarkPrice =
         remainingDays > 0
           ? blackScholesPrice({
               type: leg.optionType,
               spot,
               strike: Number(leg.strike),
-              timeYears: remainingDays / 365,
+              timeYears: tradingDaysToYears(remainingDays),
               volatility: impliedVolatility,
               riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
             })
@@ -852,13 +889,20 @@ export default function PaperTradeScenarioPanel({
       return sum + pnlPerUnit * leg.contractUnits;
     }, 0);
     const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
-    const remainingPolymarketDays = Math.max(differenceInDays(date, scenarioOrder.polymarketResolutionDate), 0);
+    const remainingPolymarketDays = countTradingDaysBetween(
+      date,
+      scenarioOrder.polymarketResolutionDate,
+      {
+        includeStart: false,
+        includeEnd: true
+      }
+    );
     const yesPrice =
       remainingPolymarketDays > 0
         ? estimatePolymarketYesPrice({
             spot: settleUnderlying,
             strike: targetUnderlyingValue,
-            timeYears: remainingPolymarketDays / 365,
+            timeYears: tradingDaysToYears(remainingPolymarketDays),
             volatility: impliedVolatility,
             riskFreeRate,
             marketReferenceYesPrice,
@@ -896,7 +940,7 @@ export default function PaperTradeScenarioPanel({
     try {
       const heatmapSnapshot = buildScenarioHeatmapSnapshot({
         startDate: valuationMinDate,
-        endDate: strategyCloseDate,
+        endDate: valuationMaxDate,
         currentPrice: currentProxySpot || underlyingPrice,
         volatility: impliedVolatility,
         spotLabel: proxySpotLabel,
@@ -962,7 +1006,7 @@ export default function PaperTradeScenarioPanel({
   }
 
   return (
-    <section className="paper-scenario-card">
+    <section className={`paper-scenario-card ${className}`.trim()}>
       <div className="paper-scenario-card__header">
         <div>
           <span className="brand__eyebrow">Scenario calculator</span>
@@ -980,14 +1024,16 @@ export default function PaperTradeScenarioPanel({
           >
             {panelOpen ? "Hide calculator" : "Show calculator"}
           </button>
-          <button
-            type="button"
-            className={`chart-toggle ${savingSnapshot ? "chart-toggle--active" : ""}`}
-            onClick={handleSaveSnapshot}
-            disabled={savingSnapshot || !onSaveCalculatorSnapshot}
-          >
-            {savingSnapshot ? "Saving..." : "Save snapshot"}
-          </button>
+          {onSaveCalculatorSnapshot ? (
+            <button
+              type="button"
+              className={`chart-toggle ${savingSnapshot ? "chart-toggle--active" : ""}`}
+              onClick={handleSaveSnapshot}
+              disabled={savingSnapshot}
+            >
+              {savingSnapshot ? "Saving..." : "Save snapshot"}
+            </button>
+          ) : null}
           {activeSnapshot ? (
             <button type="button" className="chart-toggle" onClick={handleResetToLive}>
               Use live trade
@@ -1024,7 +1070,7 @@ export default function PaperTradeScenarioPanel({
             title="Time series heat map"
             description="P/L across dates and proxy price levels, centered on the current proxy spot. The default view shows a 1x implied-vol range, with quick 2x and 3x range filters available."
             startDate={valuationMinDate}
-            endDate={strategyCloseDate}
+            endDate={valuationMaxDate}
             currentPrice={currentProxySpot || underlyingPrice}
             volatility={impliedVolatility}
             spotLabel={proxySpotLabel}
@@ -1121,10 +1167,17 @@ export default function PaperTradeScenarioPanel({
                     className="calculator-slider__number calculator-slider__number--date"
                     type="date"
                     min={valuationMinDate}
-                    max={strategyCloseDate}
+                    max={valuationMaxDate}
                     value={valuationDate}
                     onChange={(event) =>
-                      setControls((current) => ({ ...current, valuationDate: event.target.value }))
+                      setControls((current) => ({
+                        ...current,
+                        valuationDate: coerceToTradingDate(
+                          event.target.value,
+                          valuationDateOptions.length ? valuationDateOptions : [valuationMaxDate].filter(Boolean),
+                          "previous"
+                        )
+                      }))
                     }
                   />
                 </div>
@@ -1138,13 +1191,14 @@ export default function PaperTradeScenarioPanel({
                   onChange={(event) =>
                     setControls((current) => ({
                       ...current,
-                      valuationDate: addDays(valuationMinDate, Number(event.target.value))
+                      valuationDate:
+                        valuationDateOptions[Number(event.target.value)] ?? valuationDateOptions[0] ?? valuationMinDate
                     }))
                   }
                 />
                 <div className="calculator-slider__scale">
                   <span>{formatDateLabel(valuationMinDate)}</span>
-                  <span>{formatDateLabel(strategyCloseDate)}</span>
+                  <span>{formatDateLabel(valuationMaxDate)}</span>
                 </div>
               </div>
 
