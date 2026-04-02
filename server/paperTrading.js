@@ -103,6 +103,134 @@ function normalizePaperOrderStatus(value) {
   return String(value ?? "open").toLowerCase() === "closed" ? "closed" : "open";
 }
 
+function normalizeExecutionRoute(value) {
+  return String(value ?? "local-paper").trim().toLowerCase() === "ibkr-paper"
+    ? "ibkr-paper"
+    : "local-paper";
+}
+
+function normalizeExecutionPurpose(value) {
+  return String(value ?? "entry").trim().toLowerCase() === "exit" ? "exit" : "entry";
+}
+
+function normalizeExecutionStatus(value, fallback = "local") {
+  return String(value ?? fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+}
+
+function sanitizeExecutionLeg(leg, index) {
+  return {
+    legId: String(leg?.legId ?? leg?.id ?? `paper-execution-leg-${index + 1}`),
+    label: String(leg?.label ?? `Option ${index + 1}`),
+    rootSymbol: String(leg?.rootSymbol ?? ""),
+    contractSymbol: String(leg?.contractSymbol ?? ""),
+    optionType: String(leg?.optionType ?? "call").toLowerCase() === "put" ? "put" : "call",
+    action: String(leg?.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG",
+    expiry: String(leg?.expiry ?? ""),
+    strike: Math.max(toNumber(leg?.strike, 0) ?? 0, 0),
+    requestedQuantity: Math.max(Math.round(toNumber(leg?.requestedQuantity, 0) ?? 0), 0),
+    ratio: Math.max(Math.round(toNumber(leg?.ratio, 1) ?? 1), 1),
+    entryPrice: Math.max(toNumber(leg?.entryPrice, 0) ?? 0, 0),
+    contractMultiplier: Math.max(toNumber(leg?.contractMultiplier, 100) ?? 100, 1),
+    brokerConid: String(leg?.brokerConid ?? ""),
+    localSymbol: String(leg?.localSymbol ?? "")
+  };
+}
+
+function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, purpose = "entry" } = {}) {
+  const hasSourceObject = source && typeof source === "object";
+  const hasDefaultObject = defaults && typeof defaults === "object";
+
+  if (!hasSourceObject && !hasDefaultObject) {
+    return allowNull
+      ? null
+      : {
+          route: "local-paper",
+          broker: "",
+          purpose: normalizeExecutionPurpose(purpose),
+          status: "local",
+          statusText: "Local paper order",
+          accountId: "",
+          accountAlias: "",
+          isPaper: false,
+          brokerOrderId: "",
+          orderRef: "",
+          orderType: "LMT",
+          tif: "DAY",
+          outsideRth: false,
+          limitPrice: null,
+          avgFillPrice: null,
+          combo: false,
+          totalQuantity: null,
+          filledQuantity: null,
+          remainingQuantity: null,
+          statusDescription: "",
+          submittedAt: "",
+          lastSyncAt: "",
+          filledAt: "",
+          cancelledAt: "",
+          lastError: "",
+          lastWarning: "",
+          requestedLegs: []
+        };
+  }
+
+  const mergedSource = {
+    ...(hasDefaultObject ? defaults : {}),
+    ...(hasSourceObject ? source : {})
+  };
+  const route = normalizeExecutionRoute(mergedSource.route ?? mergedSource.destination ?? "local-paper");
+  const normalizedPurpose = normalizeExecutionPurpose(mergedSource.purpose ?? purpose);
+  const requestedLegsInput = Array.isArray(mergedSource.requestedLegs)
+    ? mergedSource.requestedLegs
+    : Array.isArray(mergedSource.legs)
+      ? mergedSource.legs
+      : [];
+
+  return {
+    route,
+    broker: route === "ibkr-paper" ? "ibkr" : "",
+    purpose: normalizedPurpose,
+    status: normalizeExecutionStatus(
+      mergedSource.status,
+      route === "ibkr-paper" ? "pending_submit" : "local"
+    ),
+    statusText: String(
+      mergedSource.statusText ??
+        (route === "ibkr-paper"
+          ? normalizedPurpose === "exit"
+            ? "IBKR exit pending"
+            : "IBKR entry pending"
+          : "Local paper order")
+    ),
+    accountId: String(mergedSource.accountId ?? ""),
+    accountAlias: String(mergedSource.accountAlias ?? ""),
+    isPaper: mergedSource.isPaper === true,
+    brokerOrderId: String(mergedSource.brokerOrderId ?? ""),
+    orderRef: String(mergedSource.orderRef ?? ""),
+    orderType: String(mergedSource.orderType ?? "LMT").trim().toUpperCase() === "MKT" ? "MKT" : "LMT",
+    tif: String(mergedSource.tif ?? "DAY").trim().toUpperCase() === "GTC" ? "GTC" : "DAY",
+    outsideRth: mergedSource.outsideRth === true,
+    limitPrice:
+      mergedSource.limitPrice == null ? null : toNumber(mergedSource.limitPrice, null),
+    avgFillPrice: mergedSource.avgFillPrice == null ? null : toNumber(mergedSource.avgFillPrice, null),
+    combo: mergedSource.combo === true,
+    totalQuantity: toNumber(mergedSource.totalQuantity, null),
+    filledQuantity: toNumber(mergedSource.filledQuantity, null),
+    remainingQuantity: toNumber(mergedSource.remainingQuantity, null),
+    statusDescription: String(mergedSource.statusDescription ?? ""),
+    submittedAt: normalizeTimestamp(mergedSource.submittedAt ?? ""),
+    lastSyncAt: normalizeTimestamp(mergedSource.lastSyncAt ?? ""),
+    filledAt: normalizeTimestamp(mergedSource.filledAt ?? ""),
+    cancelledAt: normalizeTimestamp(mergedSource.cancelledAt ?? ""),
+    lastError: String(mergedSource.lastError ?? ""),
+    lastWarning: String(mergedSource.lastWarning ?? ""),
+    requestedLegs: requestedLegsInput.map(sanitizeExecutionLeg)
+  };
+}
+
 function normalizeTimestamp(value) {
   if (!value) {
     return "";
@@ -482,6 +610,8 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
     strike: kind === "option" ? toNumber(leg?.strike, 0) ?? 0 : null,
     contractSymbol: kind === "option" ? String(leg?.contractSymbol ?? "") : "",
     rootSymbol: kind === "option" ? String(leg?.rootSymbol ?? proxySymbol ?? "") : "",
+    brokerConid: kind === "option" ? String(leg?.brokerConid ?? "") : "",
+    localSymbol: kind === "option" ? String(leg?.localSymbol ?? "") : "",
     impliedVolatility: kind === "option" ? normalizeVolatility(leg?.impliedVolatility, 0.24) : null,
     riskFreeRate: kind === "option" ? toNumber(leg?.riskFreeRate, 0.0425) ?? 0.0425 : null,
     quoteSource: kind === "option" ? String(leg?.quoteSource ?? "seed") : String(leg?.quoteSource ?? "Polymarket"),
@@ -580,7 +710,14 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
             profitLossPercent:
               toNumber(closeSummarySource?.profitLossPercent, null)
           }
-      : null;
+        : null;
+  const execution = sanitizeExecutionPayload(source.execution, defaults.execution, {
+    purpose: "entry"
+  });
+  const closeExecution = sanitizeExecutionPayload(source.closeExecution, defaults.closeExecution, {
+    allowNull: true,
+    purpose: "exit"
+  });
 
   return {
     strategyId: String(source.strategyId ?? defaults.strategyId ?? "strategy-1"),
@@ -610,6 +747,8 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     closedAt,
     closedDate,
     closeSummary,
+    execution,
+    closeExecution,
     marketReferenceYesPrice: referenceYesPrice,
     marketContext,
     legs
@@ -675,6 +814,10 @@ export function applyPaperOrderPatch(order, patch) {
         : isClosed && hasClosedLegOverrides
           ? null
           : order.closeSummary,
+      execution: patch?.execution ?? order.execution,
+      closeExecution: Object.prototype.hasOwnProperty.call(patch ?? {}, "closeExecution")
+        ? patch?.closeExecution
+        : order.closeExecution,
       legs: mergedLegs
     },
     order
@@ -1106,6 +1249,8 @@ export function buildPaperPortfolio({
         targetUnderlyingValue,
         currentYesPrice
       },
+      execution: order.execution ?? sanitizeExecutionPayload(null, null, { purpose: "entry" }),
+      closeExecution: order.closeExecution ?? null,
       initialPurchaseValue,
       currentHoldingValue,
       profitLossValue,

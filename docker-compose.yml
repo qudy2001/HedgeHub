@@ -11,6 +11,7 @@ services:
       PORT: 8787
       TZ: ${HEDGEHUB_TZ:-Europe/London}
       POLYGON_API_KEY: ${POLYGON_API_KEY:-}
+      POLYGON_WS_URL: ${POLYGON_WS_URL:-}
     volumes:
       - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
       - ${HEDGEHUB_DASHBOARDS_DIR:-./dashboards}:/app/dashboards

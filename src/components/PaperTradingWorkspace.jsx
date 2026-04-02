@@ -224,6 +224,70 @@ function buildPatchFromDraft(order, draft) {
   };
 }
 
+function isIbkrPaperOrder(order) {
+  return String(order?.execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
+}
+
+function normalizeExecutionStatusLabel(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return "n/a";
+  }
+
+  return normalized
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function getExecutionTone(execution) {
+  const status = String(execution?.status ?? "").trim().toLowerCase();
+
+  if (status === "filled") {
+    return "positive";
+  }
+
+  if (status === "cancelled" || status === "rejected" || status === "error" || status === "inactive") {
+    return "negative";
+  }
+
+  return "";
+}
+
+function getActiveExecution(order) {
+  if (String(order?.status ?? "").toLowerCase() === "closed") {
+    return order?.closeExecution ?? order?.execution ?? null;
+  }
+
+  if (order?.closeExecution && String(order.closeExecution.status ?? "").trim()) {
+    return {
+      phase: "exit",
+      execution: order.closeExecution
+    };
+  }
+
+  if (order?.execution) {
+    return {
+      phase: "entry",
+      execution: order.execution
+    };
+  }
+
+  return null;
+}
+
+function hasWorkingBrokerOrder(order) {
+  const activeExecution = getActiveExecution(order)?.execution;
+  const status = String(activeExecution?.status ?? "").trim().toLowerCase();
+
+  return ["pending_submit", "pre_submitted", "submitted", "pending_cancel", "pre_cancelled"].includes(status);
+}
+
+function hasBrokerPosition(order) {
+  return (order?.legs ?? [])
+    .filter((leg) => leg?.kind === "option")
+    .some((leg) => Number(leg?.quantity ?? 0) > 0);
+}
+
 function renderLegDescriptor(leg) {
   if (leg.kind === "binary") {
     return `${leg.action} ${leg.outcome}`;
@@ -681,6 +745,76 @@ function ActiveContractsTree({ order, compact = false }) {
   );
 }
 
+function BrokerExecutionPanel({
+  order,
+  orderBusy,
+  onRetryEntry,
+  onSyncExecution,
+  onCancelExecution
+}) {
+  if (!isIbkrPaperOrder(order)) {
+    return null;
+  }
+
+  const activeExecution = getActiveExecution(order);
+  const execution = activeExecution?.execution ?? order.execution ?? null;
+  const statusTone = getExecutionTone(execution);
+  const canRetryEntry =
+    activeExecution?.phase !== "exit" &&
+    ["cancelled", "rejected", "error", "inactive"].includes(String(order.execution?.status ?? "").trim().toLowerCase());
+
+  return (
+    <section className="paper-broker-panel">
+      <div className="paper-broker-panel__copy">
+        <span className="brand__eyebrow">IBKR paper execution</span>
+        <strong>
+          {activeExecution?.phase === "exit" ? "Exit order" : "Entry order"} ·{" "}
+          <span className={statusTone}>{normalizeExecutionStatusLabel(execution?.status)}</span>
+        </strong>
+        <p>
+          Account {execution?.accountId || "n/a"}
+          {execution?.orderType ? ` · ${execution.orderType}` : ""}
+          {execution?.tif ? ` · ${execution.tif}` : ""}
+          {execution?.brokerOrderId ? ` · Order ${execution.brokerOrderId}` : ""}
+        </p>
+        {execution?.statusDescription ? <small>{execution.statusDescription}</small> : null}
+        {execution?.lastError ? <small className="negative">{execution.lastError}</small> : null}
+        {execution?.lastWarning ? <small>{execution.lastWarning}</small> : null}
+      </div>
+
+      <div className="paper-broker-panel__metrics">
+        <span>Filled {execution?.filledQuantity ?? "n/a"}</span>
+        <span>Remaining {execution?.remainingQuantity ?? "n/a"}</span>
+        <span>
+          Last sync {execution?.lastSyncAt ? formatDateTimeLabel(execution.lastSyncAt, { includeSeconds: true }) : "n/a"}
+        </span>
+      </div>
+
+      <div className="paper-broker-panel__actions">
+        <button type="button" className="chart-toggle" onClick={onSyncExecution} disabled={orderBusy}>
+          {orderBusy ? "Working..." : "Sync broker"}
+        </button>
+        <button
+          type="button"
+          className="chart-toggle"
+          onClick={onCancelExecution}
+          disabled={orderBusy || !hasWorkingBrokerOrder(order)}
+        >
+          Cancel broker order
+        </button>
+        <button
+          type="button"
+          className="chart-toggle"
+          onClick={onRetryEntry}
+          disabled={orderBusy || !canRetryEntry}
+        >
+          Retry entry
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function OpenOrderDetails({
   order,
   draft,
@@ -688,6 +822,9 @@ function OpenOrderDetails({
   orderBusy,
   lastUpdated,
   onResetDraft,
+  onRetryEntry,
+  onSyncExecution,
+  onCancelExecution,
   onSave,
   onDelete,
   onUpdateDraft,
@@ -702,6 +839,13 @@ function OpenOrderDetails({
         lastUpdated={lastUpdated}
         onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
         theme={theme}
+      />
+      <BrokerExecutionPanel
+        order={order}
+        orderBusy={orderBusy}
+        onRetryEntry={onRetryEntry}
+        onSyncExecution={onSyncExecution}
+        onCancelExecution={onCancelExecution}
       />
 
       <div className="paper-order-editbar">
@@ -775,6 +919,7 @@ function OpenOrderDetails({
                   max={leg.kind === "binary" ? "1" : undefined}
                   step="0.01"
                   value={legDraft.entryPrice}
+                  disabled={isIbkrPaperOrder(order) && leg.kind === "option"}
                   onChange={(event) =>
                     onUpdateDraft(order.id, (current) => ({
                       ...current,
@@ -795,6 +940,7 @@ function OpenOrderDetails({
                   min="0"
                   step="1"
                   value={legDraft.quantity}
+                  disabled={isIbkrPaperOrder(order) && leg.kind === "option"}
                   onChange={(event) =>
                     onUpdateDraft(order.id, (current) => ({
                       ...current,
@@ -842,6 +988,9 @@ function OpenOrderTableRows({
   onToggle,
   onToggleTree,
   onResetDraft,
+  onRetryEntry,
+  onSyncExecution,
+  onCancelExecution,
   onSave,
   onClose,
   onDelete,
@@ -921,7 +1070,13 @@ function OpenOrderTableRows({
             onClick={onClose}
             disabled={orderBusy}
           >
-            {orderBusy ? "Working..." : "Close order"}
+            {orderBusy
+              ? "Working..."
+              : isIbkrPaperOrder(order)
+                ? order.closeExecution
+                  ? "Exit working"
+                  : "Send exit order"
+                : "Close order"}
           </button>
         </td>
       </tr>
@@ -952,6 +1107,9 @@ function OpenOrderTableRows({
                 orderBusy={orderBusy}
                 lastUpdated={lastUpdated}
                 onResetDraft={onResetDraft}
+                onRetryEntry={onRetryEntry}
+                onSyncExecution={onSyncExecution}
+                onCancelExecution={onCancelExecution}
                 onSave={onSave}
                 onDelete={onDelete}
                 onUpdateDraft={onUpdateDraft}
@@ -1230,12 +1388,16 @@ export default function PaperTradingWorkspace({
   onClosePaperOrder,
   onDeletePaperOrder,
   onSaveCalculatorSnapshot,
+  onExecutePaperOrder,
+  onSyncPaperExecution,
+  onCancelPaperExecution,
   theme = "dark"
 }) {
   const openOrders = paperPortfolio?.openOrders ?? paperPortfolio?.orders ?? [];
   const closedOrders = paperPortfolio?.closedOrders ?? [];
   const allOrders = [...openOrders, ...closedOrders];
   const summary = paperPortfolio?.summary ?? {};
+  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
   const [drafts, setDrafts] = useState(() => buildDrafts(allOrders));
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
@@ -1308,7 +1470,13 @@ export default function PaperTradingWorkspace({
   async function handleClose(order) {
     const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
 
-    if (!window.confirm(`Close open order "${order.combinationLabel}" and move it to history?`)) {
+    if (
+      !window.confirm(
+        isIbkrPaperOrder(order)
+          ? `Send an IBKR paper exit order for "${order.combinationLabel}"? The order will move to history after the broker exit fills.`
+          : `Close open order "${order.combinationLabel}" and move it to history?`
+      )
+    ) {
       return;
     }
 
@@ -1319,7 +1487,110 @@ export default function PaperTradingWorkspace({
     }));
 
     try {
-      await onClosePaperOrder(order.id, buildPatchFromDraft(order, draft));
+      const payload = await onClosePaperOrder(order.id, buildPatchFromDraft(order, draft));
+
+      if (isIbkrPaperOrder(order) && payload?.message) {
+        setFeedbackByOrder((current) => ({
+          ...current,
+          [String(order.id)]: {
+            tone: "success",
+            message: payload.message
+          }
+        }));
+      }
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleRetryEntry(order) {
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onExecutePaperOrder(order.id, {
+        purpose: "entry"
+      });
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: payload?.message ?? "IBKR paper entry order submitted."
+        }
+      }));
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleSyncExecution(order) {
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onSyncPaperExecution(order.id);
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: payload?.message ?? "Broker execution synced."
+        }
+      }));
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleCancelExecution(order) {
+    if (!window.confirm(`Cancel the active IBKR paper order for "${order.combinationLabel}"?`)) {
+      return;
+    }
+
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onCancelPaperExecution(order.id);
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: payload?.message ?? "Cancel request sent to IBKR."
+        }
+      }));
     } catch (error) {
       setFeedbackByOrder((current) => ({
         ...current,
@@ -1373,9 +1644,18 @@ export default function PaperTradingWorkspace({
           <div className="status-block__actions">
             <span className="pill pill--ghost">{summary.openOrderCount ?? 0} open</span>
             <span className="pill pill--ghost">{summary.closedOrderCount ?? 0} closed</span>
+            {ibkrStatus ? (
+              <span className={`pill ${ibkrStatus.isPaper && ibkrStatus.connected ? "pill--live" : "pill--warning"}`}>
+                {ibkrStatus.isPaper && ibkrStatus.connected
+                  ? `IBKR paper${ibkrStatus.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
+                  : "IBKR offline"}
+              </span>
+            ) : null}
           </div>
           <span className="timestamp">
-            Manage open paper orders, then close them into history with realized P&amp;L snapshots.
+            {ibkrStatus?.isPaper && ibkrStatus?.connected
+              ? "Manage local paper orders, or sync IBKR paper fills and exit orders without leaving HedgeHub."
+              : "Manage open paper orders, then close them into history with realized P&L snapshots."}
           </span>
         </div>
       </header>
@@ -1496,6 +1776,9 @@ export default function PaperTradingWorkspace({
                                   [String(order.id)]: buildDefaultDraft(order)
                                 }))
                               }
+                              onRetryEntry={() => handleRetryEntry(order)}
+                              onSyncExecution={() => handleSyncExecution(order)}
+                              onCancelExecution={() => handleCancelExecution(order)}
                               onSave={() => handleSave(order)}
                               onClose={() => handleClose(order)}
                               onDelete={() => handleDelete(order, "open order")}

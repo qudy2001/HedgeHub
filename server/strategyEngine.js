@@ -431,7 +431,7 @@ function getAssetMarkets(asset, polymarketMarkets) {
     const question = market.question.toLowerCase();
     return (
       isTradablePolymarketMarket(market) &&
-      hasPublicPolymarketEvent(market) &&
+      (hasPublicPolymarketEvent(market) || market.source === "seed") &&
       asset.polymarketQueries.some((query) => question.includes(query.split(" ")[0])) &&
       parseTargetFromQuestion(market.question)
     );
@@ -1406,12 +1406,14 @@ function buildStrategyFinder({
     const quoteSize = Number(row.targetOptionQuoteSize);
     return Number.isFinite(quoteSize) && quoteSize > 0;
   });
+  const defaultDateFrom = toIsoDate(new Date());
+  const defaultDateTo = toIsoDate(addDays(new Date(`${defaultDateFrom}T00:00:00.000Z`), 7));
 
   return {
     filters: {
       dateRange: {
-        from: new Date().toISOString().slice(0, 10),
-        to: selectedRow?.expiration ?? defaultStrategyConfig.optionLeg.expiry
+        from: defaultDateFrom,
+        to: defaultDateTo >= defaultDateFrom ? defaultDateTo : defaultDateFrom
       },
       priceRange: "+5% to +10%",
       strategyTypes: [...new Set(rows.map((row) => row.strategyType))],

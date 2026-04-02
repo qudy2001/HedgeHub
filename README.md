@@ -35,6 +35,11 @@ docker compose up -d
 - app: `http://localhost:8787` by default, or the host port set in `.env`
 - image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub-livedata:latest`
 - `POLYGON_API_KEY` is optional and can be added to `.env` if you want live Polygon option-chain data
+- `IBKR_CP_BASE_URL` defaults to `https://127.0.0.1:5000/v1/api` for the local IBKR Client Portal Gateway
+- `IBKR_CP_ACCOUNT_ID` is optional if you want HedgeHub to pin a specific IBKR paper account
+- `IBKR_CP_ALLOW_SELF_SIGNED=true` lets HedgeHub talk to the default self-signed local gateway certificate
+- `IBKR_CP_REQUIRE_PAPER=true` keeps routing locked to IBKR paper sessions so live accounts are rejected
+- `IBKR_SYNC_INTERVAL_MS` controls how often HedgeHub refreshes broker-backed paper orders
 - persistent data: `data/` for SQLite and `dashboards/` for saved layouts
 - logs: use `docker compose logs -f hedgehub`
 - default dashboard layouts are seeded automatically on first boot if the dashboards volume starts empty
@@ -95,9 +100,25 @@ The scripts write the PID file and application log under `logs/`.
 - TradingView provides embeddable widgets but not a public general-purpose quote/options REST API for this use case
 - Polymarket search is wired through the public Gamma API, but matching markets can be sparse depending on what is live
 - options chain quotes currently fall back to modeled pricing when a public chain feed is not available
+- IBKR routing currently uses the Client Portal Gateway session, so the local gateway must be running and authenticated in paper mode
+- IBKR option routing targets option legs only; Polymarket legs remain local paper legs inside HedgeHub
+
+## IBKR paper trading
+
+1. Start the IBKR Client Portal Gateway locally and log into your paper session.
+2. Keep the gateway reachable at `IBKR_CP_BASE_URL`, or override the env var if you use a different host or port.
+3. Optionally set `IBKR_CP_ACCOUNT_ID` when the gateway exposes more than one account.
+4. In the strategy calculator, switch the execution route from `Local paper` to `IBKR paper`.
+5. Choose `Limit` or `Market`, set TIF and outside-RTH behavior, then create the order.
+
+Notes:
+
+- HedgeHub stores the strategy locally first, then submits the option legs to IBKR and syncs broker order state back into the paper-trading page.
+- IBKR-backed open orders can be synced, cancelled, and sent to exit from the paper-trading workspace.
+- The order moves to closed history after the IBKR exit order fills and HedgeHub syncs the execution.
 
 ## Next upgrades
 
-- plug in a broker or options data provider for live chains and Greeks
+- expand IBKR execution coverage for more advanced combo pricing and broker-side position reconciliation
 - persist editable strategy parameters in the UI
 - add background jobs for recurring scans and alerting

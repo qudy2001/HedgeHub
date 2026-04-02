@@ -185,6 +185,9 @@ export default function App() {
     const payload = await response.json().catch(() => null);
 
     if (!response.ok) {
+      if (payload?.paperPortfolio) {
+        applyPaperPortfolioUpdate(payload.paperPortfolio, new Date().toISOString());
+      }
       throw new Error(payload?.error || "Paper-trading request failed");
     }
 
@@ -228,6 +231,27 @@ export default function App() {
     return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/calculator-snapshots`, {
       method: "POST",
       body: JSON.stringify(snapshotPayload)
+    });
+  }, [mutatePaperOrders]);
+
+  const handleExecutePaperOrder = useCallback((orderId, payload = {}) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/execute`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }, [mutatePaperOrders]);
+
+  const handleSyncPaperExecution = useCallback((orderId) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/sync-execution`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }, [mutatePaperOrders]);
+
+  const handleCancelPaperExecution = useCallback((orderId) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/cancel-execution`, {
+      method: "POST",
+      body: JSON.stringify({})
     });
   }, [mutatePaperOrders]);
 
@@ -401,6 +425,9 @@ export default function App() {
               onClosePaperOrder={handleClosePaperOrder}
               onDeletePaperOrder={handleDeletePaperOrder}
               onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
+              onExecutePaperOrder={handleExecutePaperOrder}
+              onSyncPaperExecution={handleSyncPaperExecution}
+              onCancelPaperExecution={handleCancelPaperExecution}
               theme={theme}
             />
           ) : showScreening ? (
@@ -418,6 +445,7 @@ export default function App() {
               onManualRefresh={handleManualRefresh}
               refreshing={refreshing}
               refreshNotice={refreshNotice}
+              paperPortfolio={paperPortfolio}
               onCreatePaperOrder={handleCreatePaperOrder}
               onOpenPaperTrading={() => navigateTo("paper")}
               theme={theme}

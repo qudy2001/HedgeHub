@@ -443,6 +443,15 @@ export const strategyAssetUniverse = [
     underlyingSymbol: "SPX-INDEX",
     referenceSymbol: "AMEX:SPY",
     conversionFallback: 0.1
+  },
+  {
+    id: "stocks-spx",
+    label: "US Stocks (SPX)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "SPX",
+    underlyingSymbol: "SPX",
+    referenceSymbol: "SP:SPX",
+    conversionFallback: 1
   }
 ];
 
@@ -618,5 +627,18 @@ export const fallbackPolymarketMarkets = [
     slug: "sp-500-spx-above-end-of-march",
     eventSlug: "sp-500-spx-above-end-of-march",
     url: "https://polymarket.com/event/sp-500-spx-above-end-of-march"
+  },
+  {
+    id: "seed-stocks-apr-30",
+    assetId: "stocks",
+    question: "Will the S&P 500 (SPX) be above 6,700 on April 30, 2026?",
+    yesPrice: 0.41,
+    noPrice: 0.59,
+    volume: 0,
+    liquidity: 0,
+    endDate: "2026-04-30T20:00:00Z",
+    active: true,
+    source: "seed",
+    url: ""
   }
 ];
