@@ -1,5 +1,12 @@
 import { pickOptionReferencePrice } from "./optionPricing.js";
 import { buildPayoffSummary } from "./strategyEngine.js";
+import {
+  evaluatePolymarketSignalHit,
+  parsePolymarketQuestionSignal,
+  parseTargetFromQuestion as parsePolymarketTargetFromQuestion,
+  projectPolymarketTargetProxySpot,
+  resolvePolymarketSignal
+} from "../shared/polymarketSignals.js";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -40,6 +47,8 @@ function scoreQuestionMatch(referenceQuestion, candidateQuestion, targetUnderlyi
   );
   const referenceTarget = targetUnderlyingValue ?? parseTargetFromQuestion(referenceQuestion);
   const candidateTarget = parseTargetFromQuestion(candidateQuestion);
+  const referenceSignal = parsePolymarketQuestionSignal(referenceQuestion);
+  const candidateSignal = parsePolymarketQuestionSignal(candidateQuestion);
   const tokenScore = referenceTokens.reduce((score, token) => {
     if (!candidateTokens.has(token)) {
       return score;
@@ -47,27 +56,22 @@ function scoreQuestionMatch(referenceQuestion, candidateQuestion, targetUnderlyi
 
     return score + (/\d/.test(token) ? 3 : 1);
   }, 0);
+  const directionScore =
+    referenceSignal?.direction && candidateSignal?.direction
+      ? referenceSignal.direction === candidateSignal.direction
+        ? 4
+        : -6
+      : 0;
 
   return candidateTarget != null &&
     referenceTarget != null &&
     Math.abs(candidateTarget - referenceTarget) < 0.5
-    ? tokenScore + 10
-    : tokenScore;
+    ? tokenScore + directionScore + 10
+    : tokenScore + directionScore;
 }
 
 function parseTargetFromQuestion(question) {
-  const match = String(question ?? "").match(
-    /(?:above|over|reach(?:es)?|hits?|at least)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  const rawValue = Number(match[1].replace(/,/g, ""));
-  const scale = match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
-
-  return rawValue * scale;
+  return parsePolymarketTargetFromQuestion(question);
 }
 
 function parseIsoDate(value) {
@@ -362,12 +366,20 @@ function deriveOrderPayoffSummary({
       : currentUnderlyingSpot > 0 && currentProxySpot > 0
         ? currentProxySpot / currentUnderlyingSpot
         : 1;
+  const polymarketSignal = resolvePolymarketSignal({
+    question: order.polymarketQuestion,
+    targetValue: targetUnderlyingValue,
+    direction: order.marketContext?.polymarketDirection,
+    triggerType: order.marketContext?.polymarketTriggerType
+  });
   const binaryTargetThreshold =
-    targetUnderlyingValue > 0 ? targetUnderlyingValue : Math.max(currentUnderlyingSpot, 0.01);
-  const targetProxySpot =
-    binaryTargetThreshold > 0 && normalizedConversionRatio > 0
-      ? binaryTargetThreshold * normalizedConversionRatio
-      : Math.max(currentProxySpot, 0.01);
+    polymarketSignal?.targetValue ?? (targetUnderlyingValue > 0 ? targetUnderlyingValue : Math.max(currentUnderlyingSpot, 0.01));
+  const targetProxySpot = projectPolymarketTargetProxySpot({
+    targetValue: binaryTargetThreshold,
+    direction: polymarketSignal?.direction,
+    conversionRatio: normalizedConversionRatio,
+    currentProxySpot: Math.max(currentProxySpot, 0.01)
+  });
   const strategyCloseDate =
     String(order.strategyCloseDate ?? "").trim() ||
     String(order.polymarketResolutionDate ?? "").trim() ||
@@ -381,6 +393,7 @@ function deriveOrderPayoffSummary({
     targetSpot: Math.max(targetProxySpot, 0.01),
     targetThreshold: Math.max(targetProxySpot, 0.01),
     binaryTargetThreshold,
+    binarySignal: polymarketSignal,
     currentUnderlyingSpot: Math.max(currentUnderlyingSpot, 0.01),
     conversionRatio: normalizedConversionRatio,
     marketReferenceYesPrice: toNumber(order.marketReferenceYesPrice, 0.5) ?? 0.5,
@@ -419,6 +432,7 @@ function findMatchingMarket(order, polymarketMarkets) {
   const normalizedQuestion = normalizeText(order.polymarketQuestion);
   const questionKey = normalizeQuestionKey(order.polymarketQuestion);
   const parsedQuestionTarget = parseTargetFromQuestion(order.polymarketQuestion);
+  const parsedQuestionSignal = parsePolymarketQuestionSignal(order.polymarketQuestion);
   const targetUnderlyingValue =
     toNumber(order.marketContext?.targetUnderlyingValue, null) ??
     toNumber(order.valuationContext?.targetUnderlyingValue, null) ??
@@ -440,7 +454,15 @@ function findMatchingMarket(order, polymarketMarkets) {
   const exactTargetMatch = (candidates) =>
     candidates.find((market) => {
       const marketTarget = parseTargetFromQuestion(market.question);
-      return marketTarget != null && targetUnderlyingValue != null && Math.abs(marketTarget - targetUnderlyingValue) < 0.5;
+      const marketSignal = parsePolymarketQuestionSignal(market.question);
+      const directionMatches =
+        !parsedQuestionSignal?.direction || !marketSignal?.direction || parsedQuestionSignal.direction === marketSignal.direction;
+      return (
+        directionMatches &&
+        marketTarget != null &&
+        targetUnderlyingValue != null &&
+        Math.abs(marketTarget - targetUnderlyingValue) < 0.5
+      );
     }) ?? null;
   const targetDistance = (question) => {
     if (targetUnderlyingValue == null) {
@@ -551,6 +573,12 @@ function resolveBinaryYesPrice({
   targetUnderlyingValue,
   referenceYesPrice
 }) {
+  const polymarketSignal = resolvePolymarketSignal({
+    question: order.polymarketQuestion,
+    targetValue: targetUnderlyingValue,
+    direction: order.marketContext?.polymarketDirection,
+    triggerType: order.marketContext?.polymarketTriggerType
+  });
   const liveYesPrice = toNumber(liveMarket?.yesPrice);
   if (liveYesPrice != null) {
     return clamp(liveYesPrice, 0.001, 0.999);
@@ -562,10 +590,10 @@ function resolveBinaryYesPrice({
   if (
     resolutionDate &&
     todayIso >= resolutionDate &&
-    targetUnderlyingValue > 0 &&
+    (polymarketSignal?.targetValue ?? targetUnderlyingValue) > 0 &&
     currentUnderlyingSpot > 0
   ) {
-    return currentUnderlyingSpot >= targetUnderlyingValue ? 1 : 0;
+    return evaluatePolymarketSignalHit(currentUnderlyingSpot, polymarketSignal) ? 1 : 0;
   }
 
   return clamp(referenceYesPrice, 0.001, 0.999);
@@ -668,6 +696,16 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
       toNumber(source.marketContext?.conversionRatio, defaults.marketContext?.conversionRatio ?? 0) ?? 0,
     targetUnderlyingValue:
       toNumber(source.marketContext?.targetUnderlyingValue, defaults.marketContext?.targetUnderlyingValue ?? 0) ?? 0,
+    polymarketDirection:
+      String(source.marketContext?.polymarketDirection ?? defaults.marketContext?.polymarketDirection ?? "").trim().toLowerCase() ===
+      "down"
+        ? "down"
+        : "up",
+    polymarketTriggerType:
+      String(source.marketContext?.polymarketTriggerType ?? defaults.marketContext?.polymarketTriggerType ?? "").trim().toLowerCase() ===
+      "close"
+        ? "close"
+        : "touch",
     impliedVolatility: normalizeVolatility(
       source.marketContext?.impliedVolatility,
       defaults.marketContext?.impliedVolatility ?? 0.24

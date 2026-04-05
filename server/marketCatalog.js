@@ -351,9 +351,9 @@ export const sidebarStrategies = [
   {
     id: "strategy-2",
     name: "Vol Crush Earnings",
-    status: "planned",
-    assetLabel: "Single-name stocks",
-    description: "Pair event contracts with short premium around earnings and statement dates."
+    status: "ready",
+    assetLabel: "Large-cap earnings",
+    description: "Sell defined-risk premium into earnings and rank setups by implied move, liquidity, and risk."
   },
   {
     id: "strategy-3",
@@ -361,6 +361,13 @@ export const sidebarStrategies = [
     status: "planned",
     assetLabel: "Gold / Oil / FX",
     description: "Use binary macro views to finance short-dated optionality."
+  },
+  {
+    id: "strategy-tv-finder",
+    name: "TradingView Finder",
+    status: "ready",
+    assetLabel: "SPY first",
+    description: "Use TradingView to screen option strategies, then open them in HedgeHub's own detail view."
   }
 ];
 

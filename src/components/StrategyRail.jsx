@@ -1,8 +1,12 @@
+import LiveMonitoringPanel from "./LiveMonitoringPanel.jsx";
+
 export default function StrategyRail({
   activeView,
   strategies,
   selectedStrategyId,
+  streamDiagnostics,
   onOpenDashboard,
+  onOpenSettings,
   onOpenScreening,
   onOpenPaperTrading,
   onSelect,
@@ -24,13 +28,28 @@ export default function StrategyRail({
       </div>
 
       <div className="sidebar__section">
-        <button
-          type="button"
-          className={`dashboard-button ${activeView === "dashboard" ? "dashboard-button--active" : ""}`}
-          onClick={onOpenDashboard}
-        >
-          Dashboard
-        </button>
+        <div className="sidebar-primary-nav">
+          <LiveMonitoringPanel
+            streamDiagnostics={streamDiagnostics}
+            brokerStatus={paperPortfolio?.brokerStatus ?? null}
+            className="sidebar-live-monitor"
+          />
+
+          <button
+            type="button"
+            className={`dashboard-button ${activeView === "dashboard" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenDashboard}
+          >
+            Dashboard
+          </button>
+          <button
+            type="button"
+            className={`dashboard-button ${activeView === "settings" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenSettings}
+          >
+            Strategy settings
+          </button>
+        </div>
 
         <div className="section-heading">
           <span>Strategies</span>

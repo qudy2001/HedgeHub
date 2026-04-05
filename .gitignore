@@ -9,3 +9,4 @@ dist
 .env.app
 .env.local
 .DS_Store
+/vendor/clientportal.gw/

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import PaperTradeHistoryChart from "./PaperTradeHistoryChart.jsx";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
 import { countTradingDaysBetween } from "../tradingCalendar.js";
 
 function formatCurrency(value, digits = 2) {
@@ -1398,6 +1399,9 @@ export default function PaperTradingWorkspace({
   const allOrders = [...openOrders, ...closedOrders];
   const summary = paperPortfolio?.summary ?? {};
   const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
+  const ibkrReady = isIbkrReady(ibkrStatus);
+  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
+  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
   const [drafts, setDrafts] = useState(() => buildDrafts(allOrders));
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
@@ -1644,18 +1648,21 @@ export default function PaperTradingWorkspace({
           <div className="status-block__actions">
             <span className="pill pill--ghost">{summary.openOrderCount ?? 0} open</span>
             <span className="pill pill--ghost">{summary.closedOrderCount ?? 0} closed</span>
-            {ibkrStatus ? (
-              <span className={`pill ${ibkrStatus.isPaper && ibkrStatus.connected ? "pill--live" : "pill--warning"}`}>
-                {ibkrStatus.isPaper && ibkrStatus.connected
-                  ? `IBKR paper${ibkrStatus.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
-                  : "IBKR offline"}
-              </span>
-            ) : null}
           </div>
           <span className="timestamp">
-            {ibkrStatus?.isPaper && ibkrStatus?.connected
+            {ibkrReady
               ? "Manage local paper orders, or sync IBKR paper fills and exit orders without leaving HedgeHub."
-              : "Manage open paper orders, then close them into history with realized P&L snapshots."}
+              : ibkrReloginNeeded
+                ? (
+                    <>
+                      IBKR session expired or was signed out. Re-login at{" "}
+                      <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
+                        {ibkrLoginUrl}
+                      </a>{" "}
+                      and HedgeHub should reconnect within a few seconds.
+                    </>
+                  )
+                : "Manage open paper orders, then close them into history with realized P&L snapshots."}
           </span>
         </div>
       </header>

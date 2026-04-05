@@ -17,6 +17,11 @@ import {
   countTradingDaysBetween,
   tradingDaysToYears
 } from "../tradingCalendar.js";
+import {
+  evaluatePolymarketSignalHit,
+  projectPolymarketTargetProxySpot,
+  resolvePolymarketSignal
+} from "../../shared/polymarketSignals.js";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
@@ -73,6 +78,19 @@ function binaryCallPrice({ spot, strike, timeYears, volatility, riskFreeRate }) 
     (volatility * sqrtT);
 
   return Math.exp(-riskFreeRate * timeYears) * normalCdf(d2);
+}
+
+function binaryPutPrice({ spot, strike, timeYears, volatility, riskFreeRate }) {
+  if (timeYears <= 0 || spot <= 0 || strike <= 0 || volatility <= 0) {
+    return spot <= strike ? 1 : 0;
+  }
+
+  const sqrtT = Math.sqrt(timeYears);
+  const d2 =
+    (Math.log(spot / strike) + (riskFreeRate - 0.5 * volatility * volatility) * timeYears) /
+    (volatility * sqrtT);
+
+  return Math.exp(-riskFreeRate * timeYears) * normalCdf(-d2);
 }
 
 function clampProbability(value) {
@@ -353,17 +371,19 @@ function estimatePolymarketYesPrice({
   riskFreeRate,
   marketReferenceYesPrice,
   currentSpot,
-  currentTimeYears
+  currentTimeYears,
+  signalDirection = "up"
 }) {
   if (timeYears < 0) {
-    return spot >= strike ? 1 : 0;
+    return signalDirection === "down" ? (spot <= strike ? 1 : 0) : (spot >= strike ? 1 : 0);
   }
 
   const effectiveTimeYears = Math.max(timeYears, 1 / 252);
   const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 252);
+  const binaryPriceFunction = signalDirection === "down" ? binaryPutPrice : binaryCallPrice;
   const rawEstimatedYesPrice =
     strike > 0 && spot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot,
           strike,
           timeYears: effectiveTimeYears,
@@ -373,7 +393,7 @@ function estimatePolymarketYesPrice({
       : marketReferenceYesPrice;
   const currentModeledYesPrice =
     strike > 0 && currentSpot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot: currentSpot,
           strike,
           timeYears: effectiveCurrentTimeYears,
@@ -423,6 +443,8 @@ function serializeScenarioOrder(order) {
       currentUnderlyingSpot: Number(order.valuationContext?.currentUnderlyingSpot ?? 0),
       conversionRatio: Number(order.valuationContext?.conversionRatio ?? 0),
       targetUnderlyingValue: Number(order.valuationContext?.targetUnderlyingValue ?? 0),
+      polymarketDirection: order.marketContext?.polymarketDirection ?? order.valuationContext?.polymarketDirection ?? "up",
+      polymarketTriggerType: order.marketContext?.polymarketTriggerType ?? order.valuationContext?.polymarketTriggerType ?? "touch",
       currentYesPrice: Number(order.valuationContext?.currentYesPrice ?? 0.5)
     },
     legs: (order.legs ?? []).map((leg) => ({
@@ -587,13 +609,24 @@ export default function PaperTradeScenarioPanel({
   const converterRatio =
     Number(scenarioOrder.valuationContext?.conversionRatio ?? 0) ||
     (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
-  const targetUnderlyingValue = Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0);
+  const polymarketSignal = resolvePolymarketSignal({
+    question: scenarioOrder.polymarketQuestion,
+    targetValue: Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0) || null,
+    direction: scenarioOrder.valuationContext?.polymarketDirection,
+    triggerType: scenarioOrder.valuationContext?.polymarketTriggerType
+  });
+  const targetUnderlyingValue =
+    polymarketSignal?.targetValue ?? Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0);
   const rawUnderlyingPrice = Number(controls.underlyingPrice ?? currentProxySpot ?? 0);
   const impliedVolatility = Number(controls.impliedVolatility ?? 24) / 100;
   const riskFreeRate =
     Number(optionLegs[0]?.riskFreeRate ?? order.legs?.find((leg) => leg.kind === "option")?.riskFreeRate ?? 0.0425) || 0.0425;
-  const payoffTargetProxy =
-    targetUnderlyingValue > 0 && converterRatio > 0 ? targetUnderlyingValue * converterRatio : targetUnderlyingValue;
+  const payoffTargetProxy = projectPolymarketTargetProxySpot({
+    targetValue: targetUnderlyingValue,
+    direction: polymarketSignal?.direction,
+    conversionRatio: converterRatio,
+    currentProxySpot: currentProxySpot || rawUnderlyingPrice
+  });
   const payoffRange = buildPayoffEvaluationRange({
     currentSpot: currentProxySpot || rawUnderlyingPrice,
     targetThreshold: payoffTargetProxy,
@@ -653,7 +686,8 @@ export default function PaperTradeScenarioPanel({
     riskFreeRate,
     marketReferenceYesPrice,
     currentSpot: currentUnderlyingSpot,
-    currentTimeYears: currentTimeToMarketResolutionYears
+    currentTimeYears: currentTimeToMarketResolutionYears,
+    signalDirection: polymarketSignal?.direction
   });
 
   const repricedOptionLegs = optionLegs.map((leg) => {
@@ -759,12 +793,14 @@ export default function PaperTradeScenarioPanel({
     }, 0);
     const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
     const binaryPnLAtSpot = repricedPolymarketLegs.reduce((sum, leg) => {
+      const signalHit =
+        targetUnderlyingValue > 0 ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal) : false;
       const settlePrice =
         leg.outcome === "NO"
-          ? targetUnderlyingValue > 0 && settleUnderlying < targetUnderlyingValue
-            ? 1
-            : 0
-          : targetUnderlyingValue > 0 && settleUnderlying >= targetUnderlyingValue
+          ? signalHit
+            ? 0
+            : 1
+          : signalHit
             ? 1
             : 0;
       const markPrice =
@@ -779,7 +815,8 @@ export default function PaperTradeScenarioPanel({
                 riskFreeRate,
                 marketReferenceYesPrice,
                 currentSpot: currentUnderlyingSpot,
-                currentTimeYears: currentTimeToMarketResolutionYears
+                currentTimeYears: currentTimeToMarketResolutionYears,
+                signalDirection: polymarketSignal?.direction
               })
             )
           : settlePrice;
@@ -836,7 +873,8 @@ export default function PaperTradeScenarioPanel({
         riskFreeRate,
         marketReferenceYesPrice,
         currentSpot: currentUnderlyingSpot,
-        currentTimeYears: currentTimeToMarketResolutionYears
+        currentTimeYears: currentTimeToMarketResolutionYears,
+        signalDirection: polymarketSignal?.direction
       });
       const timelineBinaryPnL = repricedPolymarketLegs.reduce((sum, leg) => {
         const timelineMarkPrice = binaryPriceFromYes(leg.outcome, timelineYesPrice);
@@ -907,10 +945,11 @@ export default function PaperTradeScenarioPanel({
             riskFreeRate,
             marketReferenceYesPrice,
             currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
-            currentTimeYears: currentTimeToMarketResolutionYears
+            currentTimeYears: currentTimeToMarketResolutionYears,
+            signalDirection: polymarketSignal?.direction
           })
         : targetUnderlyingValue > 0
-          ? settleUnderlying >= targetUnderlyingValue
+          ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal)
             ? 1
             : 0
           : marketReferenceYesPrice;

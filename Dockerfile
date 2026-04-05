@@ -13,6 +13,7 @@ COPY index.html ./
 COPY vite.config.js ./
 COPY src ./src
 COPY server ./server
+COPY shared ./shared
 COPY defaults ./defaults
 
 RUN npm run build \
@@ -29,6 +30,7 @@ COPY package.json package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
+COPY --from=build /app/shared ./shared
 COPY --from=build /app/defaults ./defaults
 
 RUN mkdir -p /app/data /app/dashboards

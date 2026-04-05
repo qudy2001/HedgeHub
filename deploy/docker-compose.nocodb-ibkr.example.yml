@@ -1,0 +1,68 @@
+services:
+  hedgehub:
+    container_name: hedgehub
+    image: ghcr.io/qudy2001/hedgehub-livedata:latest
+    init: true
+    restart: unless-stopped
+    depends_on:
+      - ibkr-gateway
+    networks:
+      - nocodb_network
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      TZ: Europe/London
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
+      POLYGON_WS_URL: ${POLYGON_WS_URL:-}
+      IBKR_CP_BASE_URL: https://ibkr-gateway:5000/v1/api
+      IBKR_CP_ACCOUNT_ID: ${IBKR_CP_ACCOUNT_ID:-}
+      IBKR_CP_ALLOW_SELF_SIGNED: "true"
+      IBKR_CP_REQUIRE_PAPER: "true"
+      IBKR_SYNC_INTERVAL_MS: ${IBKR_SYNC_INTERVAL_MS:-15000}
+    volumes:
+      - ../data:/app/data
+      - ../dashboards:/app/dashboards
+      - ../public:/app/public
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  ibkr-gateway:
+    container_name: ibkr-gateway
+    image: ghcr.io/qudy2001/hedgehub-ibkr-gateway:latest
+    init: true
+    restart: unless-stopped
+    networks:
+      - nocodb_network
+    ports:
+      - "5001:5000"
+    environment:
+      TZ: Europe/London
+      IBKR_GATEWAY_DIR: /opt/ibkr/clientportal.gw
+      IBKR_GATEWAY_CONF_PATH: root/conf.yaml
+      IBKR_GATEWAY_PORT: "5000"
+    volumes:
+      - ../vendor/clientportal.gw:/opt/ibkr/clientportal.gw
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -kfsS --connect-timeout 3 --max-time 10 https://127.0.0.1:5000/ >/dev/null || exit 1"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+networks:
+  nocodb_network:
+    external: true

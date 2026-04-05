@@ -1,0 +1,41 @@
+services:
+  hedgehub:
+    container_name: ${HEDGEHUB_CONTAINER_NAME:-hedgehub}
+    image: ${HEDGEHUB_IBKR_IMAGE:-ghcr.io/qudy2001/hedgehub-livedata-ibkr:latest}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${HEDGEHUB_PORT:-8787}:8787"
+      - "${IBKR_GATEWAY_HOST_PORT:-5001}:${IBKR_GATEWAY_PORT:-5001}"
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      TZ: ${HEDGEHUB_TZ:-Europe/London}
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
+      POLYGON_WS_URL: ${POLYGON_WS_URL:-}
+      HEDGEHUB_START_IBKR_GATEWAY: "true"
+      IBKR_GATEWAY_DIR: /opt/ibkr/clientportal.gw
+      IBKR_GATEWAY_CONF_PATH: root/conf.yaml
+      IBKR_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-5001}
+      IBKR_CP_BASE_URL: ${IBKR_CP_BASE_URL:-https://127.0.0.1:5001/v1/api}
+      IBKR_CP_ACCOUNT_ID: ${IBKR_CP_ACCOUNT_ID:-}
+      IBKR_CP_ALLOW_SELF_SIGNED: ${IBKR_CP_ALLOW_SELF_SIGNED:-true}
+      IBKR_CP_REQUIRE_PAPER: ${IBKR_CP_REQUIRE_PAPER:-true}
+      IBKR_SYNC_INTERVAL_MS: ${IBKR_SYNC_INTERVAL_MS:-15000}
+    volumes:
+      - ${HEDGEHUB_DATA_DIR:-../data}:/app/data
+      - ${HEDGEHUB_DASHBOARDS_DIR:-../dashboards}:/app/dashboards
+      - ${HEDGEHUB_PUBLIC_DIR:-../public}:/app/public
+      - ${IBKR_GATEWAY_DIR:-../vendor/clientportal.gw}:/opt/ibkr/clientportal.gw
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

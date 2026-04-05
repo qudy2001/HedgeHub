@@ -1,0 +1,33 @@
+services:
+  hedgehub:
+    container_name: hedgehub
+    image: ghcr.io/qudy2001/hedgehub-livedata:latest
+    init: true
+    restart: unless-stopped
+    networks: 
+      - nocodb_network
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      TZ: Europe/London
+      POLYGON_API_KEY: jcpT5BS7ylWxLtDXkbVmuaNcELqkLPD2
+    volumes:
+      - ./data:/app/data
+      - ./dashboards:/app/dashboards
+      - ./public:/app/public
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+networks:
+  nocodb_network:
+    external: true

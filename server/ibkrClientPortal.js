@@ -63,6 +63,42 @@ function normalizeRoute(value) {
     : "local-paper";
 }
 
+function normalizeAccountId(value) {
+  return String(value ?? "")
+    .trim()
+    .toUpperCase();
+}
+
+function isPaperAccountId(value) {
+  const accountId = normalizeAccountId(value);
+  return accountId.startsWith("D");
+}
+
+function deriveIbkrPaperSession(accountsPayload) {
+  if (typeof accountsPayload?.isPaper === "boolean") {
+    return accountsPayload.isPaper;
+  }
+
+  const availableAccounts = Array.isArray(accountsPayload?.accounts) ? accountsPayload.accounts : [];
+  const selectedAccount = normalizeAccountId(accountsPayload?.selectedAccount);
+  const configuredAccount = normalizeAccountId(IBKR_CP_ACCOUNT_ID);
+  const normalizedAvailableAccounts = availableAccounts.map((accountId) => normalizeAccountId(accountId)).filter(Boolean);
+
+  if (selectedAccount) {
+    return isPaperAccountId(selectedAccount);
+  }
+
+  if (configuredAccount && normalizedAvailableAccounts.includes(configuredAccount)) {
+    return isPaperAccountId(configuredAccount);
+  }
+
+  if (normalizedAvailableAccounts.length) {
+    return normalizedAvailableAccounts.every((accountId) => isPaperAccountId(accountId));
+  }
+
+  return false;
+}
+
 function parseSetCookie(setCookieValue) {
   if (!setCookieValue) {
     return null;
@@ -102,6 +138,10 @@ function buildCookieHeader() {
   return [...SESSION_COOKIES.entries()]
     .map(([name, value]) => `${name}=${value}`)
     .join("; ");
+}
+
+function clearCookies() {
+  SESSION_COOKIES.clear();
 }
 
 function extractIbkrError(payload) {
@@ -151,14 +191,15 @@ function getTransport(url) {
   return url.protocol === "https:" ? https : http;
 }
 
-async function ibkrRequest(method, pathname, { query, body } = {}) {
+async function ibkrRequestOnce(method, pathname, { query, body, includeCookies = true } = {}) {
   const url = buildUrl(pathname, query);
   const transport = getTransport(url);
   const payload = body == null ? null : JSON.stringify(body);
-  const cookieHeader = buildCookieHeader();
+  const cookieHeader = includeCookies ? buildCookieHeader() : "";
 
   const headers = {
     Accept: "application/json",
+    "User-Agent": "undici",
     ...(payload
       ? {
           "Content-Type": "application/json",
@@ -200,7 +241,10 @@ async function ibkrRequest(method, pathname, { query, body } = {}) {
 
           const errorMessage = extractIbkrError(parsedBody);
           if ((response.statusCode ?? 500) >= 400) {
-            reject(new Error(errorMessage || `IBKR request failed with status ${response.statusCode}`));
+            const error = new Error(errorMessage || `IBKR request failed with status ${response.statusCode}`);
+            error.statusCode = response.statusCode ?? 500;
+            error.responseBody = parsedBody;
+            reject(error);
             return;
           }
 
@@ -228,6 +272,19 @@ async function ibkrRequest(method, pathname, { query, body } = {}) {
 
     request.end();
   });
+}
+
+async function ibkrRequest(method, pathname, options = {}) {
+  try {
+    return await ibkrRequestOnce(method, pathname, options);
+  } catch (error) {
+    if ((error?.statusCode === 401 || error?.statusCode === 403) && SESSION_COOKIES.size) {
+      clearCookies();
+      return ibkrRequestOnce(method, pathname, { ...options, includeCookies: false });
+    }
+
+    throw error;
+  }
 }
 
 function gcd(left, right) {
@@ -474,12 +531,13 @@ export async function getIbkrStatus() {
   try {
     const authStatus = await getAuthStatus();
     const accounts = authStatus?.connected ? await getAccountsPayload() : null;
+    const isPaper = deriveIbkrPaperSession(accounts);
 
     return {
       configured: true,
       connected: authStatus?.connected === true,
       authenticated: authStatus?.authenticated === true,
-      isPaper: accounts?.isPaper === true,
+      isPaper,
       selectedAccount: String(accounts?.selectedAccount ?? IBKR_CP_ACCOUNT_ID ?? "").trim(),
       accounts: Array.isArray(accounts?.accounts) ? accounts.accounts : [],
       aliases: accounts?.aliases ?? {},
@@ -513,7 +571,8 @@ export async function ensureIbkrPaperSession(accountIdHint = "") {
   }
 
   const accountsPayload = await getAccountsPayload();
-  if (IBKR_CP_REQUIRE_PAPER && accountsPayload?.isPaper !== true) {
+  const isPaper = deriveIbkrPaperSession(accountsPayload);
+  if (IBKR_CP_REQUIRE_PAPER && isPaper !== true) {
     throw new Error("IBKR Gateway session is not in paper mode");
   }
 
@@ -538,7 +597,7 @@ export async function ensureIbkrPaperSession(accountIdHint = "") {
   return {
     accountId,
     accountAlias: String(accountsPayload?.aliases?.[accountId] ?? accountId).trim(),
-    isPaper: accountsPayload?.isPaper === true,
+    isPaper,
     accounts: availableAccounts,
     allowedAssetTypes: String(accountsPayload?.allowFeatures?.allowedAssetTypes ?? "").trim()
   };

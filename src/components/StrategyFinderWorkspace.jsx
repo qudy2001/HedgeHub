@@ -10,6 +10,7 @@ import {
   YAxis
 } from "recharts";
 import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
+import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
 import { getChartPalette } from "../theme.js";
 import {
   buildTradingDateColumns,
@@ -18,6 +19,11 @@ import {
   countTradingDaysBetween,
   tradingDaysToYears
 } from "../tradingCalendar.js";
+import {
+  evaluatePolymarketSignalHit,
+  projectPolymarketTargetProxySpot,
+  resolvePolymarketSignal
+} from "../../shared/polymarketSignals.js";
 
 function normalCdf(x) {
   const sign = x >= 0 ? 1 : -1;
@@ -68,6 +74,19 @@ function binaryCallPrice({ spot, strike, timeYears, volatility, riskFreeRate }) 
   return Math.exp(-riskFreeRate * timeYears) * normalCdf(d2);
 }
 
+function binaryPutPrice({ spot, strike, timeYears, volatility, riskFreeRate }) {
+  if (timeYears <= 0 || spot <= 0 || strike <= 0 || volatility <= 0) {
+    return spot <= strike ? 1 : 0;
+  }
+
+  const sqrtT = Math.sqrt(timeYears);
+  const d2 =
+    (Math.log(spot / strike) + (riskFreeRate - 0.5 * volatility * volatility) * timeYears) /
+    (volatility * sqrtT);
+
+  return Math.exp(-riskFreeRate * timeYears) * normalCdf(-d2);
+}
+
 function clampProbability(value) {
   return clamp(value, 0.001, 0.999);
 }
@@ -80,19 +99,13 @@ function logistic(value) {
   return 1 / (1 + Math.exp(-value));
 }
 
-function parseTargetFromQuestion(question) {
-  const match = question?.match(
-    /(?:above|over|reach(?:es)?|hits?|at least)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  const rawValue = Number(match[1].replace(/,/g, ""));
-  const scale = match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
-
-  return rawValue * scale;
+function resolveFinderPolymarketSignal(question, marketContext = {}) {
+  return resolvePolymarketSignal({
+    question,
+    targetValue: Number(marketContext?.targetUnderlyingValue ?? 0) || null,
+    direction: marketContext?.polymarketDirection,
+    triggerType: marketContext?.polymarketTriggerType
+  });
 }
 
 function formatCurrency(value, currency = "USD", digits = 2) {
@@ -469,7 +482,7 @@ function buildDefaultDateRange(baseDate) {
   const fallbackFrom = baseDate || new Date().toISOString().slice(0, 10);
   return {
     from: fallbackFrom,
-    to: addDays(fallbackFrom, 7) || fallbackFrom
+    to: addDays(fallbackFrom, 30) || fallbackFrom
   };
 }
 
@@ -578,6 +591,18 @@ function buildQuoteSizeFilterSummary(threshold, quoteSizeDataAvailable = true) {
 
   const thresholdLabel = formatWholeNumber(threshold);
   return thresholdLabel ? `Bid/ask size > ${thresholdLabel}` : "Bid/ask size";
+}
+
+function buildSourceFilterSummary(sourceFilter) {
+  if (sourceFilter === "live") {
+    return "Live only";
+  }
+
+  if (sourceFilter === "seed") {
+    return "Seed only";
+  }
+
+  return "Sources";
 }
 
 const DEFAULT_MAX_LOSS_FLOOR = "-3000";
@@ -754,18 +779,20 @@ function estimatePolymarketYesPrice({
   riskFreeRate,
   marketReferenceYesPrice,
   currentSpot,
-  currentTimeYears
+  currentTimeYears,
+  signalDirection = "up"
 }) {
   if (timeYears < 0) {
-    return spot >= strike ? 1 : 0;
+    return signalDirection === "down" ? (spot <= strike ? 1 : 0) : (spot >= strike ? 1 : 0);
   }
 
   const effectiveTimeYears = Math.max(timeYears, 1 / 252);
   const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 252);
+  const binaryPriceFunction = signalDirection === "down" ? binaryPutPrice : binaryCallPrice;
 
   const rawEstimatedYesPrice =
     strike > 0 && spot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot,
           strike,
           timeYears: effectiveTimeYears,
@@ -775,7 +802,7 @@ function estimatePolymarketYesPrice({
       : marketReferenceYesPrice;
   const currentModeledYesPrice =
     strike > 0 && currentSpot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot: currentSpot,
           strike,
           timeYears: effectiveCurrentTimeYears,
@@ -836,6 +863,7 @@ function calculateScenarioHeatmapPointPnL({
   riskFreeRate,
   converterRatio,
   targetUnderlyingValue,
+  polymarketSignal,
   polymarketResolutionDate,
   marketReferenceYesPrice,
   currentUnderlyingSpot,
@@ -880,10 +908,11 @@ function calculateScenarioHeatmapPointPnL({
           riskFreeRate,
           marketReferenceYesPrice,
           currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
-          currentTimeYears: currentTimeToMarketResolutionYears
+          currentTimeYears: currentTimeToMarketResolutionYears,
+          signalDirection: polymarketSignal?.direction
         })
       : targetUnderlyingValue > 0
-        ? settleUnderlying >= targetUnderlyingValue
+        ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal)
           ? 1
           : 0
         : marketReferenceYesPrice;
@@ -937,9 +966,10 @@ function calculateHeatmapExtremaForRow(row, currentDate) {
   const converterRatio =
     Number(row.marketContext?.conversionRatio ?? 0) ||
     (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
+  const polymarketSignal = resolveFinderPolymarketSignal(row.polymarketQuestion, row.marketContext);
   const targetUnderlyingValue =
+    polymarketSignal?.targetValue ||
     Number(row.marketContext?.targetUnderlyingValue ?? 0) ||
-    parseTargetFromQuestion(row.polymarketQuestion ?? "") ||
     0;
   const impliedVolatility =
     Number(optionLegs[0]?.impliedVolatility ?? row.marketContext?.impliedVolatility ?? 0) || 0.24;
@@ -1004,6 +1034,7 @@ function calculateHeatmapExtremaForRow(row, currentDate) {
           riskFreeRate,
           converterRatio,
           targetUnderlyingValue,
+          polymarketSignal,
           polymarketResolutionDate,
           marketReferenceYesPrice,
           currentUnderlyingSpot,
@@ -1065,6 +1096,11 @@ const columns = [
 ];
 
 const BIAS_FILTER_ORDER = ["Bull", "Bear", "Range-bound", "Breakout", "Neutral"];
+const SOURCE_FILTER_OPTIONS = [
+  { id: "all", label: "All sources" },
+  { id: "live", label: "Live only" },
+  { id: "seed", label: "Seed only" }
+];
 
 export default function StrategyFinderWorkspace({
   strategyPayload,
@@ -1083,22 +1119,22 @@ export default function StrategyFinderWorkspace({
     strategyPayload?.lastUpdated?.slice(0, 10) ??
     finder?.filters?.dateRange?.from ??
     new Date().toISOString().slice(0, 10);
-  const rows = useMemo(
-    () =>
-      (finder?.rows ?? []).map((row) => ({
-        ...row,
-        ...calculateHeatmapExtremaForRow(row, currentDate)
-      })),
-    [currentDate, finder?.rows]
-  );
+  const rows = finder?.rows ?? [];
   const defaultDateRange = resolveDateRangeForRows(
     normalizeDateRange(finder?.filters?.dateRange, currentDate),
     rows
   );
   const availableStrategyTypes = finder?.filters?.strategyTypes ?? [];
-  const availableAssets = [...new Set(rows.map((row) => row.assetLabel))];
-  const availableBiasTags = BIAS_FILTER_ORDER.filter((tag) =>
-    rows.some((row) => (row.marketBias ?? "Neutral") === tag)
+  const availableAssets = useMemo(
+    () => [...new Set(rows.map((row) => row.assetLabel))],
+    [rows]
+  );
+  const availableBiasTags = useMemo(
+    () =>
+      BIAS_FILTER_ORDER.filter((tag) =>
+        rows.some((row) => (row.marketBias ?? "Neutral") === tag)
+      ),
+    [rows]
   );
   const quoteSizeThresholdOptions = finder?.filters?.targetOptionQuoteSizeThresholds ?? [10, 25, 50];
   const quoteSizeDataAvailable = finder?.filters?.quoteSizeDataAvailable !== false;
@@ -1125,6 +1161,9 @@ export default function StrategyFinderWorkspace({
   const [activeAssets, setActiveAssets] = useState(availableAssets);
   const [activeStrategyTypes, setActiveStrategyTypes] = useState(availableStrategyTypes);
   const [activeBiasTags, setActiveBiasTags] = useState(availableBiasTags);
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [showSyntheticChain, setShowSyntheticChain] = useState(false);
+  const [showSeedData, setShowSeedData] = useState(false);
   const [targetOptionQuoteSizeThreshold, setTargetOptionQuoteSizeThreshold] = useState(defaultQuoteSizeThreshold);
   const [maxProfitMin, setMaxProfitMin] = useState("");
   const [maxProfitMax, setMaxProfitMax] = useState("");
@@ -1143,16 +1182,23 @@ export default function StrategyFinderWorkspace({
   const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
   const [optionPriceRefreshing, setOptionPriceRefreshing] = useState(false);
   const [optionPriceRefreshState, setOptionPriceRefreshState] = useState(null);
+  const [finderRowDetails, setFinderRowDetails] = useState({});
+  const [finderDetailLoadingId, setFinderDetailLoadingId] = useState("");
+  const [finderDetailErrors, setFinderDetailErrors] = useState({});
   const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const ibkrReady =
-    ibkrStatus?.configured === true &&
-    ibkrStatus?.connected === true &&
-    ibkrStatus?.authenticated === true &&
-    ibkrStatus?.isPaper === true;
+  const ibkrReady = isIbkrReady(ibkrStatus);
+  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
+  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
   const minProfitThreshold = parseOptionalNumber(maxProfitMin);
   const maxProfitThreshold = parseOptionalNumber(maxProfitMax);
   const minLossThreshold = parseOptionalNumber(maxLossMin);
   const maxLossThreshold = parseOptionalNumber(maxLossMax);
+
+  useEffect(() => {
+    setFinderRowDetails({});
+    setFinderDetailLoadingId("");
+    setFinderDetailErrors({});
+  }, [finder?.rows]);
 
   useEffect(() => {
     if (!finder) {
@@ -1215,51 +1261,115 @@ export default function StrategyFinderWorkspace({
     quoteSizeThresholdOptionsKey
   ]);
 
-  const filteredRows = rows.filter((row) => {
-    const withinFrom = !dateFrom || row.expiration >= dateFrom;
-    const withinTo = !dateTo || row.expiration <= dateTo;
-    const assetMatch = activeAssets.includes(row.assetLabel);
-    const strategyMatch = activeStrategyTypes.includes(row.strategyType);
-    const biasMatch = activeBiasTags.includes(row.marketBias ?? "Neutral");
-    const numericTargetOptionQuoteSize = Number(row.targetOptionQuoteSize);
-    const numericMaxProfit = Number(row.maxProfit);
-    const numericMaxLoss = Number(row.maxLoss);
-    const quoteSizeMatch =
-      !quoteSizeDataAvailable ||
-      (Number.isFinite(numericTargetOptionQuoteSize) && numericTargetOptionQuoteSize > targetOptionQuoteSizeThreshold);
-    const maxProfitMatch =
-      (minProfitThreshold == null ||
-        row.maxProfitUnbounded === true ||
-        (Number.isFinite(numericMaxProfit) && numericMaxProfit >= minProfitThreshold)) &&
-      (maxProfitThreshold == null ||
-        (row.maxProfitUnbounded !== true &&
-          Number.isFinite(numericMaxProfit) &&
-          numericMaxProfit <= maxProfitThreshold));
-    const maxLossMatch =
-      (minLossThreshold == null ||
-        (row.maxLossUnbounded !== true &&
-          Number.isFinite(numericMaxLoss) &&
-          numericMaxLoss >= minLossThreshold)) &&
-      (maxLossThreshold == null ||
-        (row.maxLossUnbounded !== true &&
-          Number.isFinite(numericMaxLoss) &&
-          numericMaxLoss <= maxLossThreshold));
+  const baseFilteredRows = useMemo(
+    () =>
+      rows.filter((row) => {
+        const withinFrom = !dateFrom || row.expiration >= dateFrom;
+        const withinTo = !dateTo || row.expiration <= dateTo;
+        const assetMatch = activeAssets.includes(row.assetLabel);
+        const strategyMatch = activeStrategyTypes.includes(row.strategyType);
+        const biasMatch = activeBiasTags.includes(row.marketBias ?? "Neutral");
+        const sourceMatch =
+          sourceFilter === "all"
+            ? true
+            : sourceFilter === "seed"
+              ? String(row.polymarketSource ?? "").toLowerCase() === "seed"
+              : String(row.polymarketSource ?? "").toLowerCase() !== "seed";
+        const numericTargetOptionQuoteSize = Number(row.targetOptionQuoteSize);
+        const numericMaxProfit = Number(row.maxProfit);
+        const numericMaxLoss = Number(row.maxLoss);
+        const rowHasQuoteSizeData =
+          Number.isFinite(numericTargetOptionQuoteSize) && numericTargetOptionQuoteSize > 0;
+        const quoteSizeMatch =
+          !quoteSizeDataAvailable ||
+          !rowHasQuoteSizeData ||
+          numericTargetOptionQuoteSize > targetOptionQuoteSizeThreshold;
+        const maxProfitMatch =
+          (minProfitThreshold == null ||
+            row.maxProfitUnbounded === true ||
+            (Number.isFinite(numericMaxProfit) && numericMaxProfit >= minProfitThreshold)) &&
+          (maxProfitThreshold == null ||
+            (row.maxProfitUnbounded !== true &&
+              Number.isFinite(numericMaxProfit) &&
+              numericMaxProfit <= maxProfitThreshold));
+        const maxLossMatch =
+          (minLossThreshold == null ||
+            (row.maxLossUnbounded !== true &&
+              Number.isFinite(numericMaxLoss) &&
+              numericMaxLoss >= minLossThreshold)) &&
+          (maxLossThreshold == null ||
+            (row.maxLossUnbounded !== true &&
+              Number.isFinite(numericMaxLoss) &&
+              numericMaxLoss <= maxLossThreshold));
 
-    return (
-      withinFrom &&
-      withinTo &&
-      assetMatch &&
-      strategyMatch &&
-      biasMatch &&
-      quoteSizeMatch &&
-      maxProfitMatch &&
-      maxLossMatch
-    );
-  });
-  const sortedRows = [...filteredRows].sort((left, right) =>
-    compareValues(left[sortKey], right[sortKey], sortDirection)
+        return (
+          withinFrom &&
+          withinTo &&
+          assetMatch &&
+          strategyMatch &&
+          biasMatch &&
+          sourceMatch &&
+          quoteSizeMatch &&
+          maxProfitMatch &&
+          maxLossMatch
+        );
+      }),
+    [
+      activeAssets,
+      activeBiasTags,
+      activeStrategyTypes,
+      dateFrom,
+      dateTo,
+      maxLossThreshold,
+      maxProfitThreshold,
+      minLossThreshold,
+      minProfitThreshold,
+      quoteSizeDataAvailable,
+      rows,
+      sourceFilter,
+      targetOptionQuoteSizeThreshold
+    ]
   );
-  const selectedRow = sortedRows.find((row) => row.id === selectedRowId) ?? null;
+  const syntheticHiddenCount = useMemo(
+    () => baseFilteredRows.filter((row) => row.usesSyntheticChain === true).length,
+    [baseFilteredRows]
+  );
+  const seedHiddenCount = useMemo(
+    () => baseFilteredRows.filter((row) => String(row.polymarketSource ?? "").toLowerCase() === "seed").length,
+    [baseFilteredRows]
+  );
+  const filteredRows = useMemo(
+    () =>
+      baseFilteredRows.filter((row) => {
+        const syntheticChainMatch = showSyntheticChain || row.usesSyntheticChain !== true;
+        const seedDataMatch = showSeedData || String(row.polymarketSource ?? "").toLowerCase() !== "seed";
+        return syntheticChainMatch && seedDataMatch;
+      }),
+    [baseFilteredRows, showSeedData, showSyntheticChain]
+  );
+  const sortedRows = useMemo(
+    () => [...filteredRows].sort((left, right) => compareValues(left[sortKey], right[sortKey], sortDirection)),
+    [filteredRows, sortDirection, sortKey]
+  );
+  const selectedRowSummary = useMemo(
+    () => sortedRows.find((row) => row.id === selectedRowId) ?? null,
+    [selectedRowId, sortedRows]
+  );
+  const selectedRow = selectedRowSummary ? finderRowDetails[selectedRowSummary.id] ?? null : null;
+  const selectedRowDetailLoading =
+    Boolean(selectedRowSummary?.id) &&
+    !selectedRow &&
+    finderDetailLoadingId === selectedRowSummary.id;
+  const selectedRowDetailError = selectedRowSummary ? finderDetailErrors[selectedRowSummary.id] ?? "" : "";
+  const selectedRowDisplayCloseDate =
+    selectedRow?.strategyCloseDate ??
+    selectedRowSummary?.strategyCloseDate ??
+    selectedRowSummary?.expiration ??
+    "";
+  const selectedRowDisplaySource =
+    selectedRow?.polymarketSource ??
+    selectedRowSummary?.polymarketSource ??
+    "";
 
   useEffect(() => {
     if (!selectedRowId) {
@@ -1274,6 +1384,63 @@ export default function StrategyFinderWorkspace({
       setControls(finder?.calculatorDefaults ?? null);
     }
   }, [finder?.calculatorDefaults, selectedRowId, sortedRows]);
+
+  useEffect(() => {
+    if (!detailOpen || !selectedRowSummary?.id || finderRowDetails[selectedRowSummary.id]) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const rowId = selectedRowSummary.id;
+
+    async function loadFinderRowDetail() {
+      setFinderDetailLoadingId(rowId);
+      setFinderDetailErrors((current) => {
+        const next = { ...current };
+        delete next[rowId];
+        return next;
+      });
+
+      try {
+        const response = await fetch(`/api/strategies/finder/${encodeURIComponent(rowId)}`, {
+          signal: controller.signal
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || "Unable to load strategy detail");
+        }
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setFinderRowDetails((current) => ({
+          ...current,
+          [rowId]: payload?.row ?? null
+        }));
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setFinderDetailErrors((current) => ({
+          ...current,
+          [rowId]: error.message
+        }));
+      } finally {
+        if (!controller.signal.aborted) {
+          setFinderDetailLoadingId((current) => (current === rowId ? "" : current));
+        }
+      }
+    }
+
+    void loadFinderRowDetail();
+
+    return () => {
+      controller.abort();
+    };
+  }, [detailOpen, finderRowDetails, selectedRowSummary]);
 
   useEffect(() => {
     if (!selectedRow) {
@@ -1440,6 +1607,9 @@ export default function StrategyFinderWorkspace({
     setActiveAssets(availableAssets);
     setActiveStrategyTypes(availableStrategyTypes);
     setActiveBiasTags(availableBiasTags);
+    setSourceFilter("all");
+    setShowSyntheticChain(false);
+    setShowSeedData(false);
     setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold);
     setMaxProfitMin("");
     setMaxProfitMax("");
@@ -1522,7 +1692,15 @@ export default function StrategyFinderWorkspace({
   const productSummary = buildSelectionSummary(activeAssets, availableAssets, "Products");
   const strategySummary = buildSelectionSummary(activeStrategyTypes, availableStrategyTypes, "Strategy types");
   const biasSummary = buildSelectionSummary(activeBiasTags, availableBiasTags, "Tags");
+  const sourceSummary = buildSourceFilterSummary(sourceFilter);
   const quoteSizeSummary = buildQuoteSizeFilterSummary(targetOptionQuoteSizeThreshold, quoteSizeDataAvailable);
+  const hiddenDataLabels = [
+    !showSyntheticChain ? "synthetic chain" : null,
+    !showSeedData ? "seed data" : null
+  ].filter(Boolean);
+  const emptyStateMessage = hiddenDataLabels.length
+    ? `No matched hedge combinations for the selected filters. ${hiddenDataLabels.join(" and ")} are hidden by default.`
+    : "No matched hedge combinations for the selected products, date range, strategy types, and bid/ask size filter.";
   const pnlSummary = buildPnlFilterSummary({
     maxProfitMin: minProfitThreshold,
     maxProfitMax: maxProfitThreshold,
@@ -1536,9 +1714,10 @@ export default function StrategyFinderWorkspace({
   const converterRatio =
     Number(selectedRow?.marketContext?.conversionRatio ?? 0) ||
     (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
+  const polymarketSignal = resolveFinderPolymarketSignal(selectedRow?.polymarketQuestion, selectedRow?.marketContext);
   const targetUnderlyingValue =
+    polymarketSignal?.targetValue ||
     Number(selectedRow?.marketContext?.targetUnderlyingValue ?? 0) ||
-    parseTargetFromQuestion(selectedRow?.polymarketQuestion ?? "") ||
     0;
   const selectedPolymarketEventUrl = getPolymarketEventUrl(selectedRow?.polymarketUrl);
   const polymarketReferenceLine = buildPolymarketReferenceLine({
@@ -1622,8 +1801,12 @@ export default function StrategyFinderWorkspace({
   );
   const timeToMarketResolutionYears = tradingDaysToYears(daysToMarketResolution);
   const currentTimeToMarketResolutionYears = tradingDaysToYears(currentDaysToMarketResolution);
-  const payoffTargetProxy =
-    targetUnderlyingValue > 0 && converterRatio > 0 ? targetUnderlyingValue * converterRatio : targetUnderlyingValue;
+  const payoffTargetProxy = projectPolymarketTargetProxySpot({
+    targetValue: targetUnderlyingValue,
+    direction: polymarketSignal?.direction,
+    conversionRatio: converterRatio,
+    currentProxySpot: currentProxySpot || rawUnderlyingPrice
+  });
   const payoffRange = buildPayoffEvaluationRange({
     currentSpot: currentProxySpot || rawUnderlyingPrice,
     targetThreshold: payoffTargetProxy,
@@ -1732,7 +1915,8 @@ export default function StrategyFinderWorkspace({
     riskFreeRate,
     marketReferenceYesPrice,
     currentSpot: currentUnderlyingSpot,
-    currentTimeYears: currentTimeToMarketResolutionYears
+    currentTimeYears: currentTimeToMarketResolutionYears,
+    signalDirection: polymarketSignal?.direction
   });
   const repricedPolymarketLegs = polymarketLegs.map((leg) => {
     const editedLeg = controls?.legEdits?.[leg.id] ?? {};
@@ -1834,6 +2018,8 @@ export default function StrategyFinderWorkspace({
           currentUnderlyingSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
           conversionRatio: converterRatio,
           targetUnderlyingValue,
+          polymarketDirection: polymarketSignal?.direction ?? "up",
+          polymarketTriggerType: polymarketSignal?.triggerType ?? "touch",
           impliedVolatility,
           riskFreeRate
         },
@@ -2002,12 +2188,14 @@ export default function StrategyFinderWorkspace({
     }, 0);
     const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
     const binaryPnLAtSpot = repricedPolymarketLegs.reduce((sum, leg) => {
+      const signalHit =
+        targetUnderlyingValue > 0 ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal) : false;
       const settlePrice =
         leg.outcome === "NO"
-          ? targetUnderlyingValue > 0 && settleUnderlying < targetUnderlyingValue
-            ? 1
-            : 0
-          : targetUnderlyingValue > 0 && settleUnderlying >= targetUnderlyingValue
+          ? signalHit
+            ? 0
+            : 1
+          : signalHit
             ? 1
             : 0;
       const markPrice =
@@ -2022,7 +2210,8 @@ export default function StrategyFinderWorkspace({
                 riskFreeRate,
                 marketReferenceYesPrice,
                 currentSpot: currentUnderlyingSpot,
-                currentTimeYears: currentTimeToMarketResolutionYears
+                currentTimeYears: currentTimeToMarketResolutionYears,
+                signalDirection: polymarketSignal?.direction
               })
             )
           : settlePrice;
@@ -2400,10 +2589,11 @@ export default function StrategyFinderWorkspace({
             riskFreeRate,
             marketReferenceYesPrice,
             currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
-            currentTimeYears: currentTimeToMarketResolutionYears
+            currentTimeYears: currentTimeToMarketResolutionYears,
+            signalDirection: polymarketSignal?.direction
           })
         : targetUnderlyingValue > 0
-          ? settleUnderlying >= targetUnderlyingValue
+          ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal)
             ? 1
             : 0
           : marketReferenceYesPrice;
@@ -2456,7 +2646,8 @@ export default function StrategyFinderWorkspace({
         riskFreeRate,
         marketReferenceYesPrice,
         currentSpot: currentUnderlyingSpot,
-        currentTimeYears: currentTimeToMarketResolutionYears
+        currentTimeYears: currentTimeToMarketResolutionYears,
+        signalDirection: polymarketSignal?.direction
       });
       const timelineBinaryPnL = repricedPolymarketLegs.reduce((sum, leg) => {
         const timelineMarkPrice = binaryPriceFromYes(leg.outcome, timelineYesPrice);
@@ -2796,21 +2987,73 @@ export default function StrategyFinderWorkspace({
             </div>
           </div>
         </details>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("source", node)}
+          onToggle={() => handleFilterMenuToggle("source")}
+        >
+          <summary className="finder-control">
+            <span>{sourceSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Polymarket source</strong>
+              <button type="button" className="finder-menu__reset" onClick={() => setSourceFilter("all")}>
+                All
+              </button>
+            </div>
+            <div className="finder-menu__list">
+              {SOURCE_FILTER_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`finder-menu__option ${
+                    sourceFilter === option.id ? "finder-menu__option--active" : ""
+                  }`}
+                  onClick={() => setSourceFilter(option.id)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
+
+        <button
+          type="button"
+          className={`chart-toggle chart-toggle--compact ${showSyntheticChain ? "chart-toggle--active" : ""}`}
+          aria-pressed={showSyntheticChain}
+          onClick={() => setShowSyntheticChain((current) => !current)}
+        >
+          {showSyntheticChain
+            ? "Synthetic chain shown"
+            : `Show synthetic chain${syntheticHiddenCount ? ` (${syntheticHiddenCount})` : ""}`}
+        </button>
+
+        <button
+          type="button"
+          className={`chart-toggle chart-toggle--compact ${showSeedData ? "chart-toggle--active" : ""}`}
+          aria-pressed={showSeedData}
+          onClick={() => setShowSeedData((current) => !current)}
+        >
+          {showSeedData ? "Seed data shown" : `Show seed data${seedHiddenCount ? ` (${seedHiddenCount})` : ""}`}
+        </button>
       </section>
 
-      {selectedRow && detailOpen ? (
+      {selectedRowSummary && detailOpen ? (
         <>
           <section ref={detailRef} className="selection-banner">
             <div className="selection-banner__title">
               <span className="brand__eyebrow">Selected combination</span>
               <strong>
-                {selectedRow.assetLabel} · {selectedRow.strategyType} · {strategyCloseDate}
+                {selectedRowSummary.assetLabel} · {selectedRowSummary.strategyType} · {selectedRowDisplayCloseDate}
               </strong>
             </div>
             <div className="selection-banner__actions">
               <div className="detail-badges">
-                <span className="pill pill--ghost">{strategyCloseDays} DTE</span>
-                <span className="pill pill--live">{selectedRow.polymarketSource}</span>
+                {selectedRow ? <span className="pill pill--ghost">{strategyCloseDays} DTE</span> : null}
+                <span className="pill pill--live">{selectedRowDisplaySource}</span>
               </div>
               <button
                 type="button"
@@ -2824,7 +3067,16 @@ export default function StrategyFinderWorkspace({
           </section>
 
           {!detailCollapsed ? (
-            <>
+            selectedRowDetailLoading ? (
+              <article className="insight-card">
+                <p className="card-copy">Loading strategy detail...</p>
+              </article>
+            ) : selectedRowDetailError ? (
+              <article className="insight-card">
+                <p className="card-copy">{selectedRowDetailError}</p>
+              </article>
+            ) : selectedRow ? (
+              <>
               <section className="strategy-detail-grid">
                 <article className="detail-card">
                   <div className="detail-card__title">
@@ -3290,7 +3542,17 @@ export default function StrategyFinderWorkspace({
                           <p className="paper-order-ticket__note">
                             {ibkrReady
                               ? "HedgeHub will submit the option legs to the connected IBKR paper session and keep the local portfolio synced to broker status."
-                              : ibkrStatus?.error || "Start the IBKR Client Portal Gateway in paper mode before routing this order."}
+                              : ibkrReloginNeeded
+                                ? (
+                                    <>
+                                      IBKR session expired or was signed out. Re-login at{" "}
+                                      <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
+                                        {ibkrLoginUrl}
+                                      </a>{" "}
+                                      and wait a few seconds before routing this order.
+                                    </>
+                                  )
+                                : ibkrStatus?.error || "Start the IBKR Client Portal Gateway in paper mode before routing this order."}
                           </p>
                         ) : null}
                       </div>
@@ -3709,7 +3971,8 @@ export default function StrategyFinderWorkspace({
                   </div>
 	                </div>
               </section>
-            </>
+              </>
+            ) : null
           ) : null}
         </>
       ) : null}
@@ -3732,20 +3995,25 @@ export default function StrategyFinderWorkspace({
 
           {sortedRows.length === 0 ? (
             <div className="finder-empty">
-              No matched hedge combinations for the selected products, date range, strategy types, and bid/ask size filter.
+              {emptyStateMessage}
             </div>
           ) : (
             sortedRows.map((row) => (
               <button
                 key={row.id}
                 type="button"
-                aria-expanded={selectedRow?.id === row.id && detailOpen}
-                className={`finder-row ${selectedRow?.id === row.id ? "finder-row--active" : ""}`}
+                aria-expanded={selectedRowSummary?.id === row.id && detailOpen}
+                className={`finder-row ${selectedRowSummary?.id === row.id ? "finder-row--active" : ""}`}
                 onClick={() => handleRowSelect(row.id)}
               >
                 <span>{row.expiration}</span>
                 <span>{row.days}</span>
-                <span>{row.assetLabel}</span>
+                <span className="finder-asset-cell">
+                  <span>{row.assetLabel}</span>
+                  {String(row.polymarketSource ?? "").toLowerCase() === "seed" ? (
+                    <span className="source-pill source-pill--seed">Seed</span>
+                  ) : null}
+                </span>
                 <span>{row.strategyType}</span>
                 <span>
                   <span className={`bias-pill bias-pill--${row.marketBiasTone ?? "neutral"}`}>

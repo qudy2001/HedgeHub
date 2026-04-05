@@ -1,10 +1,11 @@
 import {
   defaultStrategyConfig,
-  strategyScreenerV2AssetUniverse
+  strategyScreenerV2AssetUniverse as baseStrategyScreenerV2AssetUniverse
 } from "./marketCatalog.js";
 import { pickOptionReferencePrice } from "./optionPricing.js";
 import { hasPublicPolymarketEvent, isTradablePolymarketMarket } from "./providers/polymarket.js";
 import { parseTargetFromQuestion } from "./strategyEngine.js";
+import { strategyAssetMatchesMarket } from "./strategyAssets.js";
 
 const MIN_POLYMARKET_PRICE = 0.1;
 const MAX_POLYMARKET_PRICE = 0.9;
@@ -316,7 +317,6 @@ function getPolymarketMarketsForAsset(asset, polymarketMarkets) {
     const targetValue = parseTargetFromQuestion(market.question);
     const volume = Number(market?.volume ?? 0);
     const daysToResolution = daysUntil(String(market?.endDate ?? "").slice(0, 10));
-    const question = market.question.toLowerCase();
 
     return (
       yesPrice > MIN_POLYMARKET_PRICE &&
@@ -327,7 +327,7 @@ function getPolymarketMarketsForAsset(asset, polymarketMarkets) {
       volume >= MIN_POLYMARKET_VOLUME &&
       Number.isFinite(daysToResolution) &&
       daysToResolution >= MIN_DAYS_TO_EVENT &&
-      asset.polymarketQueries.some((query) => question.includes(query.split(" ")[0]))
+      strategyAssetMatchesMarket(asset, market)
     );
   });
 }
@@ -920,7 +920,8 @@ function buildStrategyC({
 export function buildStrategyScreenerV2({
   quotes,
   polymarketMarkets,
-  optionMatches
+  optionMatches,
+  assetUniverse = baseStrategyScreenerV2AssetUniverse
 }) {
   const quoteMap = quoteLookup(quotes);
   const rows = [];
@@ -934,7 +935,7 @@ export function buildStrategyScreenerV2({
   const warnings = [];
   const capitalLimit = (defaultStrategyConfig.bankroll ?? 2000) * CAPITAL_MULTIPLIER;
 
-  for (const asset of strategyScreenerV2AssetUniverse) {
+  for (const asset of assetUniverse) {
     const currentOptionSpot = getQuotePrice(quoteMap.get(asset.optionSymbol));
     const currentUnderlyingSpot = getQuotePrice(quoteMap.get(asset.underlyingSymbol)) || currentOptionSpot;
     const conversionRatio =
@@ -944,7 +945,7 @@ export function buildStrategyScreenerV2({
     const assetMarkets = getPolymarketMarketsForAsset(asset, polymarketMarkets);
     const alignedContracts = (optionMatches ?? []).filter((contract) => contract.rootSymbol === asset.optionSymbol);
     const liveContractsAvailable = alignedContracts.some((contract) => contract.isLive === true);
-    const fallbackVolatility = FALLBACK_VOLATILITY[asset.id] ?? 0.24;
+    const fallbackVolatility = asset.fallbackVolatility ?? FALLBACK_VOLATILITY[asset.id] ?? 0.24;
 
     if (!liveContractsAvailable) {
       warnings.push(`No live option liquidity snapshot for ${asset.label}. Executable V2 results may be unavailable.`);
@@ -1091,8 +1092,8 @@ export function buildStrategyScreenerV2({
     summary: {
       executableEdges: rankedRows.length,
       candidatesGenerated: deduplicatedRows.length,
-      assetsScanned: strategyScreenerV2AssetUniverse.length,
-      marketsConsidered: strategyScreenerV2AssetUniverse.reduce(
+      assetsScanned: assetUniverse.length,
+      marketsConsidered: assetUniverse.reduce(
         (sum, asset) => sum + getPolymarketMarketsForAsset(asset, polymarketMarkets).length,
         0
       ),

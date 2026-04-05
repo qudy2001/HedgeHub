@@ -5,8 +5,11 @@ import MacroHeatmapDashboard from "./components/MacroHeatmapDashboard.jsx";
 import PaperTradingWorkspace from "./components/PaperTradingWorkspace.jsx";
 import StrategyFinderWorkspace from "./components/StrategyFinderWorkspace.jsx";
 import StrategyRail from "./components/StrategyRail.jsx";
+import StrategySettingsWorkspace from "./components/StrategySettingsWorkspace.jsx";
 import StrategyScreeningWorkspace from "./components/StrategyScreeningWorkspace.jsx";
+import TradingViewStrategyWorkspace from "./components/TradingViewStrategyWorkspace.jsx";
 import TradingViewWidget from "./components/TradingViewWidget.jsx";
+import VolCrushEarningsWorkspace from "./components/VolCrushEarningsWorkspace.jsx";
 import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
 
 function readRoute() {
@@ -23,6 +26,13 @@ function readRoute() {
   if (pathname === "/screening") {
     return {
       activeView: "screening",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
+  if (pathname === "/strategy-settings") {
+    return {
+      activeView: "settings",
       selectedStrategyId: "strategy-1"
     };
   }
@@ -49,6 +59,10 @@ function buildPath(activeView, strategyId) {
     return "/screening";
   }
 
+  if (activeView === "settings") {
+    return "/strategy-settings";
+  }
+
   if (activeView === "strategy" && strategyId) {
     return `/strategies/${encodeURIComponent(strategyId)}`;
   }
@@ -56,11 +70,41 @@ function buildPath(activeView, strategyId) {
   return "/";
 }
 
+function isTimestampStale(timestamp, maxAgeMs) {
+  if (!timestamp) {
+    return true;
+  }
+
+  const parsedTimestamp = new Date(timestamp).getTime();
+  if (Number.isNaN(parsedTimestamp)) {
+    return true;
+  }
+
+  return Date.now() - parsedTimestamp > maxAgeMs;
+}
+
+const ROUTE_REFRESH_STALE_MS = 6 * 60 * 1000;
+
+function buildPaperPortfolioPreview(paperPortfolio) {
+  if (!paperPortfolio) {
+    return null;
+  }
+
+  return {
+    summary: paperPortfolio.summary ?? null,
+    brokerStatus: paperPortfolio.brokerStatus ?? null
+  };
+}
+
 export default function App() {
   const initialRoute = readRoute();
   const [theme, setTheme] = useState(() => getInitialTheme());
   const [dashboard, setDashboard] = useState(null);
+  const [streamDiagnostics, setStreamDiagnostics] = useState(null);
   const [strategyPayload, setStrategyPayload] = useState(null);
+  const [paperPortfolioPreview, setPaperPortfolioPreview] = useState(null);
+  const [paperPortfolio, setPaperPortfolio] = useState(null);
+  const [paperPortfolioLastUpdated, setPaperPortfolioLastUpdated] = useState(null);
   const [activeView, setActiveView] = useState(initialRoute.activeView);
   const [selectedStrategyId, setSelectedStrategyId] = useState(initialRoute.selectedStrategyId);
   const [loading, setLoading] = useState(true);
@@ -71,7 +115,9 @@ export default function App() {
 
   const applyAppState = useCallback((dashboardJson, strategyJson) => {
     setDashboard(dashboardJson);
+    setStreamDiagnostics(dashboardJson?.streamDiagnostics ?? null);
     setStrategyPayload(strategyJson);
+    setPaperPortfolioPreview(strategyJson.paperPortfolioPreview ?? null);
     setSelectedStrategyId((current) => current || strategyJson.strategies[0]?.id || "strategy-1");
     setError("");
   }, []);
@@ -100,17 +146,23 @@ export default function App() {
     return { dashboardJson, strategyJson };
   }, [applyAppState, fetchAppState]);
 
-  const applyPaperPortfolioUpdate = useCallback((paperPortfolio, lastUpdated = null) => {
-    setStrategyPayload((current) =>
-      current
-        ? {
-            ...current,
-            paperPortfolio,
-            lastUpdated: lastUpdated ?? current.lastUpdated
-          }
-        : current
-    );
+  const applyPaperPortfolioUpdate = useCallback((nextPaperPortfolio, lastUpdated = null) => {
+    setPaperPortfolio(nextPaperPortfolio ?? null);
+    setPaperPortfolioPreview(buildPaperPortfolioPreview(nextPaperPortfolio));
+    setPaperPortfolioLastUpdated(lastUpdated ?? new Date().toISOString());
   }, []);
+
+  const fetchPaperPortfolio = useCallback(async () => {
+    const response = await fetch("/api/paper-portfolio");
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || "Failed to load paper portfolio");
+    }
+
+    applyPaperPortfolioUpdate(payload?.paperPortfolio ?? null, payload?.lastUpdated ?? null);
+    return payload;
+  }, [applyPaperPortfolioUpdate]);
 
   const navigateTo = useCallback((nextView, strategyId = selectedStrategyId) => {
     setActiveView(nextView);
@@ -255,6 +307,36 @@ export default function App() {
     });
   }, [mutatePaperOrders]);
 
+  const mutateStrategyAssets = useCallback(async (url, options = {}) => {
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json"
+      },
+      ...options
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || "Strategy settings request failed");
+    }
+
+    await syncAppState();
+    return payload;
+  }, [syncAppState]);
+
+  const handleSaveStrategyAssetMapping = useCallback((assetConfig) => {
+    return mutateStrategyAssets(`/api/strategy-assets/${encodeURIComponent(assetConfig.id)}`, {
+      method: "PUT",
+      body: JSON.stringify(assetConfig)
+    });
+  }, [mutateStrategyAssets]);
+
+  const handleDeleteStrategyAssetMapping = useCallback((assetId) => {
+    return mutateStrategyAssets(`/api/strategy-assets/${encodeURIComponent(assetId)}`, {
+      method: "DELETE"
+    });
+  }, [mutateStrategyAssets]);
+
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = theme;
@@ -303,6 +385,37 @@ export default function App() {
   }, [applyAppState, fetchAppState]);
 
   useEffect(() => {
+    let isActive = true;
+
+    async function loadStreamDiagnostics() {
+      try {
+        const response = await fetch("/api/stream-status");
+
+        if (!response.ok) {
+          throw new Error(`Diagnostics request failed with ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (isActive) {
+          setStreamDiagnostics(payload);
+        }
+      } catch (_error) {
+        // Keep the last known diagnostics visible if the lightweight status call fails.
+      }
+    }
+
+    void loadStreamDiagnostics();
+    const interval = window.setInterval(() => {
+      void loadStreamDiagnostics();
+    }, 15_000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
     if (loading) {
       return;
     }
@@ -320,12 +433,25 @@ export default function App() {
     }
 
     strategyRefreshKeyRef.current = refreshKey;
+    if (!isTimestampStale(dashboard?.lastUpdated, ROUTE_REFRESH_STALE_MS)) {
+      return;
+    }
+
     void runStrategyRefresh({ announceStart: false });
-  }, [activeView, loading, runStrategyRefresh, selectedStrategyId]);
+  }, [activeView, dashboard?.lastUpdated, loading, runStrategyRefresh, selectedStrategyId]);
 
   useEffect(() => {
     if (loading || activeView !== "paper") {
       return;
+    }
+
+    if (!paperPortfolio) {
+      void fetchPaperPortfolio().catch((paperLoadError) => {
+        setRefreshNotice({
+          tone: "error",
+          message: paperLoadError.message
+        });
+      });
     }
 
     const source = new EventSource("/api/paper-orders/stream");
@@ -345,7 +471,7 @@ export default function App() {
     return () => {
       source.close();
     };
-  }, [activeView, applyPaperPortfolioUpdate, loading]);
+  }, [activeView, applyPaperPortfolioUpdate, fetchPaperPortfolio, loading, paperPortfolio]);
 
   useEffect(() => {
     function handlePopState() {
@@ -371,12 +497,17 @@ export default function App() {
   const strategies = strategyPayload?.strategies ?? [];
   const primaryStrategy = strategyPayload?.primaryStrategy;
   const v2Screener = strategyPayload?.v2Screener;
-  const paperPortfolio = strategyPayload?.paperPortfolio;
+  const strategyPaperContext = paperPortfolio ?? paperPortfolioPreview;
   const selectedStrategy = strategies.find((strategy) => strategy.id === selectedStrategyId) ?? null;
   const heroStats = dashboard?.heroStats ?? [];
+  const showSettings = activeView === "settings";
   const showScreening = activeView === "screening";
   const showStrategyFinder = activeView === "strategy" && selectedStrategyId === "strategy-1";
-  const showPlannedStrategy = activeView === "strategy" && selectedStrategyId !== "strategy-1";
+  const showVolCrushEarnings = activeView === "strategy" && selectedStrategyId === "strategy-2";
+  const showTradingViewStrategyFinder =
+    activeView === "strategy" && selectedStrategyId === "strategy-tv-finder";
+  const showPlannedStrategy =
+    activeView === "strategy" && !showStrategyFinder && !showVolCrushEarnings && !showTradingViewStrategyFinder;
   const showPaperTrading = activeView === "paper";
   const nextThemeLabel = theme === "dark" ? "Light mode" : "Dark mode";
 
@@ -409,18 +540,20 @@ export default function App() {
             activeView={activeView}
             strategies={strategies}
             selectedStrategyId={selectedStrategyId}
+            streamDiagnostics={streamDiagnostics}
             onOpenDashboard={() => navigateTo("dashboard")}
+            onOpenSettings={() => navigateTo("settings")}
             onOpenScreening={() => navigateTo("screening")}
             onOpenPaperTrading={() => navigateTo("paper")}
             onSelect={(strategyId) => navigateTo("strategy", strategyId)}
-            paperPortfolio={paperPortfolio}
+            paperPortfolio={paperPortfolioPreview}
             screeningSummary={v2Screener?.summary ?? null}
           />
 
           {showPaperTrading ? (
             <PaperTradingWorkspace
-              paperPortfolio={paperPortfolio}
-              lastUpdated={strategyPayload?.lastUpdated ?? null}
+              paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
+              lastUpdated={paperPortfolioLastUpdated ?? strategyPayload?.lastUpdated ?? null}
               onUpdatePaperOrder={handleUpdatePaperOrder}
               onClosePaperOrder={handleClosePaperOrder}
               onDeletePaperOrder={handleDeletePaperOrder}
@@ -438,6 +571,12 @@ export default function App() {
               refreshNotice={refreshNotice}
               theme={theme}
             />
+          ) : showSettings ? (
+            <StrategySettingsWorkspace
+              strategyPayload={strategyPayload}
+              onSaveStrategyAssetMapping={handleSaveStrategyAssetMapping}
+              onDeleteStrategyAssetMapping={handleDeleteStrategyAssetMapping}
+            />
           ) : showStrategyFinder ? (
             <StrategyFinderWorkspace
               strategyPayload={strategyPayload}
@@ -445,9 +584,21 @@ export default function App() {
               onManualRefresh={handleManualRefresh}
               refreshing={refreshing}
               refreshNotice={refreshNotice}
-              paperPortfolio={paperPortfolio}
+              paperPortfolio={strategyPaperContext}
               onCreatePaperOrder={handleCreatePaperOrder}
               onOpenPaperTrading={() => navigateTo("paper")}
+              theme={theme}
+            />
+          ) : showVolCrushEarnings ? (
+            <VolCrushEarningsWorkspace
+              strategyDefinition={selectedStrategy}
+              onCreatePaperOrder={handleCreatePaperOrder}
+              onOpenPaperTrading={() => navigateTo("paper")}
+              theme={theme}
+            />
+          ) : showTradingViewStrategyFinder ? (
+            <TradingViewStrategyWorkspace
+              strategyDefinition={selectedStrategy}
               theme={theme}
             />
           ) : showPlannedStrategy ? (
@@ -486,7 +637,6 @@ export default function App() {
 
               <MacroHeatmapDashboard
                 macroDashboard={dashboard?.macroDashboard}
-                streamDiagnostics={dashboard?.streamDiagnostics ?? null}
                 theme={theme}
               />
 
@@ -519,7 +669,8 @@ export default function App() {
                           <div className="opportunity__meta">
                             <span>YES {opportunity.yesPrice}</span>
                             <span>
-                              {opportunity.optionSymbol} {opportunity.optionStrike} {opportunity.optionExpiry}
+                              {opportunity.optionSymbol} {opportunity.optionStrike}
+                              {opportunity.optionType === "put" ? "P" : "C"} {opportunity.optionExpiry}
                             </span>
                           </div>
                           <div className="opportunity__meta">

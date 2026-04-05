@@ -1,0 +1,37 @@
+services:
+  hedgehub:
+    container_name: hedgehub
+    image: ghcr.io/qudy2001/hedgehub-livedata-ibkr:latest
+    init: true
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      TZ: Europe/London
+      POLYGON_API_KEY: jcpT5BS7ylWxLtDXkbVmuaNcELqkLPD2
+      HEDGEHUB_START_IBKR_GATEWAY: "true"
+      IBKR_GATEWAY_DIR: /opt/ibkr/clientportal.gw
+      IBKR_GATEWAY_CONF_PATH: root/conf.yaml
+      IBKR_GATEWAY_PORT: "5001"
+      IBKR_CP_BASE_URL: https://127.0.0.1:5001/v1/api
+      IBKR_CP_ALLOW_SELF_SIGNED: "true"
+      IBKR_CP_REQUIRE_PAPER: "true"
+      IBKR_SYNC_INTERVAL_MS: "10000"
+    volumes:
+      - ./data:/app/data
+      - ./dashboards:/app/dashboards
+      - ./public:/app/public
+      - ./vendor/clientportal.gw:/opt/ibkr/clientportal.gw
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

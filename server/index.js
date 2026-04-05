@@ -6,10 +6,7 @@ import {
   calendarWidgets,
   defaultStrategyConfig,
   fallbackPolymarketMarkets,
-  marketSections,
-  quoteWatchlist,
-  strategyAssetUniverse,
-  strategyScreenerV2AssetUniverse
+  marketSections
 } from "./marketCatalog.js";
 import { buildMacroDashboardPayload, buildMacroHeroStats } from "./macroDashboard.js";
 import {
@@ -23,12 +20,15 @@ import {
   getLatestSnapshots,
   listPaperOrderSnapshots,
   listPaperOrders,
+  listStrategyAssetMappings,
   getRecentRuns,
   getStrategies,
   recordMarketSnapshots,
   recordPaperOrderSnapshots,
   saveMacroDashboardSnapshot,
   saveStrategyRun,
+  upsertStrategyAssetMapping,
+  deleteStrategyAssetMapping,
   updatePaperOrder
 } from "./db.js";
 import {
@@ -46,12 +46,25 @@ import {
   fetchCompanyEventsCalendar,
   fetchEconomicCalendar
 } from "./providers/tradingViewCalendars.js";
+import { scanTradingViewStrategyFinder } from "./providers/tradingViewStrategyFinder.js";
 import { fetchOptionChain, fetchQuotes } from "./providers/yahooFinance.js";
 import {
   buildStrategySummary,
+  getResolvedStrategyMarketsForAsset,
   parseTargetFromQuestion
 } from "./strategyEngine.js";
 import { buildStrategyScreenerV2 } from "./strategyScreenerV2.js";
+import { buildVolCrushEarningsScan } from "./earningsVolCrush.js";
+import {
+  buildEffectiveStrategyAssets,
+  buildStrategyQuoteWatchlist,
+  collectStrategyPolymarketEventUrls,
+  collectStrategyPolymarketQueries,
+  normalizeStrategyAssetMapping,
+  resolveStrategySettingsAssetId,
+  STRATEGY_COMPARE_MODES,
+  strategyAssetMatchesMarket
+} from "./strategyAssets.js";
 import {
   calculateIbkrLimitPrice,
   cancelIbkrOrder,
@@ -150,6 +163,13 @@ const liveState = {
   warnings: [],
   calendarWarnings: []
 };
+const strategyResponseCache = {
+  buildPromise: null,
+  response: null,
+  finderRowDetails: new Map(),
+  version: 0
+};
+let initialLiveStateReadyPromise = null;
 const paperStreamClients = new Set();
 const paperLiveState = {
   socket: null,
@@ -563,13 +583,28 @@ function buildPaperValuationOptionMatches() {
   return [...mergedContracts.values()];
 }
 
-function buildPaperPortfolioResponse() {
-  const portfolio = buildPaperPortfolio({
+function buildValuedPaperPortfolio() {
+  return buildPaperPortfolio({
     orders: listPaperOrders(),
     quotes: liveState.quotes,
     polymarketMarkets: getPaperValuationPolymarketMarkets(),
     optionMatches: buildPaperValuationOptionMatches()
   });
+}
+
+function buildPaperPortfolioPreviewResponse() {
+  const portfolio = buildValuedPaperPortfolio();
+
+  return {
+    summary: portfolio.summary ?? null,
+    brokerStatus: {
+      ibkr: paperBrokerState.ibkr
+    }
+  };
+}
+
+function buildPaperPortfolioResponse() {
+  const portfolio = buildValuedPaperPortfolio();
 
   const withHistory = attachPaperOrderHistory(
     portfolio,
@@ -606,13 +641,138 @@ function buildPaperPortfolioResponse() {
   };
 }
 
+function invalidateStrategyResponseCache() {
+  strategyResponseCache.version += 1;
+  strategyResponseCache.response = null;
+  strategyResponseCache.finderRowDetails = new Map();
+}
+
+function buildComparableIbkrStatus(status) {
+  return {
+    configured: status?.configured === true,
+    connected: status?.connected === true,
+    authenticated: status?.authenticated === true,
+    isPaper: status?.isPaper === true,
+    selectedAccount: String(status?.selectedAccount ?? ""),
+    accounts: Array.isArray(status?.accounts)
+      ? status.accounts.map((account) => String(account ?? ""))
+      : [],
+    aliases:
+      status?.aliases && typeof status.aliases === "object" ? status.aliases : {},
+    allowedAssetTypes: String(status?.allowedAssetTypes ?? ""),
+    error: String(status?.error ?? "")
+  };
+}
+
+function syncStrategyCacheBrokerStatus() {
+  if (!strategyResponseCache.response?.paperPortfolioPreview) {
+    return;
+  }
+
+  strategyResponseCache.response = {
+    ...strategyResponseCache.response,
+    paperPortfolioPreview: {
+      ...strategyResponseCache.response.paperPortfolioPreview,
+      brokerStatus: {
+        ...(strategyResponseCache.response.paperPortfolioPreview.brokerStatus ?? {}),
+        ibkr: paperBrokerState.ibkr
+      }
+    }
+  };
+}
+
+function buildFinderRowSummary(row) {
+  const usesSyntheticChain = (row.legs ?? []).some((leg) => {
+    if (leg?.kind !== "option") {
+      return false;
+    }
+
+    const normalizedQuoteSource = String(leg.quoteSource ?? "")
+      .trim()
+      .toLowerCase();
+
+    return (
+      normalizedQuoteSource === "modeled" ||
+      normalizedQuoteSource === "modeled chain" ||
+      normalizedQuoteSource === "synthetic chain"
+    );
+  });
+
+  return {
+    id: row.id,
+    assetLabel: row.assetLabel,
+    expiration: row.expiration,
+    strategyCloseDate: row.strategyCloseDate,
+    days: row.days,
+    strategyType: row.strategyType,
+    marketBias: row.marketBias,
+    marketBiasTone: row.marketBiasTone,
+    formula: row.formula ?? [],
+    polymarketPrice: row.polymarketPrice,
+    polymarketPriceSide: row.polymarketPriceSide,
+    polymarketSource: row.polymarketSource,
+    maxProfit: row.maxProfit,
+    maxLoss: row.maxLoss,
+    maxProfitUnbounded: row.maxProfitUnbounded,
+    maxLossUnbounded: row.maxLossUnbounded,
+    rewardRisk: row.rewardRisk,
+    breakevens: row.breakevens ?? [],
+    theoPrice: row.theoPrice,
+    bid: row.bid,
+    ask: row.ask,
+    bidAskSpread: row.bidAskSpread,
+    expPayoff: row.expPayoff,
+    targetOptionQuoteSize: row.targetOptionQuoteSize,
+    usesSyntheticChain,
+    maxProfitRangeTag: row.maxProfitRangeTag ?? null,
+    maxLossRangeTag: row.maxLossRangeTag ?? null
+  };
+}
+
+function buildSlimPrimaryStrategy(strategySummary) {
+  if (!strategySummary) {
+    return null;
+  }
+
+  return {
+    finder: {
+      ...(strategySummary.finder ?? {}),
+      rows: (strategySummary.finder?.rows ?? []).map(buildFinderRowSummary)
+    },
+    scanUniverse: strategySummary.scanUniverse ?? []
+  };
+}
+
+function getCachedFinderRowDetail(rowId) {
+  const normalizedRowId = String(rowId ?? "").trim();
+  if (!normalizedRowId) {
+    return null;
+  }
+
+  return strategyResponseCache.finderRowDetails.get(normalizedRowId) ?? null;
+}
+
 async function refreshIbkrStatusCache() {
+  const previousComparableStatus = JSON.stringify(buildComparableIbkrStatus(paperBrokerState.ibkr));
   const ibkrStatus = await getIbkrStatus();
   paperBrokerState.ibkr = {
     ...ibkrStatus,
     updatedAt: new Date().toISOString()
   };
+  syncStrategyCacheBrokerStatus();
+  const nextComparableStatus = JSON.stringify(buildComparableIbkrStatus(paperBrokerState.ibkr));
+  if (previousComparableStatus !== nextComparableStatus) {
+    schedulePaperPortfolioBroadcast(0);
+  }
   return paperBrokerState.ibkr;
+}
+
+async function ensureInitialLiveStateReady() {
+  if (!initialLiveStateReadyPromise) {
+    return;
+  }
+
+  await initialLiveStateReadyPromise;
 }
 
 function isBrokerTrackedOrder(order) {
@@ -1070,6 +1230,7 @@ async function syncIbkrPaperOrders({ onlyOrderId = null } = {}) {
     await refreshIbkrStatusCache();
 
     if (changed) {
+      invalidateStrategyResponseCache();
       syncPaperOptionStreamSubscriptions();
       schedulePaperPortfolioBroadcast(0);
     }
@@ -1594,12 +1755,23 @@ function deduplicateBy(items, keyFn) {
   return result;
 }
 
-function matchesAsset(asset, market) {
-  const question = market.question.toLowerCase();
-  return asset.polymarketQueries.some((query) => question.includes(query.split(" ")[0]));
+function getStrategyAssetContext() {
+  const mappingRecords = listStrategyAssetMappings();
+  const { settingsAssets, finderAssets, screenerAssets } = buildEffectiveStrategyAssets(mappingRecords);
+
+  return {
+    settingsAssets,
+    finderAssets,
+    screenerAssets,
+    quoteWatchlist: buildStrategyQuoteWatchlist(settingsAssets)
+  };
 }
 
-function getFallbackPolymarketSeedMarkets(markets = []) {
+function matchesAsset(asset, market) {
+  return strategyAssetMatchesMarket(asset, market);
+}
+
+function getFallbackPolymarketSeedMarkets(markets = [], finderAssets = [], screenerAssets = []) {
   return fallbackPolymarketMarkets.filter((fallbackMarket) => {
     if (!isTradablePolymarketMarket(fallbackMarket)) {
       return false;
@@ -1610,7 +1782,7 @@ function getFallbackPolymarketSeedMarkets(markets = []) {
       return true;
     }
 
-    const matchingAssets = [...strategyAssetUniverse, ...strategyScreenerV2AssetUniverse].filter((asset) => {
+    const matchingAssets = [...finderAssets, ...screenerAssets].filter((asset) => {
       const assetId = String(asset.id ?? "").trim();
       return assetId === normalizedAssetId || assetId.startsWith(`${normalizedAssetId}-`);
     });
@@ -1697,6 +1869,7 @@ function withDerivedQuotes(quotes) {
 
 async function refreshLiveState({ includeOptions = true } = {}) {
   const warnings = [];
+  const { finderAssets, screenerAssets, quoteWatchlist } = getStrategyAssetContext();
 
   let quotes = liveState.quotes;
   try {
@@ -1735,10 +1908,10 @@ async function refreshLiveState({ includeOptions = true } = {}) {
     const queries = deduplicateBy(
       [
         defaultStrategyConfig.yesLeg.query,
-        ...strategyAssetUniverse.flatMap((asset) => asset.polymarketQueries)
+        ...collectStrategyPolymarketQueries([...finderAssets, ...screenerAssets])
       ],
       (value) => value
-    );
+    ).filter(Boolean);
 
     const results = await Promise.allSettled(
       queries.map((query) => searchPolymarketMarkets(query, 12))
@@ -1754,6 +1927,7 @@ async function refreshLiveState({ includeOptions = true } = {}) {
     const exactEventUrls = deduplicateBy(
       [
         ...fallbackPolymarketMarkets.map((market) => market.url),
+        ...collectStrategyPolymarketEventUrls([...finderAssets, ...screenerAssets]),
         ...listPaperOrders().map((order) => order.position?.polymarketUrl ?? "")
       ]
         .filter((url) => url?.startsWith("https://polymarket.com/event/")),
@@ -1788,7 +1962,7 @@ async function refreshLiveState({ includeOptions = true } = {}) {
   const fallbackSeedMarkets = getFallbackPolymarketSeedMarkets([
     ...(polymarketValuationMarkets ?? []),
     ...polymarketMarkets
-  ]);
+  ], finderAssets, screenerAssets);
 
   polymarketMarkets = polymarketMarkets.filter((market) => isTradablePolymarketMarket(market));
   polymarketValuationMarkets = deduplicateBy(
@@ -1812,13 +1986,13 @@ async function refreshLiveState({ includeOptions = true } = {}) {
     try {
       const quoteMap = new Map(quotes.map((quote) => [quote.symbol, quote]));
       const optionRefreshAssets = deduplicateBy(
-        [...strategyAssetUniverse, ...strategyScreenerV2AssetUniverse],
+        [...finderAssets, ...screenerAssets],
         (asset) => `${asset.optionSymbol}:${asset.underlyingSymbol}`
       );
 
       const optionResults = await Promise.allSettled(
         optionRefreshAssets.map(async (asset) => {
-          const assetMarkets = polymarketMarkets.filter((market) => matchesAsset(asset, market));
+          const assetMarkets = getResolvedStrategyMarketsForAsset(asset, polymarketMarkets).slice(0, 8);
           const leadMarket = assetMarkets[0] ?? null;
           const optionSpot = Number(quoteMap.get(asset.optionSymbol)?.regularMarketPrice ?? 0);
           const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? optionSpot ?? 0);
@@ -1923,34 +2097,66 @@ async function refreshLiveState({ includeOptions = true } = {}) {
   }
 
   schedulePaperPortfolioBroadcast(0);
+  invalidateStrategyResponseCache();
 }
 
 async function buildStrategiesResponse() {
-  const optionMatches = buildLiveOptionMatches();
+  if (strategyResponseCache.response) {
+    return strategyResponseCache.response;
+  }
 
-  const [strategySummary, v2Screener] = await Promise.all([
-    buildStrategySummary({
-      quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
-      optionMatches
-    }),
-    buildStrategyScreenerV2({
-      quotes: liveState.quotes,
-      polymarketMarkets: liveState.polymarketMarkets,
-      optionMatches
-    })
-  ]);
-  const paperPortfolio = buildPaperPortfolioResponse();
+  if (strategyResponseCache.buildPromise) {
+    return strategyResponseCache.buildPromise;
+  }
 
-  return {
-    lastUpdated: liveState.lastUpdated,
-    warnings: liveState.warnings,
-    strategies: getStrategies(),
-    recentRuns: getRecentRuns(),
-    primaryStrategy: strategySummary,
-    v2Screener,
-    paperPortfolio
-  };
+  const buildVersion = strategyResponseCache.version;
+  strategyResponseCache.buildPromise = (async () => {
+    const optionMatches = buildLiveOptionMatches();
+    const { settingsAssets, finderAssets, screenerAssets } = getStrategyAssetContext();
+
+    const [strategySummary, v2Screener] = await Promise.all([
+      buildStrategySummary({
+        quotes: liveState.quotes,
+        polymarketMarkets: liveState.polymarketMarkets,
+        optionMatches,
+        assetUniverse: finderAssets
+      }),
+      buildStrategyScreenerV2({
+        quotes: liveState.quotes,
+        polymarketMarkets: liveState.polymarketMarkets,
+        optionMatches,
+        assetUniverse: screenerAssets
+      })
+    ]);
+    const response = {
+      lastUpdated: liveState.lastUpdated,
+      warnings: liveState.warnings,
+      strategies: getStrategies(),
+      recentRuns: getRecentRuns(),
+      primaryStrategy: buildSlimPrimaryStrategy(strategySummary),
+      v2Screener,
+      paperPortfolioPreview: buildPaperPortfolioPreviewResponse(),
+      strategySettings: {
+        compareModes: STRATEGY_COMPARE_MODES,
+        assets: settingsAssets
+      }
+    };
+
+    if (buildVersion === strategyResponseCache.version) {
+      strategyResponseCache.response = response;
+      strategyResponseCache.finderRowDetails = new Map(
+        (strategySummary.finder?.rows ?? []).map((row) => [String(row.id), row])
+      );
+    }
+
+    return response;
+  })();
+
+  try {
+    return await strategyResponseCache.buildPromise;
+  } finally {
+    strategyResponseCache.buildPromise = null;
+  }
 }
 
 app.get("/api/health", (_request, response) => {
@@ -1998,6 +2204,8 @@ app.post("/api/refresh", async (_request, response) => {
 });
 
 app.get("/api/dashboard", async (_request, response) => {
+  await ensureInitialLiveStateReady();
+  const { quoteWatchlist } = getStrategyAssetContext();
   const watchlistOrder = new Map(quoteWatchlist.map((item, index) => [item.symbol, index]));
   const snapshots = getLatestSnapshots().sort(
     (left, right) => (watchlistOrder.get(left.symbol) ?? Number.MAX_SAFE_INTEGER) - (watchlistOrder.get(right.symbol) ?? Number.MAX_SAFE_INTEGER)
@@ -2071,8 +2279,128 @@ app.post("/api/dashboards", (request, response) => {
   }
 });
 
+app.get("/api/strategy-assets", (_request, response) => {
+  const { settingsAssets } = getStrategyAssetContext();
+  response.json({
+    generatedAt: new Date().toISOString(),
+    compareModes: STRATEGY_COMPARE_MODES,
+    assets: settingsAssets
+  });
+});
+
+app.put("/api/strategy-assets/:assetId", async (request, response) => {
+  const assetId = resolveStrategySettingsAssetId(String(request.params.assetId ?? "").trim());
+  if (!assetId) {
+    response.status(400).json({
+      error: "assetId is required"
+    });
+    return;
+  }
+
+  try {
+    const { settingsAssets } = getStrategyAssetContext();
+    const currentAsset = settingsAssets.find((asset) => asset.id === assetId) ?? null;
+    const normalizedAsset = normalizeStrategyAssetMapping(
+      {
+        ...(request.body ?? {}),
+        id: assetId
+      },
+      {
+        ...(currentAsset ?? {}),
+        id: assetId,
+        isCustom: currentAsset?.isCustom ?? true
+      }
+    );
+
+    if (!normalizedAsset.label || !normalizedAsset.optionSymbol) {
+      response.status(400).json({
+        error: "label and optionSymbol are required"
+      });
+      return;
+    }
+
+    upsertStrategyAssetMapping(normalizedAsset);
+    await refreshLiveState({ includeOptions: true });
+    invalidateStrategyResponseCache();
+
+    response.json({
+      ok: true,
+      asset: normalizedAsset,
+      strategyPayload: await buildStrategiesResponse()
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error.message
+    });
+  }
+});
+
+app.delete("/api/strategy-assets/:assetId", async (request, response) => {
+  const assetId = resolveStrategySettingsAssetId(String(request.params.assetId ?? "").trim());
+  if (!assetId) {
+    response.status(400).json({
+      error: "assetId is required"
+    });
+    return;
+  }
+
+  const deleted = deleteStrategyAssetMapping(assetId);
+  if (!deleted) {
+    response.status(404).json({
+      error: "Strategy asset mapping not found"
+    });
+    return;
+  }
+
+  await refreshLiveState({ includeOptions: true });
+  invalidateStrategyResponseCache();
+  response.json({
+    ok: true,
+    strategyPayload: await buildStrategiesResponse()
+  });
+});
+
 app.get("/api/strategies", async (_request, response) => {
+  await ensureInitialLiveStateReady();
   response.json(await buildStrategiesResponse());
+});
+
+app.get("/api/strategies/finder/:rowId", async (request, response) => {
+  await ensureInitialLiveStateReady();
+  await buildStrategiesResponse();
+  const row = getCachedFinderRowDetail(request.params.rowId);
+
+  if (!row) {
+    response.status(404).json({
+      error: "Strategy finder row not found"
+    });
+    return;
+  }
+
+  response.json({
+    lastUpdated: liveState.lastUpdated,
+    row
+  });
+});
+
+app.get("/api/paper-portfolio", async (_request, response) => {
+  await ensureInitialLiveStateReady();
+  response.json({
+    lastUpdated: liveState.lastUpdated,
+    paperPortfolio: buildPaperPortfolioResponse()
+  });
+});
+
+app.post("/api/tradingview/strategy-finder", async (request, response) => {
+  try {
+    const payload = await scanTradingViewStrategyFinder(request.body ?? {});
+
+    response.json(payload);
+  } catch (error) {
+    response.status(502).json({
+      error: error.message
+    });
+  }
 });
 
 app.get("/api/paper-orders/stream", (request, response) => {
@@ -2132,12 +2460,36 @@ app.get("/api/options/chain", async (request, response) => {
   }
 });
 
+app.get("/api/strategies/strategy-2/scan", async (request, response) => {
+  const force = String(request.query.force ?? "").trim().toLowerCase() === "true";
+  const requestedLimit = Number(request.query.limit ?? 12);
+
+  try {
+    await refreshCalendarState(force);
+
+    const payload = await buildVolCrushEarningsScan({
+      companyEvents: liveState.companyEvents?.events ?? [],
+      fetchQuotes,
+      fetchOptionChain,
+      limit: Number.isFinite(requestedLimit) ? requestedLimit : 12
+    });
+
+    response.json(payload);
+  } catch (error) {
+    response.status(502).json({
+      error: error.message
+    });
+  }
+});
+
 app.post("/api/strategies/strategy-1/runs", async (_request, response) => {
   const optionMatches = buildLiveOptionMatches();
+  const { finderAssets } = getStrategyAssetContext();
   const strategySummary = await buildStrategySummary({
     quotes: liveState.quotes,
     polymarketMarkets: liveState.polymarketMarkets,
-    optionMatches
+    optionMatches,
+    assetUniverse: finderAssets
   });
 
   saveStrategyRun("strategy-1", strategySummary);
@@ -2253,6 +2605,7 @@ app.post("/api/paper-orders", async (request, response) => {
     }
 
     const paperPortfolio = buildPaperPortfolioResponse();
+    invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
@@ -2359,6 +2712,7 @@ app.post("/api/paper-orders/:id/execute", async (request, response) => {
 
     const updatedOrder = updatePaperOrder(orderId, nextOrder);
     await refreshIbkrStatusCache().catch(() => null);
+    invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
@@ -2402,6 +2756,7 @@ app.post("/api/paper-orders/:id/execute", async (request, response) => {
           );
 
     updatePaperOrder(orderId, failedOrder);
+    invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
@@ -2512,6 +2867,7 @@ app.post("/api/paper-orders/:id/cancel-execution", async (request, response) => 
         existingOrder.position
       )
     );
+    invalidateStrategyResponseCache();
     await syncIbkrPaperOrders({
       onlyOrderId: orderId
     });
@@ -2569,6 +2925,7 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
     }
 
     const paperPortfolio = buildPaperPortfolioResponse();
+    invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
@@ -2638,6 +2995,7 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
         )
       );
       await refreshIbkrStatusCache().catch(() => null);
+      invalidateStrategyResponseCache();
       syncPaperOptionStreamSubscriptions();
       schedulePaperPortfolioBroadcast(0);
 
@@ -2680,6 +3038,7 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
       )
     ]);
     const paperPortfolio = buildPaperPortfolioResponse();
+    invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
@@ -2729,6 +3088,7 @@ app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response)
       payload
     );
     const paperPortfolio = buildPaperPortfolioResponse();
+    invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
@@ -2765,6 +3125,7 @@ app.delete("/api/paper-orders/:id", async (request, response) => {
   deletePaperOrderSnapshots(orderId);
   deletePaperCalculatorSnapshots(orderId);
   const paperPortfolio = buildPaperPortfolioResponse();
+  invalidateStrategyResponseCache();
   syncPaperOptionStreamSubscriptions();
   schedulePaperPortfolioBroadcast(0);
 
@@ -2790,9 +3151,13 @@ app.get("*", (request, response, next) => {
   });
 });
 
-refreshLiveState({ includeOptions: true }).catch((error) => {
-  liveState.warnings = [`Initial refresh failed: ${error.message}`];
-});
+initialLiveStateReadyPromise = refreshLiveState({ includeOptions: true })
+  .catch((error) => {
+    liveState.warnings = [`Initial refresh failed: ${error.message}`];
+  })
+  .finally(() => {
+    initialLiveStateReadyPromise = null;
+  });
 try {
   refreshMacroDashboard();
 } catch (error) {

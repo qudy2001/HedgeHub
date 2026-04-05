@@ -78,6 +78,13 @@ db.exec(`
     payload_json TEXT NOT NULL,
     refreshed_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS strategy_asset_mappings (
+    id TEXT PRIMARY KEY,
+    mapping_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 const upsertStrategy = db.prepare(`
@@ -239,6 +246,24 @@ const pruneMacroDashboardSnapshots = db.prepare(`
     ORDER BY refreshed_at DESC
     LIMIT @keepCount
   )
+`);
+
+const upsertStrategyAssetMappingStatement = db.prepare(`
+  INSERT INTO strategy_asset_mappings (
+    id,
+    mapping_json
+  ) VALUES (
+    @id,
+    @mappingJson
+  )
+  ON CONFLICT(id) DO UPDATE SET
+    mapping_json = excluded.mapping_json,
+    updated_at = CURRENT_TIMESTAMP
+`);
+
+const deleteStrategyAssetMappingStatement = db.prepare(`
+  DELETE FROM strategy_asset_mappings
+  WHERE id = ?
 `);
 
 export function getStrategies() {
@@ -596,6 +621,53 @@ export function getLatestMacroDashboardSnapshot() {
     refreshedAt,
     nextRefreshAt
   };
+}
+
+export function listStrategyAssetMappings() {
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          mapping_json AS mappingJson,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM strategy_asset_mappings
+        ORDER BY updated_at DESC, id ASC
+      `
+    )
+    .all()
+    .map((row) => ({
+      ...JSON.parse(row.mappingJson),
+      id: row.id,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    }));
+}
+
+export function upsertStrategyAssetMapping(mapping) {
+  upsertStrategyAssetMappingStatement.run({
+    id: mapping.id,
+    mappingJson: JSON.stringify(mapping)
+  });
+
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          mapping_json AS mappingJson,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM strategy_asset_mappings
+        WHERE id = ?
+      `
+    )
+    .get(mapping.id);
+}
+
+export function deleteStrategyAssetMapping(id) {
+  return deleteStrategyAssetMappingStatement.run(id).changes > 0;
 }
 
 export default db;

@@ -174,49 +174,6 @@ function formatTimestamp(value) {
   }).format(timestamp);
 }
 
-function formatRelativeTimestamp(value) {
-  if (!value) {
-    return "n/a";
-  }
-
-  const timestamp = new Date(value);
-
-  if (Number.isNaN(timestamp.getTime())) {
-    return "n/a";
-  }
-
-  const diffSeconds = Math.max(Math.round((Date.now() - timestamp.getTime()) / 1000), 0);
-
-  if (diffSeconds < 60) {
-    return `${diffSeconds}s ago`;
-  }
-
-  if (diffSeconds < 3600) {
-    return `${Math.round(diffSeconds / 60)}m ago`;
-  }
-
-  if (diffSeconds < 86400) {
-    return `${Math.round(diffSeconds / 3600)}h ago`;
-  }
-
-  return formatTimestamp(value);
-}
-
-function getStreamStateLabel(state) {
-  switch (state) {
-    case "live":
-      return "Live";
-    case "connecting":
-      return "Connecting";
-    case "retrying":
-      return "Retrying";
-    case "disconnected":
-      return "Disconnected";
-    default:
-      return "Idle";
-  }
-}
-
 function splitBalanced(items, valueKey) {
   if (items.length <= 1) {
     return [items, []];
@@ -555,51 +512,14 @@ function DashboardLayoutBar({
   savedDashboards,
   onLoadDashboard,
   loadedDashboard,
-  dashboardActionError,
-  streamDiagnostics
+  dashboardActionError
 }) {
-  const optionDiagnostics = streamDiagnostics?.options ?? null;
-  const polymarketDiagnostics = streamDiagnostics?.polymarket ?? null;
-  const optionState = optionDiagnostics?.state ?? "idle";
-  const trackedContracts = Number(optionDiagnostics?.trackedContracts ?? 0);
-  const subscribedContracts = Number(optionDiagnostics?.subscribedContracts ?? 0);
-  const refreshEverySeconds = Number(polymarketDiagnostics?.refreshEverySeconds ?? 0);
-
   return (
     <div className="macro-dashboard-bar">
       <div className="macro-dashboard-bar__header">
         <div>
           <span className="brand__eyebrow">Dashboard layout</span>
           <p className="card-copy">Use edit mode to drag sections and resize them from the lower-right handles.</p>
-        </div>
-
-        <div className="macro-layout-diagnostics" aria-label="Live data diagnostics">
-          <div className="macro-layout-diagnostics__row">
-            <span className="macro-layout-diagnostics__label">Options</span>
-            <span className={`macro-layout-diagnostics__state macro-layout-diagnostics__state--${optionState}`}>
-              {getStreamStateLabel(optionState)}
-            </span>
-            <span>{trackedContracts} tracked</span>
-            <span>{subscribedContracts} subscribed</span>
-            <span>
-              {optionDiagnostics?.lastQuoteAt
-                ? `Last tick ${formatRelativeTimestamp(optionDiagnostics.lastQuoteAt)}`
-                : trackedContracts > 0
-                  ? "Awaiting tick"
-                  : "No open option legs"}
-            </span>
-          </div>
-          <div className="macro-layout-diagnostics__row">
-            <span className="macro-layout-diagnostics__label">Polymarket</span>
-            <span className="macro-layout-diagnostics__state macro-layout-diagnostics__state--polling">
-              {refreshEverySeconds > 0 ? `${Math.round(refreshEverySeconds / 60)}m poll` : "Polling"}
-            </span>
-            <span>
-              {polymarketDiagnostics?.lastRefreshAt
-                ? `Last refresh ${formatRelativeTimestamp(polymarketDiagnostics.lastRefreshAt)}`
-                : "Waiting for refresh"}
-            </span>
-          </div>
         </div>
 
         <div className="macro-dashboard-bar__actions">
@@ -794,7 +714,7 @@ function LookbackSelector({ lookbacks, selectedLookback, onChange, disabled = fa
   );
 }
 
-export default function MacroHeatmapDashboard({ macroDashboard, streamDiagnostics = null, theme = "dark" }) {
+export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }) {
   const sections = macroDashboard?.sections ?? [];
   const lookbacks = DISPLAY_LOOKBACKS;
   const defaultLookback = normalizeDisplayLookback(macroDashboard?.defaultLookback ?? "30D", "1M");
@@ -812,7 +732,6 @@ export default function MacroHeatmapDashboard({ macroDashboard, streamDiagnostic
   const [dashboardActionLoading, setDashboardActionLoading] = useState(false);
   const [dashboardActionError, setDashboardActionError] = useState("");
   const [loadedDashboard, setLoadedDashboard] = useState(null);
-  const [streamStatus, setStreamStatus] = useState(streamDiagnostics);
   const resizeStateRef = useRef(null);
 
   useEffect(() => {
@@ -827,39 +746,6 @@ export default function MacroHeatmapDashboard({ macroDashboard, streamDiagnostic
     }));
     setSelectedLookback((currentLookback) => normalizeDisplayLookback(currentLookback, defaultLookback));
   }, [macroDashboard]);
-
-  useEffect(() => {
-    setStreamStatus(streamDiagnostics);
-  }, [streamDiagnostics]);
-
-  useEffect(() => {
-    let isActive = true;
-
-    async function loadStreamStatus() {
-      try {
-        const response = await fetch("/api/stream-status");
-
-        if (!response.ok) {
-          throw new Error(`Diagnostics request failed with ${response.status}`);
-        }
-
-        const payload = await response.json();
-        if (isActive) {
-          setStreamStatus(payload);
-        }
-      } catch (_error) {
-        // Keep the last known diagnostics visible if the lightweight status call fails.
-      }
-    }
-
-    loadStreamStatus();
-    const interval = window.setInterval(loadStreamStatus, 15_000);
-
-    return () => {
-      isActive = false;
-      window.clearInterval(interval);
-    };
-  }, []);
 
   if (!macroDashboard) {
     return null;
@@ -1041,7 +927,6 @@ export default function MacroHeatmapDashboard({ macroDashboard, streamDiagnostic
         onLoadDashboard={handleLoadDashboard}
         loadedDashboard={loadedDashboard}
         dashboardActionError={dashboardActionError}
-        streamDiagnostics={streamStatus}
       />
 
       <div className="macro-flow-grid">
