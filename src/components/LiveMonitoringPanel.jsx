@@ -196,7 +196,8 @@ export default function LiveMonitoringPanel({ streamDiagnostics = null, brokerSt
   const [twsHost, setTwsHost] = useState(() => String(brokerStatus?.tws?.host ?? "").trim() || DEFAULT_TWS_HOST);
   const [twsPort, setTwsPort] = useState(() => String(brokerStatus?.tws?.port ?? DEFAULT_TWS_PORT));
   const [twsBusy, setTwsBusy] = useState(false);
-  const twsSnapshot = getTwsMonitorSnapshot(twsStatus ?? brokerStatus?.tws ?? null);
+  const effectiveTwsStatus = twsStatus ?? brokerStatus?.tws ?? null;
+  const twsSnapshot = getTwsMonitorSnapshot(effectiveTwsStatus);
   const optionState = optionDiagnostics?.state ?? "idle";
   const trackedContracts = Number(optionDiagnostics?.trackedContracts ?? 0);
   const refreshEverySeconds = Number(polymarketDiagnostics?.refreshEverySeconds ?? 0);
@@ -300,7 +301,12 @@ export default function LiveMonitoringPanel({ streamDiagnostics = null, brokerSt
     }
   }
 
-  const twsConnected = (twsStatus ?? brokerStatus?.tws)?.connected === true && (twsStatus ?? brokerStatus?.tws)?.ready === true;
+  const twsConnected =
+    effectiveTwsStatus?.connected === true &&
+    effectiveTwsStatus?.authenticated === true &&
+    effectiveTwsStatus?.ready === true;
+  const twsHasError = String(effectiveTwsStatus?.error ?? "").trim();
+  const showTwsConnectForm = !twsConnected || Boolean(twsHasError);
 
   return (
     <div className={classes} aria-label="Live data diagnostics">
@@ -340,48 +346,48 @@ export default function LiveMonitoringPanel({ streamDiagnostics = null, brokerSt
         <span>{twsSnapshot.detail}</span>
       </div>
 
-      <form
-        className="sidebar-broker-connect"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void handleConnectTws();
-        }}
-      >
-        <label>
-          <span>IP</span>
-          <input
-            type="text"
-            value={twsHost}
-            onChange={(event) => {
-              setTwsHost(event.target.value);
-              setTwsStatus((current) => (current?.error ? { ...current, error: "" } : current));
-            }}
-            placeholder={DEFAULT_TWS_HOST}
-          />
-        </label>
-        <label className="sidebar-broker-connect__port">
-          <span>Port</span>
-          <input
-            type="number"
-            value={twsPort}
-            onChange={(event) => {
-              setTwsPort(event.target.value);
-              setTwsStatus((current) => (current?.error ? { ...current, error: "" } : current));
-            }}
-            placeholder={String(DEFAULT_TWS_PORT)}
-          />
-        </label>
-        <button
-          type="submit"
-          className={`chart-toggle sidebar-broker-connect__button ${twsConnected ? "chart-toggle--active" : ""}`}
-          disabled={twsBusy || twsConnected}
+      {showTwsConnectForm ? (
+        <form
+          className="sidebar-broker-connect"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleConnectTws();
+          }}
         >
-          {twsConnected ? "Connected" : twsBusy ? "Connecting..." : "Connect"}
-        </button>
-        {String((twsStatus ?? brokerStatus?.tws)?.error ?? "").trim() ? (
-          <small className="negative sidebar-broker-connect__error">{String((twsStatus ?? brokerStatus?.tws)?.error ?? "").trim()}</small>
-        ) : null}
-      </form>
+          <label>
+            <span>IP</span>
+            <input
+              type="text"
+              value={twsHost}
+              onChange={(event) => {
+                setTwsHost(event.target.value);
+                setTwsStatus((current) => (current?.error ? { ...current, error: "" } : current));
+              }}
+              placeholder={DEFAULT_TWS_HOST}
+            />
+          </label>
+          <label className="sidebar-broker-connect__port">
+            <span>Port</span>
+            <input
+              type="number"
+              value={twsPort}
+              onChange={(event) => {
+                setTwsPort(event.target.value);
+                setTwsStatus((current) => (current?.error ? { ...current, error: "" } : current));
+              }}
+              placeholder={String(DEFAULT_TWS_PORT)}
+            />
+          </label>
+          <button
+            type="submit"
+            className="chart-toggle sidebar-broker-connect__button"
+            disabled={twsBusy}
+          >
+            {twsBusy ? "Connecting..." : effectiveTwsStatus?.connected === true ? "Reconnect" : "Connect"}
+          </button>
+          {twsHasError ? <small className="negative sidebar-broker-connect__error">{twsHasError}</small> : null}
+        </form>
+      ) : null}
     </div>
   );
 }

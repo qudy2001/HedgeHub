@@ -234,8 +234,10 @@ export class TwsPaperApi extends EventEmitter {
     if (
       this.ib &&
       this.status.connected === true &&
+      this.status.ready === true &&
       this.status.host === normalizedHost &&
-      Number(this.status.port ?? 0) === normalizedPort
+      Number(this.status.port ?? 0) === normalizedPort &&
+      !String(this.status.error ?? "").trim()
     ) {
       return this.getStatus();
     }
