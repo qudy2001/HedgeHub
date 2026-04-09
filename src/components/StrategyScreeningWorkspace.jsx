@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 
 function formatCurrency(value) {
@@ -20,6 +21,72 @@ function formatPercent(value) {
   }
 
   return `${numericValue.toFixed(2)}%`;
+}
+
+function formatCompactNumber(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: numericValue >= 1000 ? 1 : 0
+  }).format(numericValue);
+}
+
+function formatCompactUsd(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: numericValue >= 1000 ? 1 : 0
+  }).format(numericValue);
+}
+
+function formatWholeNumber(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 0
+  }).format(numericValue);
+}
+
+function formatWholeUsd(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0
+  }).format(numericValue);
+}
+
+function formatQuoteSizePair(bidSize, askSize) {
+  const numericBidSize = Number(bidSize);
+  const numericAskSize = Number(askSize);
+
+  if (
+    !Number.isFinite(numericBidSize) ||
+    numericBidSize < 0 ||
+    !Number.isFinite(numericAskSize) ||
+    numericAskSize < 0
+  ) {
+    return "n/a";
+  }
+
+  return `${formatWholeNumber(numericBidSize)}/${formatWholeNumber(numericAskSize)}`;
 }
 
 function toOptionalNumber(value, fallback = null) {
@@ -107,6 +174,12 @@ function buildScenarioOrderFromScreeningRow(row, generatedAt) {
     strike: Number(leg.strike ?? 0),
     contractSymbol: leg.contractSymbol ?? "",
     rootSymbol: leg.rootSymbol ?? proxySymbol,
+    bid: leg.bid ?? null,
+    ask: leg.ask ?? null,
+    bidSize: leg.bidSize ?? null,
+    askSize: leg.askSize ?? null,
+    volume: leg.volume ?? null,
+    openInterest: leg.openInterest ?? null,
     impliedVolatility:
       Number(leg.impliedVolatility ?? marketContext.impliedVolatility ?? 0.24) || 0.24,
     riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate,
@@ -125,6 +198,7 @@ function buildScenarioOrderFromScreeningRow(row, generatedAt) {
           entryPrice: Number(row.polymarketLeg.entryPrice ?? referenceYesPrice),
           outcome: row.polymarketLeg.side === "NO" ? "NO" : "YES",
           polymarketMarketId: row.polymarketMarketId ?? "",
+          marketVolume: row.polymarketVolume ?? null,
           quoteSource: "Polymarket",
           isLive: true
         }
@@ -166,6 +240,8 @@ const columns = [
   { key: "polymarketProbability", label: "PM prob" },
   { key: "optionImpliedProbability", label: "Opt prob" },
   { key: "probabilityMismatchPct", label: "Mismatch" },
+  { key: "normalizedOptionVolume", label: "Opt vol (norm)" },
+  { key: "polymarketVolume", label: "Poly volume" },
   { key: "expectedValue", label: "Exp value" },
   { key: "executionRiskScore", label: "Exec risk" },
   { key: "exitLiquidityScore", label: "Exit liquidity" },
@@ -174,11 +250,14 @@ const columns = [
   { key: "failureReason", label: "Debug" }
 ];
 
+const MAX_SORT_PRIORITIES = 4;
+
 export default function StrategyScreeningWorkspace({
   screenerPayload,
   onManualRefresh = null,
   refreshing = false,
   refreshNotice = null,
+  onMarketTimerContextChange = null,
   theme = "dark"
 }) {
   const rows = screenerPayload?.rows ?? [];
@@ -198,8 +277,7 @@ export default function StrategyScreeningWorkspace({
   const [hedgeQualityMin, setHedgeQualityMin] = useState("");
   const [expectedRangeMin, setExpectedRangeMin] = useState(String(defaultExpectedRange.min ?? 5));
   const [expectedRangeMax, setExpectedRangeMax] = useState(String(defaultExpectedRange.max ?? 10));
-  const [sortKey, setSortKey] = useState("compositeScore");
-  const [sortDirection, setSortDirection] = useState("desc");
+  const [sortState, setSortState] = useState([{ key: "compositeScore", direction: "desc" }]);
   const [selectedRowId, setSelectedRowId] = useState(null);
 
   useEffect(() => {
@@ -262,8 +340,23 @@ export default function StrategyScreeningWorkspace({
   );
 
   const sortedRows = useMemo(
-    () => [...filteredRows].sort((left, right) => compareRows(left, right, sortKey, sortDirection)),
-    [filteredRows, sortDirection, sortKey]
+    () =>
+      [...filteredRows].sort((left, right) => {
+        for (const sortDescriptor of sortState) {
+          if (!sortDescriptor?.key) {
+            continue;
+          }
+
+          const direction = sortDescriptor.direction === "asc" ? "asc" : "desc";
+          const comparedValue = compareRows(left, right, sortDescriptor.key, direction);
+          if (comparedValue !== 0) {
+            return comparedValue;
+          }
+        }
+
+        return compareRows(left, right, "id", "asc");
+      }),
+    [filteredRows, sortState]
   );
 
   useEffect(() => {
@@ -284,6 +377,36 @@ export default function StrategyScreeningWorkspace({
     () => buildScenarioOrderFromScreeningRow(selectedRow, screenerPayload?.generatedAt),
     [screenerPayload?.generatedAt, selectedRow]
   );
+  const marketTimerContext = useMemo(() => {
+    if (!selectedRow) {
+      return null;
+    }
+
+    return createMarketTimerContext({
+      source: "screening",
+      label: selectedRow.assetLabel,
+      optionSymbol: selectedRow.optionRootSymbol,
+      underlyingSymbol: selectedRow.marketContext?.underlyingSymbol ?? selectedRow.referenceSymbol,
+      referenceSymbol: selectedRow.referenceSymbol,
+      optionExpiries: [
+        selectedRow.optionExpiry,
+        ...(selectedRow.optionLegs ?? []).map((leg) => leg.expiration)
+      ],
+      settlementType: selectedRow.settlementType,
+      exerciseStyle: selectedRow.exerciseStyle
+    });
+  }, [selectedRow]);
+
+  useEffect(() => {
+    if (!onMarketTimerContextChange) {
+      return undefined;
+    }
+
+    onMarketTimerContextChange(marketTimerContext);
+    return () => {
+      onMarketTimerContextChange(null);
+    };
+  }, [marketTimerContext, onMarketTimerContextChange]);
 
   function toggleSettlementType(type) {
     setSelectedSettlementTypes((current) => {
@@ -305,14 +428,39 @@ export default function StrategyScreeningWorkspace({
     });
   }
 
-  function handleSort(columnKey) {
-    if (sortKey === columnKey) {
-      setSortDirection((current) => (current === "desc" ? "asc" : "desc"));
-      return;
-    }
+  function handleSort(columnKey, options = {}) {
+    const isAdditive = options.additive === true;
 
-    setSortKey(columnKey);
-    setSortDirection("desc");
+    setSortState((current) => {
+      const currentSortState = Array.isArray(current) ? current : [];
+      const existingIndex = currentSortState.findIndex((sortDescriptor) => sortDescriptor?.key === columnKey);
+      const existingDescriptor = existingIndex >= 0 ? currentSortState[existingIndex] : null;
+      const hasSingleActiveSort = existingIndex === 0 && currentSortState.length === 1;
+
+      if (!isAdditive) {
+        if (hasSingleActiveSort) {
+          const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+          return [{ key: columnKey, direction }];
+        }
+
+        const direction = existingDescriptor?.direction === "asc" ? "asc" : "desc";
+        return [{ key: columnKey, direction }];
+      }
+
+      if (existingIndex >= 0) {
+        const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+        const nextSortState = [...currentSortState];
+        nextSortState[existingIndex] = { key: columnKey, direction };
+        return nextSortState;
+      }
+
+      const nextSortState =
+        currentSortState.length >= MAX_SORT_PRIORITIES
+          ? currentSortState.slice(0, MAX_SORT_PRIORITIES - 1)
+          : currentSortState;
+
+      return [...nextSortState, { key: columnKey, direction: "desc" }];
+    });
   }
 
   function resetFilters() {
@@ -496,9 +644,34 @@ export default function StrategyScreeningWorkspace({
                 <tr>
                   {columns.map((column) => (
                     <th key={column.key}>
-                      <button type="button" onClick={() => handleSort(column.key)}>
-                        {column.label}
-                        {sortKey === column.key ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                      <button
+                        type="button"
+                        title="Click to sort. Shift-click (or Ctrl/⌘-click) to add up to 4 sort priorities."
+                        onClick={(event) =>
+                          handleSort(column.key, {
+                            additive: event.shiftKey || event.metaKey || event.ctrlKey
+                          })
+                        }
+                      >
+                        <span>{column.label}</span>
+                        {(() => {
+                          const sortIndex = sortState.findIndex(
+                            (sortDescriptor) => sortDescriptor?.key === column.key
+                          );
+                          if (sortIndex < 0) {
+                            return null;
+                          }
+
+                          const sortDescriptor = sortState[sortIndex];
+                          const direction = sortDescriptor?.direction === "asc" ? "asc" : "desc";
+
+                          return (
+                            <span className="finder-sort__indicator" aria-hidden="true">
+                              <span className="finder-sort__priority">{sortIndex + 1}</span>
+                              <span className="finder-sort__direction">{direction === "asc" ? "↑" : "↓"}</span>
+                            </span>
+                          );
+                        })()}
                       </button>
                     </th>
                   ))}
@@ -523,6 +696,8 @@ export default function StrategyScreeningWorkspace({
                     <td className={Number(row.probabilityMismatchPct ?? 0) >= 0 ? "positive" : "negative"}>
                       {formatPercent(row.probabilityMismatchPct)}
                     </td>
+                    <td>{formatCompactNumber(row.normalizedOptionVolume)}</td>
+                    <td>{formatCompactUsd(row.polymarketVolume)}</td>
                     <td>{formatCurrency(row.expectedValue)}</td>
                     <td>{row.executionRiskScore?.toFixed?.(2) ?? "n/a"}</td>
                     <td>{row.exitLiquidityScore?.toFixed?.(0) ?? "n/a"}</td>
@@ -585,6 +760,14 @@ export default function StrategyScreeningWorkspace({
                     <strong>{formatCurrency(selectedRow.expectedValue)}</strong>
                   </div>
                   <div className="summary-row">
+                    <span>Opt vol (norm)</span>
+                    <strong>{formatWholeNumber(selectedRow.normalizedOptionVolume)}</strong>
+                  </div>
+                  <div className="summary-row">
+                    <span>Poly volume</span>
+                    <strong>{formatWholeUsd(selectedRow.polymarketVolume)}</strong>
+                  </div>
+                  <div className="summary-row">
                     <span>Scenario: event happens</span>
                     <strong className={Number(selectedRow.scenarioEventPnL ?? 0) >= 0 ? "positive" : "negative"}>
                       {formatCurrency(selectedRow.scenarioEventPnL)}
@@ -632,6 +815,9 @@ export default function StrategyScreeningWorkspace({
                         <th>Bid</th>
                         <th>Ask</th>
                         <th>Spread</th>
+                        <th>B/A size</th>
+                        <th>Volume</th>
+                        <th>OI</th>
                         <th>Code / link</th>
                       </tr>
                     </thead>
@@ -645,6 +831,9 @@ export default function StrategyScreeningWorkspace({
                           <td>{formatPercent(selectedRow.polymarketLeg.entryPrice * 100)}</td>
                           <td>{formatPercent(selectedRow.polymarketLeg.entryPrice * 100)}</td>
                           <td>0.00%</td>
+                          <td>n/a</td>
+                          <td>{formatWholeUsd(selectedRow.polymarketVolume)}</td>
+                          <td>n/a</td>
                           <td>
                             {selectedRow.polymarketUrl ? (
                               <a href={selectedRow.polymarketUrl} target="_blank" rel="noreferrer">
@@ -668,7 +857,10 @@ export default function StrategyScreeningWorkspace({
                           <td>{formatCurrency(leg.entryPrice * 100)}</td>
                           <td>{leg.bid != null ? formatCurrency(Number(leg.bid) * 100) : "n/a"}</td>
                           <td>{leg.ask != null ? formatCurrency(Number(leg.ask) * 100) : "n/a"}</td>
-                          <td>{leg.spread != null ? formatPercent(leg.spread) : "n/a"}</td>
+                          <td>{leg.spreadPct != null ? formatPercent(leg.spreadPct) : "n/a"}</td>
+                          <td>{formatQuoteSizePair(leg.bidSize, leg.askSize)}</td>
+                          <td>{formatWholeNumber(leg.volume)}</td>
+                          <td>{formatWholeNumber(leg.openInterest)}</td>
                           <td>
                             <div className="screening-v2__contract-link">
                               <strong>{leg.contractSymbol || `${leg.action} ${leg.optionType} ${leg.strike}`}</strong>

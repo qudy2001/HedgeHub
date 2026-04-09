@@ -1,3 +1,6 @@
+import { summarizeOptionStrategyLiquidity } from "../liquidityMetrics.js";
+import { fetchOptionChain } from "./yahooFinance.js";
+
 const TRADING_VIEW_STRATEGY_FINDER_URL = "https://options-spread-explorer.tradingview.com/v1/scan";
 const TRADING_VIEW_STRATEGY_FINDER_PAGE_URL = "https://www.tradingview.com/options/strategy-finder/";
 const DEFAULT_SYMBOL = "AMEX:SPY";
@@ -340,6 +343,8 @@ function mapTradingViewRow(row, request, generatedAt) {
     maxLoss: toFiniteNumber(row?.max_risk?.q99),
     maxLossQ90: toFiniteNumber(row?.max_risk?.q90),
     maxProfit: toFiniteNumber(row?.max_payoff?.q99),
+    normalizedOptionOpenInterest: null,
+    normalizedOptionVolume: null,
     pageUrl: `${TRADING_VIEW_STRATEGY_FINDER_PAGE_URL}?symbol=${encodeURIComponent(request.symbol)}`,
     probabilityOfProfit: (() => {
       const winRate = toFiniteNumber(row?.win_rate);
@@ -357,6 +362,162 @@ function mapTradingViewRow(row, request, generatedAt) {
     underlyingPriceStep: toFiniteNumber(row?.underlying_price_step),
     underlyingSymbol: request.symbol
   };
+}
+
+function extractUnderlyingFamilySymbol(row) {
+  const family = String(row?.underlyingFamily ?? "").trim();
+  if (family) {
+    return family;
+  }
+
+  const underlyingSymbol = String(row?.underlyingSymbol ?? "").trim();
+  if (!underlyingSymbol) {
+    return "";
+  }
+
+  return underlyingSymbol.includes(":") ? underlyingSymbol.split(":").slice(-1)[0] : underlyingSymbol;
+}
+
+function buildChainGroupKey({ symbol, expiration, optionType }) {
+  return `${symbol}:${expiration}:${optionType}`;
+}
+
+function findMatchingOptionContract(contracts, leg) {
+  const targetExpiration = String(leg?.expiration ?? "").trim();
+  const targetOptionType = String(leg?.optionType ?? "call").trim().toLowerCase();
+  const targetStrike = toFiniteNumber(leg?.strike, null);
+
+  if (!targetExpiration || !targetOptionType || targetStrike == null) {
+    return null;
+  }
+
+  return (
+    (contracts ?? []).find((contract) => {
+      const contractExpiration = String(contract?.expiration ?? "").trim();
+      const contractOptionType = String(contract?.optionType ?? "call").trim().toLowerCase();
+      const contractStrike = toFiniteNumber(contract?.strike, null);
+
+      return (
+        contractExpiration === targetExpiration &&
+        contractOptionType === targetOptionType &&
+        contractStrike != null &&
+        Math.abs(contractStrike - targetStrike) < 0.01
+      );
+    }) ?? null
+  );
+}
+
+async function enrichTradingViewRowsWithLiquidity(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return rows ?? [];
+  }
+
+  const chainRequestGroups = new Map();
+
+  rows.forEach((row) => {
+    const symbol = extractUnderlyingFamilySymbol(row);
+    const currentSpot = toFiniteNumber(row?.underlyingPrice, 0) ?? 0;
+
+    (row?.legs ?? []).forEach((leg) => {
+      const expiration = String(leg?.expiration ?? row?.expiration ?? "").trim();
+      const optionType = String(leg?.optionType ?? "call").trim().toLowerCase();
+      const strike = toFiniteNumber(leg?.strike, null);
+
+      if (!symbol || !expiration || !optionType || strike == null) {
+        return;
+      }
+
+      const groupKey = buildChainGroupKey({
+        symbol,
+        expiration,
+        optionType
+      });
+      const currentGroup = chainRequestGroups.get(groupKey) ?? {
+        currentSpot,
+        expiration,
+        optionType,
+        strikes: new Set(),
+        symbol
+      };
+
+      currentGroup.currentSpot = Math.max(currentGroup.currentSpot, currentSpot);
+      currentGroup.strikes.add(strike);
+      chainRequestGroups.set(groupKey, currentGroup);
+    });
+  });
+
+  const chainResults = await Promise.all(
+    [...chainRequestGroups.entries()].map(async ([groupKey, group]) => {
+      const strikes = [...group.strikes.values()];
+      const minStrike = strikes.length ? Math.min(...strikes) : null;
+      const maxStrike = strikes.length ? Math.max(...strikes) : null;
+      const strikePadding =
+        minStrike != null && maxStrike != null
+          ? Math.max((maxStrike - minStrike) * 0.15, group.currentSpot > 200 ? 5 : 1)
+          : 1;
+
+      const chain = await fetchOptionChain({
+        symbol: group.symbol,
+        expiration: group.expiration,
+        optionType: group.optionType,
+        currentSpot: group.currentSpot,
+        strikeHint: strikes[0] ?? group.currentSpot,
+        strikeMin: minStrike == null ? undefined : Math.max(minStrike - strikePadding, 0),
+        strikeMax: maxStrike == null ? undefined : maxStrike + strikePadding,
+        limit: Math.max(strikes.length * 8, 40)
+      }).catch(() => ({
+        contracts: []
+      }));
+
+      return [groupKey, Array.isArray(chain?.contracts) ? chain.contracts : []];
+    })
+  );
+
+  const contractsByGroup = new Map(chainResults);
+
+  return rows.map((row) => {
+    const symbol = extractUnderlyingFamilySymbol(row);
+    const enrichedLegs = (row?.legs ?? []).map((leg) => {
+      const groupKey = buildChainGroupKey({
+        symbol,
+        expiration: leg?.expiration ?? row?.expiration ?? "",
+        optionType: leg?.optionType ?? "call"
+      });
+      const matchedContract = findMatchingOptionContract(contractsByGroup.get(groupKey) ?? [], leg);
+
+      if (!matchedContract) {
+        return leg;
+      }
+
+      return {
+        ...leg,
+        askSize: matchedContract.askSize ?? leg.askSize ?? null,
+        bidSize: matchedContract.bidSize ?? leg.bidSize ?? null,
+        contractSymbol: matchedContract.contractSymbol ?? leg.contractSymbol ?? "",
+        isLive: matchedContract.isLive === true || leg.isLive === true,
+        openInterest: matchedContract.openInterest ?? leg.openInterest ?? null,
+        volume: matchedContract.volume ?? leg.volume ?? null
+      };
+    });
+    const hasLiquidityData = enrichedLegs.some((leg) =>
+      [leg?.volume, leg?.openInterest, leg?.bidSize, leg?.askSize].some((value) => value != null)
+    );
+
+    const optionLiquidity = summarizeOptionStrategyLiquidity(enrichedLegs, {
+      side: "entry"
+    });
+
+    return {
+      ...row,
+      legs: enrichedLegs,
+      normalizedOptionOpenInterest: hasLiquidityData
+        ? Number(optionLiquidity.normalizedOpenInterest.toFixed(0))
+        : null,
+      normalizedOptionVolume: hasLiquidityData
+        ? Number(optionLiquidity.normalizedVolume.toFixed(0))
+        : null
+    };
+  });
 }
 
 function buildDefaultRequest(now = new Date()) {
@@ -493,7 +654,9 @@ export async function scanTradingViewStrategyFinder(requestBody = {}, now = new 
     ...request,
     symbol: resolvedSymbol
   };
-  const rows = (response?.items ?? []).map((row) => mapTradingViewRow(row, resolvedRequest, generatedAt));
+  const rows = await enrichTradingViewRowsWithLiquidity(
+    (response?.items ?? []).map((row) => mapTradingViewRow(row, resolvedRequest, generatedAt))
+  );
   const strategyTypes = Array.from(
     new Map(
       rows.map((row) => [row.strategyTypeKey, { key: row.strategyTypeKey, label: row.strategyTypeLabel }])

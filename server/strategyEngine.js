@@ -1,4 +1,5 @@
 import { defaultStrategyConfig, strategyAssetUniverse as baseStrategyAssetUniverse } from "./marketCatalog.js";
+import { summarizeOptionStrategyLiquidity } from "./liquidityMetrics.js";
 import { pickOptionReferencePrice } from "./optionPricing.js";
 import { hasPublicPolymarketEvent, isTradablePolymarketMarket } from "./providers/polymarket.js";
 import { strategyAssetMatchesMarket } from "./strategyAssets.js";
@@ -1114,6 +1115,9 @@ function buildCombination({
     targetOptionBidSize != null && targetOptionAskSize != null
       ? Math.min(targetOptionBidSize, targetOptionAskSize)
       : null;
+  const optionLiquidity = summarizeOptionStrategyLiquidity(optionLegBlueprints, {
+    side: "entry"
+  });
   const hasRealNetSpread =
     optionLegBlueprints.length > 0 && optionLegBlueprints.every((leg) => leg.hasRealBidAsk === true);
   const spreadPct =
@@ -1138,6 +1142,8 @@ function buildCombination({
     polymarketUrl: market.url,
     polymarketPrice: formatNumber(polymarketPrice, 4),
     polymarketPriceSide,
+    polymarketVolume: formatNumber(Number(market.volume ?? 0), 0),
+    polymarketLiquidity: formatNumber(Number(market.liquidity ?? 0), 0),
     polymarketDirection: marketSignal?.direction ?? "up",
     polymarketTriggerType: marketSignal?.triggerType ?? "touch",
     expiration: strategyCloseDate,
@@ -1170,6 +1176,8 @@ function buildCombination({
     targetOptionBidSize: formatNumber(targetOptionBidSize, 0),
     targetOptionAskSize: formatNumber(targetOptionAskSize, 0),
     targetOptionQuoteSize: formatNumber(targetOptionQuoteSize, 0),
+    normalizedOptionVolume: formatNumber(optionLiquidity.normalizedVolume, 0),
+    normalizedOptionOpenInterest: formatNumber(optionLiquidity.normalizedOpenInterest, 0),
     bidAskSpread: formatNumber(spreadPct, 2),
     expPayoff: formatNumber(expPayoff, 2),
     payoffCurve,
@@ -1181,6 +1189,8 @@ function buildCombination({
       targetOptionBidSize: formatNumber(targetOptionBidSize, 0),
       targetOptionAskSize: formatNumber(targetOptionAskSize, 0),
       targetOptionQuoteSize: formatNumber(targetOptionQuoteSize, 0),
+      normalizedOptionVolume: formatNumber(optionLiquidity.normalizedVolume, 0),
+      polymarketVolume: formatNumber(Number(market.volume ?? 0), 0),
       breakevens,
       probabilityOfProfit: formatNumber(probabilityOfProfit, 2)
     },
@@ -1217,6 +1227,8 @@ function buildCombination({
             kind: leg.kind,
             outcome: leg.outcome,
             polymarketMarketId: market.id,
+            volume: formatNumber(Number(market.volume ?? 0), 0),
+            liquidity: formatNumber(Number(market.liquidity ?? 0), 0),
             expiry: polymarketResolutionDate,
             strategyCloseDate,
             marketQuestion: market.question
@@ -1232,6 +1244,8 @@ function buildCombination({
             ask: leg.marketAsk,
             bidSize: formatNumber(leg.marketBidSize, 0),
             askSize: formatNumber(leg.marketAskSize, 0),
+            volume: formatNumber(Number(leg.volume), 0),
+            openInterest: formatNumber(Number(leg.openInterest), 0),
             spread:
               leg.hasRealBidAsk === true && leg.marketBid != null && leg.marketAsk != null
                 ? formatNumber(
@@ -1347,6 +1361,8 @@ function buildStrategyFinder({
           marketAsk: quotes.ask,
           marketBidSize: formatNumber(Number(option.bidSize), 0),
           marketAskSize: formatNumber(Number(option.askSize), 0),
+          volume: formatNumber(Number(option.volume), 0),
+          openInterest: formatNumber(Number(option.openInterest), 0),
           quoteSource: option.source || (option.isModeled ? "modeled" : "seed"),
           isLive: option.isLive === true,
           hasRealBidAsk: option.hasRealBidAsk === true

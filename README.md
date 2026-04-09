@@ -106,9 +106,18 @@ Service scripts:
 ./scripts/startup.sh
 ./scripts/restart.sh
 ./scripts/shutdown.sh
+./scripts/publish-ibkr-image.sh
+./scripts/publish-ibkr-image-fast.sh
 ```
 
 The scripts write the PID file and application log under `logs/`.
+
+Manual embedded-image publish:
+
+```bash
+./scripts/publish-ibkr-image.sh
+./scripts/publish-ibkr-image-fast.sh
+```
 
 ## What is implemented
 

@@ -11,6 +11,8 @@ import {
 } from "recharts";
 import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
 import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
+import { isTwsReady } from "../twsStatus.js";
+import { createMarketTimerContext } from "../marketTimers.js";
 import { getChartPalette } from "../theme.js";
 import {
   buildTradingDateColumns,
@@ -176,6 +178,42 @@ function calculateIbkrNetLimitPrice(optionLegs) {
   }, 0);
 }
 
+function parseLimitPriceCents(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  return Math.round(numericValue * 100);
+}
+
+function formatLimitPriceCents(value) {
+  return (Number(value ?? 0) / 100).toFixed(2);
+}
+
+function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
+  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
+  if (anchorCents == null) {
+    return [];
+  }
+
+  const windowOffsets = 10;
+  const priceCents = new Set();
+
+  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
+    priceCents.add(anchorCents + offset);
+  }
+
+  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
+  if (selectedCents != null) {
+    priceCents.add(selectedCents);
+  }
+
+  return Array.from(priceCents)
+    .sort((left, right) => left - right)
+    .map(formatLimitPriceCents);
+}
+
 function formatWholeNumber(value) {
   if (value == null || Number.isNaN(value)) {
     return null;
@@ -190,14 +228,100 @@ function formatQuoteSizePair(bidSize, askSize) {
 
   if (
     !Number.isFinite(numericBidSize) ||
-    numericBidSize <= 0 ||
+    numericBidSize < 0 ||
     !Number.isFinite(numericAskSize) ||
-    numericAskSize <= 0
+    numericAskSize < 0
   ) {
     return null;
   }
 
   return `${formatWholeNumber(numericBidSize)}/${formatWholeNumber(numericAskSize)}`;
+}
+
+function getEntrySideQuoteSize(leg) {
+  return String(leg?.action ?? "LONG").trim().toUpperCase() === "SHORT"
+    ? Number(leg?.bidSize)
+    : Number(leg?.askSize);
+}
+
+function formatCompactCount(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: numericValue >= 1000 ? 1 : 0
+  }).format(numericValue);
+}
+
+function formatExactCount(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 0
+  }).format(numericValue);
+}
+
+function formatCompactUsd(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: numericValue >= 1000 ? 1 : 0
+  }).format(numericValue);
+}
+
+function formatExactUsd(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0
+  }).format(numericValue);
+}
+
+function buildOptionLiquidityMeta(leg) {
+  if (leg?.kind === "binary") {
+    return leg?.volume != null && Number.isFinite(Number(leg.volume))
+      ? `Market volume ${formatExactUsd(leg.volume)}`
+      : "";
+  }
+
+  const liquidityParts = [];
+  const entryQuoteSize = getEntrySideQuoteSize(leg);
+  const quoteSizePair = formatQuoteSizePair(leg?.bidSize, leg?.askSize);
+
+  if (Number.isFinite(entryQuoteSize) && entryQuoteSize >= 0) {
+    liquidityParts.push(`Entry size ${formatExactCount(entryQuoteSize)}`);
+  }
+
+  if (quoteSizePair) {
+    liquidityParts.push(`B/A size ${quoteSizePair}`);
+  }
+
+  if (leg?.volume != null && Number.isFinite(Number(leg.volume))) {
+    liquidityParts.push(`Vol ${formatExactCount(leg.volume)}`);
+  }
+
+  if (leg?.openInterest != null && Number.isFinite(Number(leg.openInterest))) {
+    liquidityParts.push(`OI ${formatExactCount(leg.openInterest)}`);
+  }
+
+  return liquidityParts.join(" · ");
 }
 
 function compareValues(left, right, direction) {
@@ -406,6 +530,15 @@ function normalizeQuantityInput(value, fallback = 0) {
   }
 
   return Math.max(0, Math.round(numericValue));
+}
+
+function normalizeComboQuantityInput(value, fallback = 1) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return fallback;
+  }
+
+  return Math.max(Math.round(numericValue), 1);
 }
 
 function toIsoDate(value) {
@@ -719,10 +852,8 @@ function formatQuoteSourceLabel(leg) {
     return "Polymarket";
   }
 
-  const quoteSizePair = formatQuoteSizePair(leg?.bidSize, leg?.askSize);
-
   if (leg?.isLive === true || leg?.quoteSource === "polygon" || leg?.quoteSource === "Polygon.io") {
-    return quoteSizePair ? `Polygon.io · size ${quoteSizePair}` : "Polygon.io";
+    return "Polygon.io";
   }
 
   if (
@@ -753,14 +884,22 @@ function formatContractChoiceLabel(contract) {
   const askLabel = formatNumber(contract?.ask, 2) ?? "n/a";
   const quoteSizePair = formatQuoteSizePair(contract?.bidSize, contract?.askSize);
   const sizeSuffix = quoteSizePair ? ` · size ${quoteSizePair}` : "";
+  const volumeSuffix =
+    contract?.volume != null && Number.isFinite(Number(contract.volume))
+      ? ` · vol ${formatCompactCount(contract.volume)}`
+      : "";
+  const openInterestSuffix =
+    contract?.openInterest != null && Number.isFinite(Number(contract.openInterest))
+      ? ` · oi ${formatCompactCount(contract.openInterest)}`
+      : "";
 
   if (contract?.isLive === true && contract?.contractSymbol) {
-    return `${contract.contractSymbol} · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}`;
+    return `${contract.contractSymbol} · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}${volumeSuffix}${openInterestSuffix}`;
   }
 
   return `Synthetic ${formatNumber(contract?.strike, 1)}${contract?.optionType === "put" ? "P" : "C"} · ${
     contract?.expiration
-  } · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}`;
+  } · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}${volumeSuffix}${openInterestSuffix}`;
 }
 
 function binaryPriceFromYes(outcome, yesPrice) {
@@ -1078,22 +1217,26 @@ function calculateHeatmapExtremaForRow(row, currentDate) {
 
 const columns = [
   { key: "expiration", label: "Expiration" },
-  { key: "days", label: "Days" },
+  { key: "days", label: "Days", mobileHidden: true },
   { key: "assetLabel", label: "Asset" },
-  { key: "strategyType", label: "Strategy type" },
-  { key: "marketBias", label: "Tag" },
-  { key: "formula", label: "Formula" },
-  { key: "polymarketPrice", label: "Poly price" },
+  { key: "strategyType", label: "Strategy type", mobileHidden: true },
+  { key: "marketBias", label: "Tag", mobileHidden: true },
+  { key: "formula", label: "Formula", mobileHidden: true },
+  { key: "polymarketPrice", label: "Poly price", mobileHidden: true },
+  { key: "normalizedOptionVolume", label: "Opt vol (norm)" },
+  { key: "polymarketVolume", label: "Poly volume" },
   { key: "maxProfit", label: "Max profit" },
   { key: "maxLoss", label: "Max loss" },
-  { key: "rewardRisk", label: "Reward/Risk" },
-  { key: "breakevens", label: "Breakeven(s)" },
-  { key: "theoPrice", label: "Theo price" },
+  { key: "rewardRisk", label: "Reward/Risk", mobileHidden: true },
+  { key: "breakevens", label: "Breakeven(s)", mobileHidden: true },
+  { key: "theoPrice", label: "Theo price", mobileHidden: true },
   { key: "bid", label: "Bid" },
-  { key: "ask", label: "Ask" },
+  { key: "ask", label: "Ask", mobileHidden: true },
   { key: "bidAskSpread", label: "Bid-ask spread" },
-  { key: "expPayoff", label: "Exp payoff" }
+  { key: "expPayoff", label: "Exp payoff", mobileHidden: true }
 ];
+
+const MAX_SORT_PRIORITIES = 4;
 
 const BIAS_FILTER_ORDER = ["Bull", "Bear", "Range-bound", "Breakout", "Neutral"];
 const SOURCE_FILTER_OPTIONS = [
@@ -1101,6 +1244,40 @@ const SOURCE_FILTER_OPTIONS = [
   { id: "live", label: "Live only" },
   { id: "seed", label: "Seed only" }
 ];
+
+function getPendingConfirmation(order) {
+  const record = order && typeof order === "object" ? order : null;
+  const position =
+    record?.position && typeof record.position === "object"
+      ? record.position
+      : record;
+  const orderId = record?.id ?? position?.id ?? null;
+  const entryExecution = position?.execution ?? null;
+  if (
+    String(entryExecution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
+    String(entryExecution?.pendingReplyId ?? "").trim().length > 0
+  ) {
+    return {
+      orderId,
+      phase: "entry",
+      messages: Array.isArray(entryExecution.pendingReplyMessages) ? entryExecution.pendingReplyMessages : []
+    };
+  }
+
+  const exitExecution = position?.closeExecution ?? null;
+  if (
+    String(exitExecution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
+    String(exitExecution?.pendingReplyId ?? "").trim().length > 0
+  ) {
+    return {
+      orderId,
+      phase: "exit",
+      messages: Array.isArray(exitExecution.pendingReplyMessages) ? exitExecution.pendingReplyMessages : []
+    };
+  }
+
+  return null;
+}
 
 export default function StrategyFinderWorkspace({
   strategyPayload,
@@ -1110,7 +1287,9 @@ export default function StrategyFinderWorkspace({
   refreshNotice = null,
   paperPortfolio = null,
   onCreatePaperOrder = null,
+  onConfirmPaperExecution = null,
   onOpenPaperTrading = null,
+  onMarketTimerContextChange = null,
   theme = "dark"
 }) {
   const chartTheme = getChartPalette(theme);
@@ -1147,8 +1326,7 @@ export default function StrategyFinderWorkspace({
   const detailRef = useRef(null);
   const filterMenuRefs = useRef({});
   const hasHydratedFiltersRef = useRef(false);
-  const [sortKey, setSortKey] = useState("rewardRisk");
-  const [sortDirection, setSortDirection] = useState("desc");
+  const [sortState, setSortState] = useState([{ key: "rewardRisk", direction: "desc" }]);
   const [selectedRowId, setSelectedRowId] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailCollapsed, setDetailCollapsed] = useState(false);
@@ -1175,24 +1353,60 @@ export default function StrategyFinderWorkspace({
   const [paperTradeDate, setPaperTradeDate] = useState("");
   const [paperOrderState, setPaperOrderState] = useState(null);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
-  const [paperExecutionRoute, setPaperExecutionRoute] = useState("local-paper");
+  const [paperExecutionRoute, setPaperExecutionRoute] = useState("tws-paper");
+  const [paperComboQuantity, setPaperComboQuantity] = useState(1);
+  const [paperComboQuantityInput, setPaperComboQuantityInput] = useState("1");
   const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
   const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
   const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
   const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
+  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
   const [optionPriceRefreshing, setOptionPriceRefreshing] = useState(false);
   const [optionPriceRefreshState, setOptionPriceRefreshState] = useState(null);
   const [finderRowDetails, setFinderRowDetails] = useState({});
   const [finderDetailLoadingId, setFinderDetailLoadingId] = useState("");
   const [finderDetailErrors, setFinderDetailErrors] = useState({});
   const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
+  const [twsStatus, setTwsStatus] = useState(() => paperPortfolio?.brokerStatus?.tws ?? null);
   const ibkrReady = isIbkrReady(ibkrStatus);
   const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
   const ibkrLoginUrl = getIbkrGatewayLoginUrl();
+  const twsReady = isTwsReady(twsStatus);
   const minProfitThreshold = parseOptionalNumber(maxProfitMin);
   const maxProfitThreshold = parseOptionalNumber(maxProfitMax);
   const minLossThreshold = parseOptionalNumber(maxLossMin);
   const maxLossThreshold = parseOptionalNumber(maxLossMax);
+
+  useEffect(() => {
+    if (paperPortfolio?.brokerStatus?.tws) {
+      setTwsStatus(paperPortfolio.brokerStatus.tws);
+    }
+  }, [paperPortfolio?.brokerStatus?.tws]);
+
+  useEffect(() => {
+    if (paperExecutionRoute !== "tws-paper") {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshTwsStatus() {
+      try {
+        const response = await fetch("/api/brokers/tws/status");
+        const payload = await response.json().catch(() => null);
+        if (!cancelled && response.ok) {
+          setTwsStatus(payload?.tws ?? null);
+        }
+      } catch (_error) {
+        // ignore
+      }
+    }
+
+    void refreshTwsStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [paperExecutionRoute]);
 
   useEffect(() => {
     setFinderRowDetails({});
@@ -1348,8 +1562,23 @@ export default function StrategyFinderWorkspace({
     [baseFilteredRows, showSeedData, showSyntheticChain]
   );
   const sortedRows = useMemo(
-    () => [...filteredRows].sort((left, right) => compareValues(left[sortKey], right[sortKey], sortDirection)),
-    [filteredRows, sortDirection, sortKey]
+    () =>
+      [...filteredRows].sort((left, right) => {
+        for (const sortDescriptor of sortState) {
+          if (!sortDescriptor?.key) {
+            continue;
+          }
+
+          const direction = sortDescriptor.direction === "asc" ? "asc" : "desc";
+          const comparedValue = compareValues(left[sortDescriptor.key], right[sortDescriptor.key], direction);
+          if (comparedValue !== 0) {
+            return comparedValue;
+          }
+        }
+
+        return compareValues(left.id ?? "", right.id ?? "", "asc");
+      }),
+    [filteredRows, sortState]
   );
   const selectedRowSummary = useMemo(
     () => sortedRows.find((row) => row.id === selectedRowId) ?? null,
@@ -1370,6 +1599,40 @@ export default function StrategyFinderWorkspace({
     selectedRow?.polymarketSource ??
     selectedRowSummary?.polymarketSource ??
     "";
+  const marketTimerContext = useMemo(() => {
+    const row = selectedRow ?? selectedRowSummary;
+
+    if (!row) {
+      return null;
+    }
+
+    const optionExpiries = [
+      row.optionExpiry,
+      ...((selectedRow?.legs ?? [])
+        .filter((leg) => leg.kind === "option")
+        .map((leg) => leg.expiry ?? leg.expiration))
+    ];
+
+    return createMarketTimerContext({
+      source: "strategy-finder",
+      label: row.assetLabel,
+      optionSymbol: row.marketContext?.proxySymbol ?? "",
+      underlyingSymbol: row.marketContext?.underlyingSymbol ?? "",
+      referenceSymbol: row.optionReference ?? "",
+      optionExpiries
+    });
+  }, [selectedRow, selectedRowSummary]);
+
+  useEffect(() => {
+    if (!onMarketTimerContextChange) {
+      return undefined;
+    }
+
+    onMarketTimerContextChange(marketTimerContext);
+    return () => {
+      onMarketTimerContextChange(null);
+    };
+  }, [marketTimerContext, onMarketTimerContextChange]);
 
   useEffect(() => {
     if (!selectedRowId) {
@@ -1469,6 +1732,8 @@ export default function StrategyFinderWorkspace({
               ask: Number(leg.ask ?? 0),
               bidSize: leg.bidSize != null ? Number(leg.bidSize) : null,
               askSize: leg.askSize != null ? Number(leg.askSize) : null,
+              volume: leg.volume != null ? Number(leg.volume) : null,
+              openInterest: leg.openInterest != null ? Number(leg.openInterest) : null,
               contractSymbol: leg.contractSymbol ?? "",
               impliedVolatility: Number(leg.impliedVolatility ?? 0) || 0.24,
               quoteSource: leg.quoteSource ?? "seed",
@@ -1533,14 +1798,38 @@ export default function StrategyFinderWorkspace({
     };
   }, []);
 
-  function toggleSort(columnKey) {
-    if (sortKey === columnKey) {
-      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
-      return;
-    }
+  function toggleSort(columnKey, options = {}) {
+    const isAdditive = options.additive === true;
 
-    setSortKey(columnKey);
-    setSortDirection("desc");
+    setSortState((current) => {
+      const currentSortState = Array.isArray(current) ? current : [];
+      const existingIndex = currentSortState.findIndex((sortDescriptor) => sortDescriptor?.key === columnKey);
+      const existingDescriptor = existingIndex >= 0 ? currentSortState[existingIndex] : null;
+      const hasSingleActiveSort = existingIndex === 0 && currentSortState.length === 1;
+
+      if (!isAdditive) {
+        if (hasSingleActiveSort) {
+          const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+          return [{ key: columnKey, direction }];
+        }
+
+        const direction = existingDescriptor?.direction === "asc" ? "asc" : "desc";
+        return [{ key: columnKey, direction }];
+      }
+
+      if (existingIndex >= 0) {
+        const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+        const nextSortState = [...currentSortState];
+        nextSortState[existingIndex] = { key: columnKey, direction };
+        return nextSortState;
+      }
+
+      const nextSortState = currentSortState.length >= MAX_SORT_PRIORITIES
+        ? currentSortState.slice(0, MAX_SORT_PRIORITIES - 1)
+        : currentSortState;
+
+      return [...nextSortState, { key: columnKey, direction: "desc" }];
+    });
   }
 
   function toggleStrategyType(strategyType) {
@@ -1739,6 +2028,8 @@ export default function StrategyFinderWorkspace({
     const ask = Number(config.ask ?? leg.ask);
     const bidSize = config.bidSize ?? leg.bidSize ?? null;
     const askSize = config.askSize ?? leg.askSize ?? null;
+    const volume = config.volume ?? leg.volume ?? null;
+    const openInterest = config.openInterest ?? leg.openInterest ?? null;
 
     return {
       ...leg,
@@ -1750,6 +2041,8 @@ export default function StrategyFinderWorkspace({
       ask: Number.isFinite(ask) ? ask : null,
       bidSize: bidSize != null ? Number(bidSize) : null,
       askSize: askSize != null ? Number(askSize) : null,
+      volume: volume != null ? Number(volume) : null,
+      openInterest: openInterest != null ? Number(openInterest) : null,
       hasRealBidAsk: config.hasRealBidAsk === true || leg.hasRealBidAsk === true,
       spread:
         config.hasRealBidAsk === true || leg.hasRealBidAsk === true
@@ -1946,22 +2239,101 @@ export default function StrategyFinderWorkspace({
     };
   });
   const ibkrSuggestedLimitPrice = calculateIbkrNetLimitPrice(repricedOptionLegs);
+  const twsLimitPriceWindow = useMemo(
+    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
+    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
+  );
 
   useEffect(() => {
-    setPaperExecutionRoute("local-paper");
+    setPaperExecutionRoute("tws-paper");
+    setPaperComboQuantity(1);
+    setPaperComboQuantityInput("1");
     setPaperIbkrOrderType("LMT");
     setPaperIbkrTif("DAY");
     setPaperIbkrOutsideRth(false);
+    setPaperIbkrSmartEnabled(false);
     setPaperIbkrLimitPrice(
       ibkrSuggestedLimitPrice == null ? "" : String(Number(ibkrSuggestedLimitPrice.toFixed(2)))
     );
   }, [selectedRowId]);
+
+  function applyPaperComboQuantity(nextComboQuantity, { syncInput = true } = {}) {
+    if (!repricedOptionLegs.length) {
+      return;
+    }
+
+    const normalizedComboQuantity = normalizeComboQuantityInput(nextComboQuantity, paperComboQuantity);
+    setPaperComboQuantity(normalizedComboQuantity);
+    if (syncInput) {
+      setPaperComboQuantityInput(String(normalizedComboQuantity));
+    }
+
+    const baseQuantity =
+      repricedOptionLegs.reduce((current, leg) => {
+        const quantity = Math.max(Math.round(Number(leg?.quantity ?? 0) || 0), 0);
+        return quantity ? gcd(current, quantity) : current;
+      }, 0) || 1;
+
+    const ratioByLegId = new Map();
+    repricedOptionLegs.forEach((leg) => {
+      const quantity = Math.max(Math.round(Number(leg?.quantity ?? 0) || 0), 0);
+      ratioByLegId.set(String(leg?.id ?? ""), quantity > 0 ? quantity / baseQuantity : 1);
+    });
+
+    setControls((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextLegEdits = {
+        ...(current.legEdits ?? {})
+      };
+
+      repricedOptionLegs.forEach((leg) => {
+        const legId = String(leg?.id ?? "");
+        if (!legId) {
+          return;
+        }
+
+        const ratio = ratioByLegId.get(legId) ?? 1;
+        const nextQuantity = Math.max(Math.round(ratio * normalizedComboQuantity), 1);
+        nextLegEdits[legId] = {
+          ...(nextLegEdits[legId] ?? {}),
+          quantity: String(normalizeQuantityInput(nextQuantity, 0))
+        };
+      });
+
+      return {
+        ...current,
+        legEdits: nextLegEdits
+      };
+    });
+  }
+
+  function handlePaperComboQuantityChange(event) {
+    const nextValue = event.target.value;
+    setPaperComboQuantityInput(nextValue);
+    const normalizedComboQuantity = normalizeComboQuantityInput(nextValue, null);
+    if (normalizedComboQuantity != null) {
+      applyPaperComboQuantity(normalizedComboQuantity, { syncInput: false });
+    }
+  }
+
+  function handlePaperComboQuantityBlur() {
+    setPaperComboQuantityInput(String(paperComboQuantity));
+  }
 
   useEffect(() => {
     if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
       setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
     }
   }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
+
+  useEffect(() => {
+    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
+      setPaperIbkrSmartEnabled(false);
+    }
+  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
 
   async function handleCreatePaperTrade() {
     if (!selectedRow || !onCreatePaperOrder) {
@@ -1985,6 +2357,20 @@ export default function StrategyFinderWorkspace({
 
         if (paperIbkrOrderType === "LMT" && paperIbkrLimitPrice === "") {
           throw new Error("Enter an IBKR limit price before routing this order.");
+        }
+      }
+
+      if (paperExecutionRoute === "tws-paper") {
+        if (!twsReady) {
+          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
+        }
+
+        if (!repricedOptionLegs.length) {
+          throw new Error("This setup does not have any option legs to route to TWS.");
+        }
+
+        if (paperIbkrOrderType === "LMT" && paperIbkrLimitPrice === "") {
+          throw new Error("Enter a TWS limit price before routing this order.");
         }
       }
 
@@ -2037,6 +2423,12 @@ export default function StrategyFinderWorkspace({
             strike: Number(leg.strike),
             contractSymbol: leg.contractSymbol ?? "",
             rootSymbol: optionRootSymbol,
+            bid: leg.bid ?? null,
+            ask: leg.ask ?? null,
+            bidSize: leg.bidSize ?? null,
+            askSize: leg.askSize ?? null,
+            volume: leg.volume ?? null,
+            openInterest: leg.openInterest ?? null,
             impliedVolatility: Number(leg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
             riskFreeRate,
             quoteSource: leg.quoteSource ?? "seed",
@@ -2051,6 +2443,8 @@ export default function StrategyFinderWorkspace({
             entryPrice: leg.entryPrice,
             outcome: leg.outcome,
             polymarketMarketId: leg.polymarketMarketId ?? selectedRow.polymarketMarketId ?? "",
+            marketVolume: leg.volume ?? selectedRow.polymarketVolume ?? null,
+            marketLiquidity: leg.liquidity ?? selectedRow.polymarketLiquidity ?? null,
             quoteSource: "Polymarket",
             isLive: true
           }))
@@ -2066,8 +2460,23 @@ export default function StrategyFinderWorkspace({
                   paperIbkrOrderType === "LMT"
                     ? Number(paperIbkrLimitPrice)
                     : null,
-                accountId: ibkrStatus?.selectedAccount ?? ""
+                accountId: ibkrStatus?.selectedAccount ?? "",
+                smart: {
+                  enabled: paperIbkrOrderType === "LMT" && paperIbkrSmartEnabled
+                }
               }
+            : paperExecutionRoute === "tws-paper"
+              ? {
+                  route: "tws-paper",
+                  orderType: paperIbkrOrderType,
+                  tif: paperIbkrTif,
+                  outsideRth: paperIbkrOutsideRth,
+                  limitPrice:
+                    paperIbkrOrderType === "LMT"
+                      ? Number(paperIbkrLimitPrice)
+                      : null,
+                  accountId: twsStatus?.selectedAccount ?? ""
+                }
             : {
                 route: "local-paper"
               }
@@ -2122,23 +2531,70 @@ export default function StrategyFinderWorkspace({
           }
         }
       });
+      const pendingConfirmation = getPendingConfirmation(createResponse?.order);
 
       setPaperOrderState({
         tone:
-          paperExecutionRoute === "ibkr-paper" && createResponse?.message?.toLowerCase().includes("failed")
+          (paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper") &&
+          createResponse?.message?.toLowerCase().includes("failed")
             ? "warning"
-            : "success",
+            : pendingConfirmation
+              ? "warning"
+              : "success",
         message:
           createResponse?.message ??
           (paperExecutionRoute === "ibkr-paper"
             ? "IBKR paper order submitted. You can monitor it from the paper-trading page."
-            : "Paper order saved. You can review or edit it from the paper-trading page.")
+            : paperExecutionRoute === "tws-paper"
+              ? "TWS paper order submitted. You can monitor it from the paper-trading page."
+              : "Paper order saved. You can review or edit it from the paper-trading page."),
+        confirmation: pendingConfirmation
       });
     } catch (error) {
       setPaperOrderState({
         tone: "error",
-        message: error.message
+        message: error.message,
+        confirmation: null
       });
+    } finally {
+      setPaperOrderSaving(false);
+    }
+  }
+
+  async function handlePaperExecutionConfirmation(confirmed) {
+    const pendingConfirmation = paperOrderState?.confirmation;
+    if (!pendingConfirmation?.orderId || !onConfirmPaperExecution) {
+      return;
+    }
+
+    setPaperOrderSaving(true);
+
+    try {
+      const payload = await onConfirmPaperExecution(pendingConfirmation.orderId, {
+        confirmed
+      });
+      const nextConfirmation = getPendingConfirmation(payload?.order);
+
+      setPaperOrderState({
+        tone:
+          confirmed !== true
+            ? "warning"
+            : nextConfirmation
+              ? "warning"
+              : "success",
+        message:
+          payload?.message ??
+          (confirmed === true
+            ? "Broker confirmation sent."
+            : "Broker confirmation declined."),
+        confirmation: nextConfirmation
+      });
+    } catch (error) {
+      setPaperOrderState((current) => ({
+        tone: "error",
+        message: error.message,
+        confirmation: current?.confirmation ?? null
+      }));
     } finally {
       setPaperOrderSaving(false);
     }
@@ -2279,12 +2735,14 @@ export default function StrategyFinderWorkspace({
           eventSlug: selectedRow?.polymarketEventSlug,
           url: selectedRow?.polymarketUrl,
           source: selectedRow?.polymarketSource
-        }) || "Polymarket"
+        }) || "Polymarket",
+      liquidityMeta: buildOptionLiquidityMeta(leg)
     })),
     ...repricedOptionLegs.map((leg) => ({
       ...leg,
       referenceLabel: formatOptionReferenceLabel(leg),
-      referenceMeta: formatQuoteSourceLabel(leg)
+      referenceMeta: formatQuoteSourceLabel(leg),
+      liquidityMeta: buildOptionLiquidityMeta(leg)
     }))
   ];
 
@@ -2394,6 +2852,8 @@ export default function StrategyFinderWorkspace({
           ask: contract.ask,
           bidSize: contract.bidSize ?? null,
           askSize: contract.askSize ?? null,
+          volume: contract.volume ?? null,
+          openInterest: contract.openInterest ?? null,
           contractSymbol: contract.contractSymbol,
           impliedVolatility:
             Number(contract.impliedVolatility ?? 0) ||
@@ -3166,6 +3626,8 @@ export default function StrategyFinderWorkspace({
                                         contractSymbol: "",
                                         bidSize: null,
                                         askSize: null,
+                                        volume: null,
+                                        openInterest: null,
                                         hasRealBidAsk: false
                                       })
                                     }
@@ -3186,6 +3648,8 @@ export default function StrategyFinderWorkspace({
                                         contractSymbol: "",
                                         bidSize: null,
                                         askSize: null,
+                                        volume: null,
+                                        openInterest: null,
                                         hasRealBidAsk: false
                                       })
                                     }
@@ -3245,6 +3709,8 @@ export default function StrategyFinderWorkspace({
                           <div><dt>Theo price</dt><dd>{formatNumber(effectiveTheoPrice, 2)}</dd></div>
                           <div><dt>Bid</dt><dd>{formatNumber(effectiveNetBid, 2)}</dd></div>
                           <div><dt>Ask</dt><dd>{formatNumber(effectiveNetAsk, 2)}</dd></div>
+                          <div><dt>Opt vol (norm)</dt><dd>{formatExactCount(selectedRow?.normalizedOptionVolume)}</dd></div>
+                          <div><dt>Poly volume</dt><dd>{formatExactUsd(selectedRow?.polymarketVolume)}</dd></div>
                           <div><dt>Breakevens</dt><dd>{effectiveBreakevens.join("/") || "n/a"}</dd></div>
                           <div><dt>Prob. of profit</dt><dd>{formatNumber(effectiveProbabilityOfProfit, 2)}%</dd></div>
                         </dl>
@@ -3316,6 +3782,7 @@ export default function StrategyFinderWorkspace({
                                 <span>{leg.referenceLabel}</span>
                               )}
                               <small>{leg.referenceMeta}</small>
+                              {leg.liquidityMeta ? <small>{leg.liquidityMeta}</small> : null}
                             </span>
                           </div>
                         ))}
@@ -3524,17 +3991,27 @@ export default function StrategyFinderWorkspace({
                         </strong>
                         <p className="card-copy">
                           Save the current edited leg prices and contract amounts as a new paper order, or route the
-                          option legs to your IBKR paper account.
+                          option legs to your IBKR paper gateway or TWS paper session.
                         </p>
                         <div className="paper-order-ticket__status">
-                          <span className={`pill ${paperExecutionRoute === "ibkr-paper" ? "pill--live" : "pill--ghost"}`}>
-                            {paperExecutionRoute === "ibkr-paper" ? "IBKR paper route" : "Local paper route"}
+                          <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
+                            {paperExecutionRoute === "ibkr-paper"
+                              ? "IBKR paper route"
+                              : paperExecutionRoute === "tws-paper"
+                                ? "TWS paper route"
+                                : "Local paper route"}
                           </span>
                           {paperExecutionRoute === "ibkr-paper" ? (
                             <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
                               {ibkrReady
                                 ? `Gateway ready${ibkrStatus?.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
                                 : "Gateway not ready"}
+                            </span>
+                          ) : paperExecutionRoute === "tws-paper" ? (
+                            <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
+                              {twsReady
+                                ? `TWS ready${twsStatus?.selectedAccount ? ` · ${twsStatus.selectedAccount}` : ""}`
+                                : "TWS not ready"}
                             </span>
                           ) : null}
                         </div>
@@ -3555,6 +4032,14 @@ export default function StrategyFinderWorkspace({
                                 : ibkrStatus?.error || "Start the IBKR Client Portal Gateway in paper mode before routing this order."}
                           </p>
                         ) : null}
+                        {paperExecutionRoute === "tws-paper" ? (
+                          <p className="paper-order-ticket__note">
+                            {twsReady
+                              ? "HedgeHub will submit the option legs to the connected TWS paper session and keep order status synced. Update/cancel/close orders manually inside TWS."
+                              : twsStatus?.error ||
+                                "Connect TWS in paper mode and enable API socket clients, then enter the IP/port in the sidebar and connect."}
+                          </p>
+                        ) : null}
                       </div>
                       <div className="paper-order-ticket__actions">
                         <label>
@@ -3573,9 +4058,35 @@ export default function StrategyFinderWorkspace({
                           >
                             <option value="local-paper">Local paper</option>
                             <option value="ibkr-paper">IBKR paper</option>
+                            <option value="tws-paper">TWS paper</option>
                           </select>
                         </label>
-                        {paperExecutionRoute === "ibkr-paper" ? (
+                        <label className="paper-order-ticket__quantity">
+                          <span>Quantity</span>
+                          <div className="paper-order-ticket__quantity-controls">
+                            {[1, 5, 10].map((preset) => (
+                              <button
+                                key={`qty-preset:${preset}`}
+                                type="button"
+                                className={`chart-toggle chart-toggle--compact ${paperComboQuantity === preset ? "chart-toggle--active" : ""}`}
+                                onClick={() => applyPaperComboQuantity(preset)}
+                                disabled={!repricedOptionLegs.length}
+                              >
+                                {preset}x
+                              </button>
+                            ))}
+                            <input
+                              className="paper-order-ticket__quantity-input"
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={paperComboQuantityInput}
+                              onChange={handlePaperComboQuantityChange}
+                              onBlur={handlePaperComboQuantityBlur}
+                            />
+                          </div>
+                        </label>
+                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
                           <label>
                             <span>Order type</span>
                             <select
@@ -3598,7 +4109,22 @@ export default function StrategyFinderWorkspace({
                             />
                           </label>
                         ) : null}
-                        {paperExecutionRoute === "ibkr-paper" ? (
+                        {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
+                          <label>
+                            <span>TWS limit</span>
+                            <select
+                              value={paperIbkrLimitPrice}
+                              onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
+                            >
+                              {twsLimitPriceWindow.map((option) => (
+                                <option key={`tws-limit:${option}`} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
                           <label>
                             <span>TIF</span>
                             <select value={paperIbkrTif} onChange={(event) => setPaperIbkrTif(event.target.value)}>
@@ -3607,14 +4133,28 @@ export default function StrategyFinderWorkspace({
                             </select>
                           </label>
                         ) : null}
-                        {paperExecutionRoute === "ibkr-paper" ? (
+                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
                           <label className="paper-order-ticket__toggle">
                             <span>Outside RTH</span>
-                            <input
-                              type="checkbox"
-                              checked={paperIbkrOutsideRth}
-                              onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
-                            />
+                            <span className="paper-order-ticket__toggle-control">
+                              <input
+                                type="checkbox"
+                                checked={paperIbkrOutsideRth}
+                                onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
+                              />
+                            </span>
+                          </label>
+                        ) : null}
+                        {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
+                          <label className="paper-order-ticket__toggle">
+                            <span>Smart entry</span>
+                            <span className="paper-order-ticket__toggle-control">
+                              <input
+                                type="checkbox"
+                                checked={paperIbkrSmartEnabled}
+                                onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
+                              />
+                            </span>
                           </label>
                         ) : null}
                         <button
@@ -3624,7 +4164,8 @@ export default function StrategyFinderWorkspace({
                           disabled={
                             paperOrderSaving ||
                             !onCreatePaperOrder ||
-                            (paperExecutionRoute === "ibkr-paper" && !ibkrReady)
+                            (paperExecutionRoute === "ibkr-paper" && !ibkrReady) ||
+                            (paperExecutionRoute === "tws-paper" && !twsReady)
                           }
                         >
                           {paperOrderSaving ? "Saving..." : "Start new order"}
@@ -3649,6 +4190,26 @@ export default function StrategyFinderWorkspace({
                     {paperOrderState ? (
                       <div className={`refresh-feedback refresh-feedback--${paperOrderState.tone}`}>
                         <span>{paperOrderState.message}</span>
+                        {paperOrderState.confirmation?.orderId ? (
+                          <div className="refresh-feedback__actions">
+                            <button
+                              type="button"
+                              className={`chart-toggle ${paperOrderSaving ? "chart-toggle--active" : ""}`}
+                              onClick={() => handlePaperExecutionConfirmation(true)}
+                              disabled={paperOrderSaving || !onConfirmPaperExecution}
+                            >
+                              {paperOrderSaving ? "Working..." : "Submit anyway"}
+                            </button>
+                            <button
+                              type="button"
+                              className="chart-toggle"
+                              onClick={() => handlePaperExecutionConfirmation(false)}
+                              disabled={paperOrderSaving || !onConfirmPaperExecution}
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                     {optionPriceRefreshState ? (
@@ -3984,11 +4545,31 @@ export default function StrategyFinderWorkspace({
               <button
                 key={column.key}
                 type="button"
-                className="finder-sort"
-                onClick={() => toggleSort(column.key)}
+                className={`finder-sort ${column.mobileHidden ? "finder-sort--mobile-hidden" : ""}`}
+                title="Click to sort. Shift-click (or Ctrl/⌘-click) to add up to 4 sort priorities."
+                onClick={(event) =>
+                  toggleSort(column.key, {
+                    additive: event.shiftKey || event.metaKey || event.ctrlKey
+                  })
+                }
               >
-                {column.label}
-                {sortKey === column.key ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
+                <span className="finder-sort__label">{column.label}</span>
+                {(() => {
+                  const sortIndex = sortState.findIndex((sortDescriptor) => sortDescriptor?.key === column.key);
+                  if (sortIndex < 0) {
+                    return null;
+                  }
+
+                  const sortDescriptor = sortState[sortIndex];
+                  const direction = sortDescriptor?.direction === "asc" ? "asc" : "desc";
+
+                  return (
+                    <span className="finder-sort__indicator" aria-hidden="true">
+                      <span className="finder-sort__priority">{sortIndex + 1}</span>
+                      <span className="finder-sort__direction">{direction === "asc" ? "↑" : "↓"}</span>
+                    </span>
+                  );
+                })()}
               </button>
             ))}
           </div>
@@ -4007,27 +4588,31 @@ export default function StrategyFinderWorkspace({
                 onClick={() => handleRowSelect(row.id)}
               >
                 <span>{row.expiration}</span>
-                <span>{row.days}</span>
+                <span className="finder-cell--mobile-hidden">{row.days}</span>
                 <span className="finder-asset-cell">
                   <span>{row.assetLabel}</span>
                   {String(row.polymarketSource ?? "").toLowerCase() === "seed" ? (
                     <span className="source-pill source-pill--seed">Seed</span>
                   ) : null}
                 </span>
-                <span>{row.strategyType}</span>
-                <span>
+                <span className="finder-cell--mobile-hidden">{row.strategyType}</span>
+                <span className="finder-cell--mobile-hidden">
                   <span className={`bias-pill bias-pill--${row.marketBiasTone ?? "neutral"}`}>
                     {row.marketBias ?? "Neutral"}
                   </span>
                 </span>
-                <span className="formula-cell">
+                <span className="formula-cell finder-cell--mobile-hidden">
                   {row.formula.map((item) => (
                     <span key={`${row.id}-${item.label}`} className={`formula-pill formula-pill--${item.tone}`}>
                       {item.label}
                     </span>
                   ))}
                 </span>
-                <span>{`${row.polymarketPriceSide === "NO" ? "N" : "Y"} ${formatNumber(row.polymarketPrice, 2)}`}</span>
+                <span className="finder-cell--mobile-hidden">
+                  {`${row.polymarketPriceSide === "NO" ? "N" : "Y"} ${formatNumber(row.polymarketPrice, 2)}`}
+                </span>
+                <span>{formatCompactCount(row.normalizedOptionVolume)}</span>
+                <span>{formatCompactUsd(row.polymarketVolume)}</span>
                 <span className="finder-metric-cell">
                   <span
                     className={
@@ -4054,13 +4639,13 @@ export default function StrategyFinderWorkspace({
                   </span>
                   {row.maxLossRangeTag ? <span className="finder-range-tag">{row.maxLossRangeTag}</span> : null}
                 </span>
-                <span>{formatNumber(row.rewardRisk, 2)}</span>
-                <span>{row.breakevens.join("/") || "n/a"}</span>
-                <span>{formatNumber(row.theoPrice, 2)}</span>
+                <span className="finder-cell--mobile-hidden">{formatNumber(row.rewardRisk, 2)}</span>
+                <span className="finder-cell--mobile-hidden">{row.breakevens.join("/") || "n/a"}</span>
+                <span className="finder-cell--mobile-hidden">{formatNumber(row.theoPrice, 2)}</span>
                 <span>{formatNumber(row.bid, 2)}</span>
-                <span>{formatNumber(row.ask, 2)}</span>
+                <span className="finder-cell--mobile-hidden">{formatNumber(row.ask, 2)}</span>
                 <span className="negative">{row.bidAskSpread != null ? `${formatNumber(row.bidAskSpread, 2)}%` : ""}</span>
-                <span>{formatCurrency(row.expPayoff)}</span>
+                <span className="finder-cell--mobile-hidden">{formatCurrency(row.expPayoff)}</span>
               </button>
             ))
           )}

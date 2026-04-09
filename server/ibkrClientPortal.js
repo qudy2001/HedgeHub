@@ -321,13 +321,13 @@ function getMonthAbbreviation(monthNumber) {
 }
 
 function toIbkrMonth(expiry) {
-  const parts = String(expiry ?? "").split("-");
-  if (parts.length !== 3) {
+  const normalized = toCompactIsoDate(expiry);
+  if (normalized.length !== 8) {
     return "";
   }
 
-  const year = parts[0];
-  const month = Number(parts[1]);
+  const year = normalized.slice(0, 4);
+  const month = Number(normalized.slice(4, 6));
   if (!year || !(month >= 1 && month <= 12)) {
     return "";
   }
@@ -464,6 +464,31 @@ function extractOrderId(payload) {
   }
 
   return String(payload.order_id ?? payload.orderId ?? "").trim();
+}
+
+function extractReplyMessages(payload) {
+  if (!payload) {
+    return [];
+  }
+
+  const message =
+    Array.isArray(payload?.message)
+      ? payload.message
+      : payload?.message != null
+        ? [payload.message]
+        : [];
+
+  return message.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function readIbkrOrderStatusText(payload, fallback = "") {
+  return String(
+    payload?.order_status_description ??
+      payload?.statusDescription ??
+      payload?.text ??
+      payload?.message ??
+      fallback
+  ).trim();
 }
 
 async function getAuthStatus() {
@@ -603,23 +628,40 @@ export async function ensureIbkrPaperSession(accountIdHint = "") {
   };
 }
 
+function findOptionSearchMatches(results, symbol) {
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
+
+  return Array.isArray(results)
+    ? results.filter(
+        (candidate) =>
+          String(candidate?.symbol ?? "").trim().toUpperCase() === normalizedSymbol &&
+          Array.isArray(candidate?.sections) &&
+          candidate.sections.some((section) => String(section?.secType ?? "").trim().toUpperCase() === "OPT")
+      )
+    : [];
+}
+
 async function searchUnderlyingContract(symbol) {
-  const results = await ibkrRequest("GET", "/iserver/secdef/search", {
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
+  const primaryResults = await ibkrRequest("GET", "/iserver/secdef/search", {
     query: {
-      symbol: String(symbol ?? "").trim().toUpperCase(),
+      symbol: normalizedSymbol,
       secType: "OPT",
       name: true
     }
   });
 
-  const matches = Array.isArray(results)
-    ? results.filter(
-        (candidate) =>
-          String(candidate?.symbol ?? "").trim().toUpperCase() === String(symbol ?? "").trim().toUpperCase() &&
-          Array.isArray(candidate?.sections) &&
-          candidate.sections.some((section) => String(section?.secType ?? "").trim().toUpperCase() === "OPT")
-      )
-    : [];
+  let matches = findOptionSearchMatches(primaryResults, normalizedSymbol);
+  if (!matches.length) {
+    // Newer Client Portal Gateway builds can return empty `sections` when `name=true`.
+    const fallbackResults = await ibkrRequest("GET", "/iserver/secdef/search", {
+      query: {
+        symbol: normalizedSymbol,
+        secType: "OPT"
+      }
+    });
+    matches = findOptionSearchMatches(fallbackResults, normalizedSymbol);
+  }
 
   const selectedMatch =
     matches.find((candidate) =>
@@ -629,7 +671,7 @@ async function searchUnderlyingContract(symbol) {
     null;
 
   if (!selectedMatch) {
-    throw new Error(`IBKR could not find option permissions for ${symbol}`);
+    throw new Error(`IBKR could not find option permissions for ${normalizedSymbol}`);
   }
 
   return selectedMatch;
@@ -658,16 +700,24 @@ export async function resolveIbkrOptionContract(leg) {
   const matchingContracts = [];
 
   for (const monthCandidate of monthCandidates) {
-    const contracts = await ibkrRequest("GET", "/iserver/secdef/info", {
-      query: {
-        conid: searchMatch.conid,
-        sectype: "OPT",
-        month: monthCandidate,
-        strike: Number(leg?.strike ?? 0),
-        right: normalizeOptionType(leg?.optionType) === "put" ? "P" : "C",
-        exchange: "SMART"
+    let contracts = null;
+    try {
+      contracts = await ibkrRequest("GET", "/iserver/secdef/info", {
+        query: {
+          conid: searchMatch.conid,
+          sectype: "OPT",
+          month: monthCandidate,
+          strike: Number(leg?.strike ?? 0),
+          right: normalizeOptionType(leg?.optionType) === "put" ? "P" : "C",
+          exchange: "SMART"
+        }
+      });
+    } catch (error) {
+      if (String(error?.message ?? "").trim() === "No Contracts retrieved") {
+        continue;
       }
-    });
+      throw error;
+    }
 
     if (Array.isArray(contracts) && contracts.length) {
       matchingContracts.push(...contracts);
@@ -821,40 +871,236 @@ function buildComboConidex(resolvedLegs) {
   return `${IBKR_DEFAULT_USD_COMBO_SPREAD_CONID};;;${legDescriptor}`;
 }
 
-async function submitOrderWarnings(replyPayload, warnings = []) {
-  if (!Array.isArray(replyPayload) || !replyPayload.length) {
+function parseIbkrOrderSubmission(replyPayload, warningMessages = []) {
+  const payloadItems = Array.isArray(replyPayload)
+    ? replyPayload
+    : replyPayload
+      ? [replyPayload]
+      : [];
+
+  if (!payloadItems.length) {
     return {
       response: replyPayload,
-      warnings
+      warningMessages,
+      pendingReply: null
     };
   }
 
-  if (extractOrderId(replyPayload[0])) {
+  const acceptedOrder = payloadItems.find((item) => Boolean(extractOrderId(item)));
+  if (acceptedOrder) {
     return {
       response: replyPayload,
-      warnings
+      warningMessages,
+      pendingReply: null
     };
   }
 
-  const replyMessage = replyPayload[0];
-  if (!replyMessage?.id) {
+  const replyMessage = payloadItems.find(
+    (item) => item && typeof item === "object" && !Array.isArray(item) && String(item.id ?? "").trim()
+  );
+
+  if (replyMessage) {
     return {
       response: replyPayload,
-      warnings
+      warningMessages,
+      pendingReply: {
+        id: String(replyMessage.id).trim(),
+        messages: extractReplyMessages(replyMessage)
+      }
     };
   }
 
-  const nextWarnings = [
-    ...warnings,
-    ...(Array.isArray(replyMessage.message) ? replyMessage.message : [String(replyMessage.message ?? "")]).filter(Boolean)
-  ];
-  const confirmedReply = await ibkrRequest("POST", `/iserver/reply/${encodeURIComponent(replyMessage.id)}`, {
+  const extractedMessages = payloadItems.flatMap((item) => extractReplyMessages(item));
+  if (extractedMessages.length) {
+    return {
+      response: replyPayload,
+      warningMessages: [...warningMessages, ...extractedMessages],
+      pendingReply: null
+    };
+  }
+
+  return {
+    response: replyPayload,
+    warningMessages,
+    pendingReply: null
+  };
+}
+
+export async function respondToIbkrOrderReply({ replyId, confirmed = true, warningMessages = [] }) {
+  if (!replyId) {
+    throw new Error("IBKR reply id is required");
+  }
+
+  const replyPayload = await ibkrRequest("POST", `/iserver/reply/${encodeURIComponent(replyId)}`, {
     body: {
-      confirmed: true
+      confirmed: confirmed === true
     }
   });
+  console.info(
+    `[IBKR] Reply ${replyId} confirmed=${confirmed === true ? "true" : "false"} payload=${JSON.stringify(replyPayload)}`
+  );
 
-  return submitOrderWarnings(confirmedReply, nextWarnings);
+  return parseIbkrOrderSubmission(replyPayload, warningMessages);
+}
+
+export async function continueIbkrOrderConfirmation({ execution, confirmed = true }) {
+  const existingExecution = execution && typeof execution === "object" ? execution : null;
+  if (!existingExecution?.pendingReplyId) {
+    throw new Error("IBKR confirmation is not pending for this execution");
+  }
+
+  const previousWarnings = Array.isArray(existingExecution.warningMessages)
+    ? existingExecution.warningMessages
+    : [];
+  const pendingMessages = Array.isArray(existingExecution.pendingReplyMessages)
+    ? existingExecution.pendingReplyMessages
+    : [];
+  const combinedWarnings = [...previousWarnings, ...pendingMessages].filter(Boolean);
+  const now = new Date().toISOString();
+  const replyResult = await respondToIbkrOrderReply({
+    replyId: existingExecution.pendingReplyId,
+    confirmed,
+    warningMessages: combinedWarnings
+  });
+
+  if (confirmed !== true) {
+    return {
+      ...existingExecution,
+      status: "cancelled",
+      statusText: "Broker confirmation declined",
+      statusDescription: pendingMessages.join(" | "),
+      lastError: "",
+      lastWarning: combinedWarnings.join(" | "),
+      warningMessages: combinedWarnings,
+      pendingReplyId: "",
+      pendingReplyMessages: [],
+      lastSyncAt: now,
+      cancelledAt: now
+    };
+  }
+
+  if (replyResult.pendingReply) {
+    console.info(
+      `[IBKR] Confirmation reply ${String(existingExecution.pendingReplyId ?? "").trim() || "n/a"} requires follow-up ${
+        replyResult.pendingReply.id
+      }: ${replyResult.pendingReply.messages.join(" | ")}`
+    );
+    return {
+      ...existingExecution,
+      status: "pending_confirmation",
+      statusText: "Broker confirmation required",
+      statusDescription: replyResult.pendingReply.messages.join(" | "),
+      lastError: "",
+      lastWarning: replyResult.warningMessages.join(" | "),
+      warningMessages: replyResult.warningMessages,
+      pendingReplyId: replyResult.pendingReply.id,
+      pendingReplyMessages: replyResult.pendingReply.messages,
+      lastSyncAt: now,
+    };
+  }
+
+  const orderReply = Array.isArray(replyResult.response) ? replyResult.response[0] ?? null : replyResult.response;
+  const brokerOrderId = extractOrderId(orderReply) || String(existingExecution.brokerOrderId ?? "");
+  let brokerStatusPayload = orderReply;
+
+  if (brokerOrderId && existingExecution.accountId) {
+    try {
+      brokerStatusPayload = await fetchIbkrOrderStatus({
+        accountId: existingExecution.accountId,
+        orderId: brokerOrderId
+      });
+    } catch (_error) {
+      brokerStatusPayload = orderReply;
+    }
+  }
+
+  const brokerStatus = normalizeIbkrOrderStatus(
+    brokerStatusPayload?.order_status ?? brokerStatusPayload?.status ?? orderReply?.order_status ?? orderReply?.status ?? "submitted"
+  );
+  const statusText = String(
+    brokerStatusPayload?.order_status ??
+      brokerStatusPayload?.status ??
+      orderReply?.order_status ??
+      orderReply?.status ??
+      existingExecution.statusText ??
+      "Submitted"
+  ).trim();
+  const statusDescription = readIbkrOrderStatusText(
+    brokerStatusPayload,
+    readIbkrOrderStatusText(orderReply, existingExecution.statusDescription ?? "")
+  );
+  const replyId = String(existingExecution.pendingReplyId ?? "").trim();
+
+  if (["inactive", "rejected", "error"].includes(brokerStatus)) {
+    console.warn(
+      `[IBKR] Confirmation reply ${replyId || "n/a"} resolved to ${brokerStatus} for order ${brokerOrderId || "n/a"}: ${
+        statusDescription || statusText || "No broker description"
+      }`
+    );
+  } else {
+    console.info(
+      `[IBKR] Confirmation reply ${replyId || "n/a"} resolved to ${brokerStatus} for order ${brokerOrderId || "n/a"}: ${
+        statusDescription || statusText || "No broker description"
+      }`
+    );
+  }
+
+  return {
+    ...existingExecution,
+    status: brokerStatus || "submitted",
+    statusText,
+    statusDescription,
+    brokerOrderId,
+    avgFillPrice:
+      toNumber(
+        brokerStatusPayload?.avgPrice ??
+          brokerStatusPayload?.average_price ??
+          orderReply?.avgPrice ??
+          orderReply?.average_price ??
+          existingExecution.avgFillPrice,
+        existingExecution.avgFillPrice
+      ),
+    filledQuantity:
+      toNumber(
+        brokerStatusPayload?.filledQuantity ??
+          brokerStatusPayload?.filled_qty ??
+          brokerStatusPayload?.cum_fill ??
+          orderReply?.filledQuantity ??
+          orderReply?.filled_qty ??
+          orderReply?.cum_fill ??
+          existingExecution.filledQuantity,
+        existingExecution.filledQuantity
+      ),
+    totalQuantity:
+      toNumber(
+        brokerStatusPayload?.totalSize ??
+          brokerStatusPayload?.total_size ??
+          brokerStatusPayload?.quantity ??
+          brokerStatusPayload?.size ??
+          orderReply?.totalSize ??
+          orderReply?.total_size ??
+          orderReply?.quantity ??
+          orderReply?.size ??
+          existingExecution.totalQuantity,
+        existingExecution.totalQuantity
+      ),
+    remainingQuantity:
+      toNumber(
+        brokerStatusPayload?.remainingQuantity ??
+          brokerStatusPayload?.remaining_qty ??
+          orderReply?.remainingQuantity ??
+          orderReply?.remaining_qty ??
+          existingExecution.remainingQuantity,
+        existingExecution.remainingQuantity
+      ),
+    submittedAt: existingExecution.submittedAt || now,
+    lastSyncAt: now,
+    lastError: ["inactive", "rejected", "error"].includes(brokerStatus) ? statusDescription : "",
+    lastWarning: replyResult.warningMessages.join(" | "),
+    warningMessages: replyResult.warningMessages,
+    pendingReplyId: "",
+    pendingReplyMessages: []
+  };
 }
 
 export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
@@ -936,11 +1182,64 @@ export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
       }
     }
   );
-  const submission = await submitOrderWarnings(placeOrderResponse);
+  const submittedAt = new Date().toISOString();
+  const submission = parseIbkrOrderSubmission(placeOrderResponse);
+
+  if (submission.pendingReply) {
+    console.info(
+      `[IBKR] Order ${orderRef} requires confirmation ${submission.pendingReply.id}: ${submission.pendingReply.messages.join(" | ")}`
+    );
+    return {
+      accountId: session.accountId,
+      accountAlias: session.accountAlias,
+      isPaper: session.isPaper === true,
+      status: "pending_confirmation",
+      statusText: "Broker confirmation required",
+      statusDescription: submission.pendingReply.messages.join(" | "),
+      brokerOrderId: "",
+      orderRef,
+      orderType,
+      tif,
+      outsideRth,
+      limitPrice,
+      avgFillPrice: null,
+      combo: isComboOrder,
+      purpose,
+      totalQuantity: orderQuantity,
+      filledQuantity: 0,
+      remainingQuantity: orderQuantity,
+      submittedAt,
+      lastSyncAt: submittedAt,
+      lastError: "",
+      lastWarning: submission.warningMessages.join(" | "),
+      warningMessages: submission.warningMessages,
+      pendingReplyId: submission.pendingReply.id,
+      pendingReplyMessages: submission.pendingReply.messages,
+      requestedLegs: resolvedLegs.map((leg) => ({
+        legId: leg.legId,
+        label: leg.label,
+        rootSymbol: leg.rootSymbol,
+        contractSymbol: leg.contractSymbol,
+        optionType: normalizeOptionType(leg.optionType),
+        action: leg.action,
+        expiry: leg.expiry,
+        strike: leg.strike,
+        requestedQuantity: Math.max(Number(leg.requestedQuantity ?? 0) || 0, 0),
+        ratio: Number(leg.ratio ?? 1) || 1,
+        entryPrice: Number(leg.entryPrice ?? 0) || 0,
+        contractMultiplier: Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1),
+        brokerConid: String(leg.brokerConid),
+        localSymbol: String(leg.localSymbol ?? "")
+      }))
+    };
+  }
+
   const orderReply = Array.isArray(submission.response) ? submission.response[0] ?? null : submission.response;
   const brokerOrderId = extractOrderId(orderReply);
   const brokerStatus = normalizeIbkrOrderStatus(orderReply?.order_status ?? orderReply?.status ?? "submitted");
-  const submittedAt = new Date().toISOString();
+  console.info(
+    `[IBKR] Order ${orderRef} accepted as ${brokerStatus || "submitted"} with broker order ${brokerOrderId || "n/a"}`
+  );
 
   return {
     accountId: session.accountId,
@@ -964,7 +1263,10 @@ export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
     submittedAt,
     lastSyncAt: submittedAt,
     lastError: "",
-    lastWarning: submission.warnings.join(" | "),
+    lastWarning: submission.warningMessages.join(" | "),
+    warningMessages: submission.warningMessages,
+    pendingReplyId: "",
+    pendingReplyMessages: [],
     requestedLegs: resolvedLegs.map((leg) => ({
       legId: leg.legId,
       label: leg.label,

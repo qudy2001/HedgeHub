@@ -1,4 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
+import { isTwsReady } from "../twsStatus.js";
+import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 
 const TRADING_VIEW_STRATEGY_TYPE_KEYS = [
@@ -60,6 +63,8 @@ const SORT_DEFAULT_DIRECTIONS = {
   expiration: "asc",
   daysToExpiration: "asc",
   strategyTypeLabel: "asc",
+  normalizedOptionVolume: "desc",
+  midMinusTheo: "asc",
   maxProfit: "desc",
   maxLoss: "desc",
   rewardRisk: "desc",
@@ -70,10 +75,13 @@ const SORT_DEFAULT_DIRECTIONS = {
   bidAskSpreadPercent: "asc",
   probabilityOfProfit: "desc"
 };
+const MAX_SORT_PRIORITIES = 4;
 const DEFAULT_EXPECTED_PRICE_RANGE = {
   min: 5,
   max: 10
 };
+const TRADING_VIEW_SAVED_TICKERS_STORAGE_KEY = "hedgehub:tradingview-saved-tickers";
+const MAX_TRADING_VIEW_SAVED_TICKERS = 20;
 
 function toIsoDate(date) {
   return date.toISOString().slice(0, 10);
@@ -208,6 +216,41 @@ function formatNumber(value, digits = 2) {
   return numericValue.toFixed(digits);
 }
 
+function formatCompactCount(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: numericValue >= 1000 ? 1 : 0
+  }).format(numericValue);
+}
+
+function formatSummaryCurrency(value, digits = 2) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return "n/a";
+  }
+
+  const absoluteValue = Math.abs(numericValue);
+  if (absoluteValue >= 1000) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      notation: "compact",
+      maximumFractionDigits: 1
+    }).format(numericValue);
+  }
+
+  const absoluteLabel = absoluteValue.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  });
+  return `${numericValue < 0 ? "-" : ""}$${absoluteLabel}`;
+}
+
 function formatCompactValue(value, digits = 0) {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) {
@@ -220,6 +263,61 @@ function formatCompactValue(value, digits = 0) {
   });
 }
 
+function getTradingViewMidPrice(row) {
+  const bid = Number(row?.bid);
+  const ask = Number(row?.ask);
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+    return null;
+  }
+
+  return (bid + ask) / 2;
+}
+
+function getTradingViewMidMinusTheo(row) {
+  const averagePrice = getTradingViewMidPrice(row);
+  const theoreticalPrice = Number(row?.theoreticalPrice);
+  if (!Number.isFinite(averagePrice) || !Number.isFinite(theoreticalPrice)) {
+    return null;
+  }
+
+  return averagePrice - theoreticalPrice;
+}
+
+function getTradingViewMidMinusTheoTone(row) {
+  const averagePrice = getTradingViewMidPrice(row);
+  const theoreticalPrice = Number(row?.theoreticalPrice);
+  if (!Number.isFinite(averagePrice) || !Number.isFinite(theoreticalPrice)) {
+    return "";
+  }
+
+  const bothPositive = averagePrice > 0 && theoreticalPrice > 0;
+  const bothNegative = averagePrice < 0 && theoreticalPrice < 0;
+
+  if (bothPositive) {
+    return theoreticalPrice < averagePrice ? "negative" : "positive";
+  }
+
+  if (bothNegative) {
+    return theoreticalPrice > averagePrice ? "positive" : "negative";
+  }
+
+  return theoreticalPrice >= averagePrice ? "positive" : "negative";
+}
+
+function getTradingViewBidAskSpreadValue(row, type = "percent") {
+  if (type === "value") {
+    const bid = Number(row?.bid);
+    const ask = Number(row?.ask);
+    if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+      return null;
+    }
+
+    return ask - bid;
+  }
+
+  return Number.isFinite(Number(row?.bidAskSpreadPercent)) ? Number(row.bidAskSpreadPercent) : null;
+}
+
 function parseOptionalNumberInput(value) {
   const raw = String(value ?? "").trim();
   if (!raw) {
@@ -230,13 +328,54 @@ function parseOptionalNumberInput(value) {
   return Number.isFinite(numericValue) ? numericValue : null;
 }
 
+function normalizeTradingViewTickerTag(value) {
+  return String(value ?? "").trim().toUpperCase();
+}
+
 function normalizeTradingViewSymbolInput(value) {
-  const raw = String(value ?? "").trim().toUpperCase();
+  const raw = normalizeTradingViewTickerTag(value);
   if (!raw) {
     return "SPY";
   }
 
   return raw;
+}
+
+function sanitizeSavedTradingViewTickers(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set();
+
+  return value
+    .map((item) => normalizeTradingViewTickerTag(item))
+    .filter((item) => {
+      if (!item || seen.has(item)) {
+        return false;
+      }
+
+      seen.add(item);
+      return true;
+    })
+    .slice(0, MAX_TRADING_VIEW_SAVED_TICKERS);
+}
+
+function readSavedTradingViewTickers() {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(TRADING_VIEW_SAVED_TICKERS_STORAGE_KEY);
+    if (!rawValue) {
+      return [];
+    }
+
+    return sanitizeSavedTradingViewTickers(JSON.parse(rawValue));
+  } catch (_error) {
+    return [];
+  }
 }
 
 function formatStrategyTypeLabel(strategyTypeKey) {
@@ -410,6 +549,10 @@ function getTradingViewSortValue(row, sortKey) {
       return row.daysToExpiration ?? null;
     case "strategyTypeLabel":
       return row.strategyTypeLabel ?? "";
+    case "normalizedOptionVolume":
+      return row.normalizedOptionVolume ?? null;
+    case "midMinusTheo":
+      return getTradingViewMidMinusTheo(row);
     case "maxProfit":
       return row.maxProfit ?? null;
     case "maxLoss":
@@ -433,17 +576,24 @@ function getTradingViewSortValue(row, sortKey) {
   }
 }
 
-function sortTradingViewRows(rows, sortKey, sortDirection) {
-  const directionMultiplier = sortDirection === "asc" ? 1 : -1;
+function sortTradingViewRows(rows, sortState) {
+  const normalizedSortState = Array.isArray(sortState) ? sortState : [];
 
   return [...rows].sort((left, right) => {
-    const comparedValue = compareNullableValues(
-      getTradingViewSortValue(left, sortKey),
-      getTradingViewSortValue(right, sortKey)
-    );
+    for (const sortDescriptor of normalizedSortState) {
+      if (!sortDescriptor?.key) {
+        continue;
+      }
 
-    if (comparedValue !== 0) {
-      return comparedValue * directionMultiplier;
+      const directionMultiplier = sortDescriptor.direction === "asc" ? 1 : -1;
+      const comparedValue = compareNullableValues(
+        getTradingViewSortValue(left, sortDescriptor.key),
+        getTradingViewSortValue(right, sortDescriptor.key)
+      );
+
+      if (comparedValue !== 0) {
+        return comparedValue * directionMultiplier;
+      }
     }
 
     return compareNullableValues(left.id ?? "", right.id ?? "");
@@ -615,6 +765,101 @@ function summarizeOptionSpreadRange(optionSpreadRange) {
   return `Below ${formatCompactValue(optionSpreadRange.max, digits)}${suffix}`;
 }
 
+function buildOptionalMetricRange(minInput, maxInput, options = {}) {
+  const minValue = parseOptionalNumberInput(minInput);
+  const maxValue = parseOptionalNumberInput(maxInput);
+  const minimum = options.minimum;
+  const integerOnly = options.integer === true;
+
+  let min = minValue;
+  let max = maxValue;
+
+  if (integerOnly) {
+    min = min == null ? null : Math.round(min);
+    max = max == null ? null : Math.round(max);
+  }
+
+  if (minimum != null) {
+    min = min == null ? null : Math.max(min, minimum);
+    max = max == null ? null : Math.max(max, minimum);
+  }
+
+  if (min == null && max == null) {
+    return null;
+  }
+
+  if (min != null && max != null) {
+    return {
+      min: Math.min(min, max),
+      max: Math.max(min, max)
+    };
+  }
+
+  if (min != null) {
+    return { min };
+  }
+
+  return { max };
+}
+
+function summarizeMetricRange(range, { label, formatValue }) {
+  if (!range) {
+    return label;
+  }
+
+  if (range.min != null && range.max != null) {
+    return `${formatValue(range.min)} to ${formatValue(range.max)}`;
+  }
+
+  if (range.min != null) {
+    return `>= ${formatValue(range.min)}`;
+  }
+
+  return `<= ${formatValue(range.max)}`;
+}
+
+function matchesMetricRange(value, range) {
+  if (!range) {
+    return true;
+  }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return false;
+  }
+
+  if (range.min != null && numericValue < range.min) {
+    return false;
+  }
+
+  if (range.max != null && numericValue > range.max) {
+    return false;
+  }
+
+  return true;
+}
+
+function matchesTradingViewOptionSpreadRange(row, optionSpreadRange) {
+  if (!optionSpreadRange) {
+    return true;
+  }
+
+  const spreadValue = getTradingViewBidAskSpreadValue(row, optionSpreadRange.type);
+  if (!Number.isFinite(spreadValue)) {
+    return false;
+  }
+
+  if (optionSpreadRange.min != null && spreadValue < optionSpreadRange.min) {
+    return false;
+  }
+
+  if (optionSpreadRange.max != null && spreadValue > optionSpreadRange.max) {
+    return false;
+  }
+
+  return true;
+}
+
 function formatStrategyLegLabel(leg) {
   if (!leg) {
     return "";
@@ -623,6 +868,266 @@ function formatStrategyLegLabel(leg) {
   const strike = Number(leg.strike ?? 0);
   const optionCode = leg.optionType === "put" ? "P" : "C";
   return `${Number.isFinite(strike) ? strike.toFixed(0) : "?"}${optionCode}`;
+}
+
+function buildTradingViewLegTitle(leg) {
+  const strike = Number(leg?.strike ?? 0);
+  const strikeLabel = Number.isFinite(strike) ? strike.toFixed(2) : "0.00";
+  return `${leg?.action ?? "LONG"} ${String(leg?.optionType ?? "call").toUpperCase()} ${strikeLabel}`;
+}
+
+function gcd(a, b) {
+  const left = Math.max(Math.round(Number(a ?? 0) || 0), 0);
+  const right = Math.max(Math.round(Number(b ?? 0) || 0), 0);
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  let currentLeft = left;
+  let currentRight = right;
+  while (currentRight) {
+    const remainder = currentLeft % currentRight;
+    currentLeft = currentRight;
+    currentRight = remainder;
+  }
+
+  return currentLeft;
+}
+
+function calculateIbkrNetLimitPrice(optionLegs) {
+  const normalizedLegs = (optionLegs ?? []).filter((leg) => Number(leg?.quantity ?? 0) > 0);
+  if (!normalizedLegs.length) {
+    return null;
+  }
+
+  if (normalizedLegs.length === 1) {
+    return Number(normalizedLegs[0].entryPrice ?? 0) || 0;
+  }
+
+  const comboQuantity = normalizedLegs.reduce(
+    (current, leg) => gcd(current, Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0)),
+    0
+  );
+  const normalizedComboQuantity = comboQuantity || 1;
+
+  return normalizedLegs.reduce((sum, leg) => {
+    const ratio = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0) / normalizedComboQuantity || 1;
+    const signedPrice =
+      leg.action === "SHORT" ? -(Number(leg.entryPrice ?? 0) || 0) : Number(leg.entryPrice ?? 0) || 0;
+    return sum + signedPrice * ratio;
+  }, 0);
+}
+
+function parseLimitPriceCents(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  return Math.round(numericValue * 100);
+}
+
+function formatLimitPriceCents(value) {
+  return (Number(value ?? 0) / 100).toFixed(2);
+}
+
+function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
+  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
+  if (anchorCents == null) {
+    return [];
+  }
+
+  const windowOffsets = 10;
+  const priceCents = new Set();
+
+  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
+    priceCents.add(anchorCents + offset);
+  }
+
+  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
+  if (selectedCents != null) {
+    priceCents.add(selectedCents);
+  }
+
+  return Array.from(priceCents)
+    .sort((left, right) => left - right)
+    .map(formatLimitPriceCents);
+}
+
+function normalizeComboQuantityInput(value, fallback = 1) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return fallback;
+  }
+
+  return Math.max(Math.round(numericValue), 1);
+}
+
+function scaleTradingViewOrderToComboQuantity(order, comboQuantity) {
+  if (!order) {
+    return order;
+  }
+
+  const normalizedComboQuantity = normalizeComboQuantityInput(comboQuantity, 1);
+  const optionLegs = (order.legs ?? []).filter((leg) => leg?.kind === "option");
+  if (!optionLegs.length) {
+    return order;
+  }
+
+  const baseQuantity =
+    optionLegs.reduce((current, leg) => {
+      const quantity = Math.max(Math.round(Number(leg?.quantity ?? 0) || 0), 0);
+      return quantity ? gcd(current, quantity) : current;
+    }, 0) || 1;
+
+  const ratioByLegId = new Map();
+  optionLegs.forEach((leg) => {
+    const quantity = Math.max(Math.round(Number(leg?.quantity ?? 0) || 0), 0);
+    ratioByLegId.set(String(leg?.id ?? ""), quantity > 0 ? quantity / baseQuantity : 1);
+  });
+
+  return {
+    ...order,
+    legs: (order.legs ?? []).map((leg) => {
+      if (leg?.kind !== "option") {
+        return leg;
+      }
+
+      const ratio = ratioByLegId.get(String(leg?.id ?? "")) ?? 1;
+      return {
+        ...leg,
+        quantity: Math.max(Math.round(ratio * normalizedComboQuantity), 1)
+      };
+    })
+  };
+}
+
+function getPendingConfirmation(order) {
+  const record = order && typeof order === "object" ? order : null;
+  const position =
+    record?.position && typeof record.position === "object"
+      ? record.position
+      : record;
+  const orderId = record?.id ?? position?.id ?? null;
+  const entryExecution = position?.execution ?? null;
+  if (
+    String(entryExecution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
+    String(entryExecution?.pendingReplyId ?? "").trim().length > 0
+  ) {
+    return {
+      orderId,
+      phase: "entry",
+      messages: Array.isArray(entryExecution.pendingReplyMessages) ? entryExecution.pendingReplyMessages : []
+    };
+  }
+
+  const exitExecution = position?.closeExecution ?? null;
+  if (
+    String(exitExecution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
+    String(exitExecution?.pendingReplyId ?? "").trim().length > 0
+  ) {
+    return {
+      orderId,
+      phase: "exit",
+      messages: Array.isArray(exitExecution.pendingReplyMessages) ? exitExecution.pendingReplyMessages : []
+    };
+  }
+
+  return null;
+}
+
+function cloneTradingViewScenarioOrder(order) {
+  if (!order) {
+    return null;
+  }
+
+  return {
+    ...order,
+    valuationContext: {
+      ...(order.valuationContext ?? {})
+    },
+    legs: (order.legs ?? []).map((leg) => ({
+      ...leg
+    }))
+  };
+}
+
+function buildTradingViewPaperOrderPayload({
+  order,
+  row,
+  strategyDefinition,
+  purchaseDate,
+  execution
+}) {
+  if (!order) {
+    return null;
+  }
+
+  const optionLegs = (order.legs ?? []).map((leg, index) => ({
+    id: leg.id ?? `${order.id}-leg-${index + 1}`,
+    label: leg.label ?? buildTradingViewLegTitle(leg),
+    kind: "option",
+    action: leg.action,
+    quantity: Number(leg.quantity ?? 0),
+    entryPrice: Number(leg.entryPrice ?? 0),
+    contractMultiplier: Number(leg.contractMultiplier ?? 100) || 100,
+    optionType: leg.optionType ?? "call",
+    expiry: leg.expiry ?? order.strategyCloseDate ?? "",
+    strike: Number(leg.strike ?? 0),
+    contractSymbol: leg.contractSymbol ?? "",
+    rootSymbol: leg.rootSymbol ?? order.valuationContext?.underlyingSymbol ?? order.assetLabel ?? "",
+    impliedVolatility: Number(leg.impliedVolatility ?? order.legs?.[0]?.impliedVolatility ?? 0.24) || 0.24,
+    riskFreeRate: Number(leg.riskFreeRate ?? order.legs?.[0]?.riskFreeRate ?? 0.0425) || 0.0425,
+    quoteSource: leg.quoteSource ?? "TradingView",
+    isLive: leg.isLive === true
+  }));
+
+  return {
+    strategyId: strategyDefinition?.id ?? "strategy-tv-finder",
+    strategyName: strategyDefinition?.name ?? "TradingView Strategy Finder",
+    combinationId: order.id,
+    combinationLabel:
+      order.combinationLabel ??
+      `${order.assetLabel ?? row?.underlyingSymbol ?? "Underlying"} · ${order.strategyType ?? row?.strategyTypeLabel ?? "Strategy"} · ${order.strategyCloseDate ?? row?.expiration ?? ""}`,
+    assetLabel: order.assetLabel ?? row?.underlyingSymbol ?? "",
+    strategyType: order.strategyType ?? row?.strategyTypeLabel ?? "",
+    marketBias: "",
+    marketBiasTone: "",
+    maxProfit: row?.maxProfit ?? null,
+    maxLoss: row?.maxLoss ?? null,
+    maxProfitUnbounded: false,
+    maxLossUnbounded: false,
+    purchaseDate: purchaseDate || new Date().toISOString().slice(0, 10),
+    polymarketResolutionDate: order.polymarketResolutionDate || order.strategyCloseDate || row?.expiration || "",
+    strategyCloseDate: order.strategyCloseDate || row?.expiration || "",
+    marketReferenceYesPrice:
+      Number(order.marketReferenceYesPrice ?? order.valuationContext?.currentYesPrice ?? 0.5) || 0.5,
+    marketContext: {
+      proxySymbol: order.valuationContext?.proxySymbol ?? row?.underlyingSymbol ?? "",
+      underlyingSymbol: order.valuationContext?.underlyingSymbol ?? row?.underlyingSymbol ?? "",
+      currentProxySpot:
+        Number(order.valuationContext?.currentProxySpot ?? row?.underlyingPrice ?? 0) || 0,
+      currentUnderlyingSpot:
+        Number(order.valuationContext?.currentUnderlyingSpot ?? row?.underlyingPrice ?? 0) || 0,
+      conversionRatio: Number(order.valuationContext?.conversionRatio ?? 1) || 1,
+      targetUnderlyingValue:
+        Number(order.valuationContext?.targetUnderlyingValue ?? row?.breakevens?.[0] ?? row?.underlyingPrice ?? 0) || 0,
+      impliedVolatility:
+        Number(order.legs?.[0]?.impliedVolatility ?? row?.annualizedVolatility ?? 0.24) || 0.24,
+      riskFreeRate: Number(order.legs?.[0]?.riskFreeRate ?? 0.0425) || 0.0425
+    },
+    legs: optionLegs,
+    execution:
+      execution && typeof execution === "object"
+        ? execution
+        : {
+            route: "local-paper"
+          }
+  };
 }
 
 function buildTradingViewScenarioOrder(row, generatedAt) {
@@ -640,6 +1145,7 @@ function buildTradingViewScenarioOrder(row, generatedAt) {
 
   return {
     id: row.id,
+    combinationLabel: `${row.underlyingSymbol} · ${row.strategyTypeLabel} · ${row.expiration || purchaseDate}`,
     assetLabel: row.underlyingFamily || row.underlyingSymbol,
     createdAt: generatedAt ?? null,
     closedAt: "",
@@ -684,10 +1190,16 @@ function buildTradingViewScenarioOrder(row, generatedAt) {
 
 export default function TradingViewStrategyWorkspace({
   strategyDefinition = null,
+  paperPortfolio = null,
+  onCreatePaperOrder = null,
+  onConfirmPaperExecution = null,
+  onOpenPaperTrading = null,
+  onMarketTimerContextChange = null,
   theme = "dark"
 }) {
-  const tableColumnCount = 13;
+  const tableColumnCount = 15;
   const [symbolInput, setSymbolInput] = useState("SPY");
+  const [savedTickers, setSavedTickers] = useState(() => readSavedTradingViewTickers());
   const [dateFrom, setDateFrom] = useState(startOfCurrentMonthIso);
   const [dateTo, setDateTo] = useState(endOfCurrentMonthIso);
   const [priceMin, setPriceMin] = useState("5");
@@ -708,9 +1220,27 @@ export default function TradingViewStrategyWorkspace({
   const [optionSpreadType, setOptionSpreadType] = useState("percent");
   const [optionSpreadMin, setOptionSpreadMin] = useState("");
   const [optionSpreadMax, setOptionSpreadMax] = useState("");
-  const [sortKey, setSortKey] = useState("rewardRisk");
-  const [sortDirection, setSortDirection] = useState("desc");
+  const [normalizedVolumeMin, setNormalizedVolumeMin] = useState("");
+  const [normalizedVolumeMax, setNormalizedVolumeMax] = useState("");
+  const [tableMaxLossMin, setTableMaxLossMin] = useState("");
+  const [tableMaxLossMax, setTableMaxLossMax] = useState("");
+  const [midMinusTheoMin, setMidMinusTheoMin] = useState("");
+  const [midMinusTheoMax, setMidMinusTheoMax] = useState("");
+  const [sortState, setSortState] = useState([{ key: "rewardRisk", direction: "desc" }]);
   const [detailCollapsed, setDetailCollapsed] = useState(false);
+  const [strategyEditorOpen, setStrategyEditorOpen] = useState(false);
+  const [scenarioOrderDraft, setScenarioOrderDraft] = useState(null);
+  const [paperOrderSaving, setPaperOrderSaving] = useState(false);
+  const [paperOrderState, setPaperOrderState] = useState(null);
+  const [paperTradeDate, setPaperTradeDate] = useState("");
+  const [paperExecutionRoute, setPaperExecutionRoute] = useState("tws-paper");
+  const [paperComboQuantity, setPaperComboQuantity] = useState(1);
+  const [paperComboQuantityInput, setPaperComboQuantityInput] = useState("1");
+  const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
+  const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
+  const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
+  const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
+  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
   const datePresets = useMemo(() => buildDatePresets(todayIso()), []);
   const dateRange = useMemo(
     () => ({
@@ -786,6 +1316,18 @@ export default function TradingViewStrategyWorkspace({
     () => buildOptionalOptionSpreadRange(optionSpreadMin, optionSpreadMax, optionSpreadType),
     [optionSpreadMin, optionSpreadMax, optionSpreadType]
   );
+  const normalizedVolumeRange = useMemo(
+    () => buildOptionalMetricRange(normalizedVolumeMin, normalizedVolumeMax, { integer: true, minimum: 0 }),
+    [normalizedVolumeMax, normalizedVolumeMin]
+  );
+  const maxLossRange = useMemo(
+    () => buildOptionalMetricRange(tableMaxLossMin, tableMaxLossMax),
+    [tableMaxLossMax, tableMaxLossMin]
+  );
+  const midMinusTheoRange = useMemo(
+    () => buildOptionalMetricRange(midMinusTheoMin, midMinusTheoMax),
+    [midMinusTheoMax, midMinusTheoMin]
+  );
   const activeVolumePreset = useMemo(() => findMatchingVolumePreset(volumeRange), [volumeRange]);
   const activeSpreadWidthPreset = useMemo(
     () => findMatchingSpreadWidthPreset(spreadWidth),
@@ -805,6 +1347,30 @@ export default function TradingViewStrategyWorkspace({
     () => summarizeOptionSpreadRange(optionSpreadRange),
     [optionSpreadRange]
   );
+  const normalizedVolumeSummary = useMemo(
+    () =>
+      summarizeMetricRange(normalizedVolumeRange, {
+        label: "Opt vol (norm)",
+        formatValue: (value) => formatCompactCount(value)
+      }),
+    [normalizedVolumeRange]
+  );
+  const maxLossSummary = useMemo(
+    () =>
+      summarizeMetricRange(maxLossRange, {
+        label: "Max loss",
+        formatValue: (value) => formatSummaryCurrency(value)
+      }),
+    [maxLossRange]
+  );
+  const midMinusTheoSummary = useMemo(
+    () =>
+      summarizeMetricRange(midMinusTheoRange, {
+        label: "Avg B/A - Theo",
+        formatValue: (value) => formatSummaryCurrency(value)
+      }),
+    [midMinusTheoRange]
+  );
   const visibleMoneynessOptions = useMemo(() => {
     const normalizedQuery = moneynessSearchInput.trim().toLowerCase();
 
@@ -816,6 +1382,7 @@ export default function TradingViewStrategyWorkspace({
       option.label.toLowerCase().includes(normalizedQuery)
     );
   }, [moneynessSearchInput]);
+  const normalizedSymbolTag = useMemo(() => normalizeTradingViewTickerTag(symbolInput), [symbolInput]);
 
   async function loadStrategies() {
     setLoading(true);
@@ -861,15 +1428,94 @@ export default function TradingViewStrategyWorkspace({
   }, []);
 
   const rows = payload?.rows ?? [];
-  const sortedRows = useMemo(
-    () => sortTradingViewRows(rows, sortKey, sortDirection),
-    [rows, sortDirection, sortKey]
+  const filteredRows = useMemo(
+    () =>
+      rows.filter((row) => {
+        const normalizedVolumeMatch = matchesMetricRange(row.normalizedOptionVolume, normalizedVolumeRange);
+        const maxLossMatch = matchesMetricRange(row.maxLoss, maxLossRange);
+        const bidAskSpreadMatch = matchesTradingViewOptionSpreadRange(row, optionSpreadRange);
+        const midMinusTheoMatch = matchesMetricRange(getTradingViewMidMinusTheo(row), midMinusTheoRange);
+
+        return normalizedVolumeMatch && maxLossMatch && bidAskSpreadMatch && midMinusTheoMatch;
+      }),
+    [maxLossRange, midMinusTheoRange, normalizedVolumeRange, optionSpreadRange, rows]
   );
+  const sortedRows = useMemo(
+    () => sortTradingViewRows(filteredRows, sortState),
+    [filteredRows, sortState]
+  );
+  const visibleRowsCountLabel =
+    filteredRows.length !== rows.length ? `${filteredRows.length}/${rows.length}` : String(filteredRows.length);
   const selectedRow = sortedRows.find((row) => row.id === selectedRowId) ?? null;
-  const selectedScenarioOrder = useMemo(
+  const baseScenarioOrder = useMemo(
     () => buildTradingViewScenarioOrder(selectedRow, payload?.generatedAt),
     [payload?.generatedAt, selectedRow]
   );
+  const selectedScenarioOrder = scenarioOrderDraft ?? baseScenarioOrder;
+  const ibkrSuggestedLimitPrice = useMemo(
+    () => calculateIbkrNetLimitPrice(selectedScenarioOrder?.legs ?? []),
+    [selectedScenarioOrder?.legs]
+  );
+  const twsLimitPriceWindow = useMemo(
+    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
+    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
+  );
+  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
+  const [twsStatus, setTwsStatus] = useState(() => paperPortfolio?.brokerStatus?.tws ?? null);
+  const ibkrReady = isIbkrReady(ibkrStatus);
+  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
+  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
+  const twsReady = isTwsReady(twsStatus);
+  const marketTimerContext = useMemo(() => {
+    if (!selectedRow) {
+      return null;
+    }
+
+    return createMarketTimerContext({
+      source: "tradingview",
+      label: selectedRow.underlyingFamily || selectedRow.underlyingSymbol,
+      optionSymbol: selectedRow.legs?.[0]?.rootSymbol ?? selectedRow.underlyingFamily ?? selectedRow.underlyingSymbol,
+      underlyingSymbol: selectedRow.underlyingSymbol,
+      referenceSymbol: selectedRow.underlyingSymbol,
+      optionExpiries: [
+        selectedRow.expiration,
+        ...(selectedRow.legs ?? []).map((leg) => leg.expiration)
+      ],
+      exerciseStyle: "american",
+      settlementType: "physical"
+    });
+  }, [selectedRow]);
+
+  useEffect(() => {
+    if (paperPortfolio?.brokerStatus?.tws) {
+      setTwsStatus(paperPortfolio.brokerStatus.tws);
+    }
+  }, [paperPortfolio?.brokerStatus?.tws]);
+
+  useEffect(() => {
+    if (paperExecutionRoute !== "tws-paper") {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshTwsStatus() {
+      try {
+        const response = await fetch("/api/brokers/tws/status");
+        const payload = await response.json().catch(() => null);
+        if (!cancelled && response.ok) {
+          setTwsStatus(payload?.tws ?? null);
+        }
+      } catch (_error) {
+        // ignore
+      }
+    }
+
+    void refreshTwsStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [paperExecutionRoute]);
 
   useEffect(() => {
     if (!sortedRows.length) {
@@ -883,6 +1529,88 @@ export default function TradingViewStrategyWorkspace({
       setDetailCollapsed(false);
     }
   }, [selectedRowId, sortedRows]);
+
+  useEffect(() => {
+    setScenarioOrderDraft(baseScenarioOrder ? cloneTradingViewScenarioOrder(baseScenarioOrder) : null);
+    setStrategyEditorOpen(false);
+    setPaperOrderSaving(false);
+    setPaperOrderState(null);
+    setPaperTradeDate(baseScenarioOrder?.purchaseDate ?? new Date().toISOString().slice(0, 10));
+    setPaperExecutionRoute("tws-paper");
+    setPaperComboQuantity(1);
+    setPaperComboQuantityInput("1");
+    setPaperIbkrOrderType("LMT");
+    setPaperIbkrTif("DAY");
+    setPaperIbkrOutsideRth(false);
+    setPaperIbkrSmartEnabled(false);
+    const nextSuggestedLimit = calculateIbkrNetLimitPrice(baseScenarioOrder?.legs ?? []);
+    setPaperIbkrLimitPrice(
+      nextSuggestedLimit == null ? "" : String(Number(nextSuggestedLimit.toFixed(2)))
+    );
+  }, [baseScenarioOrder?.id]);
+
+  function applyPaperComboQuantity(nextComboQuantity, { syncInput = true } = {}) {
+    const normalizedComboQuantity = normalizeComboQuantityInput(nextComboQuantity, paperComboQuantity);
+    setPaperComboQuantity(normalizedComboQuantity);
+    if (syncInput) {
+      setPaperComboQuantityInput(String(normalizedComboQuantity));
+    }
+
+    setScenarioOrderDraft((current) =>
+      current ? scaleTradingViewOrderToComboQuantity(current, normalizedComboQuantity) : current
+    );
+  }
+
+  function handlePaperComboQuantityChange(event) {
+    const nextValue = event.target.value;
+    setPaperComboQuantityInput(nextValue);
+    const normalizedComboQuantity = normalizeComboQuantityInput(nextValue, null);
+    if (normalizedComboQuantity != null) {
+      applyPaperComboQuantity(normalizedComboQuantity, { syncInput: false });
+    }
+  }
+
+  function handlePaperComboQuantityBlur() {
+    setPaperComboQuantityInput(String(paperComboQuantity));
+  }
+
+  useEffect(() => {
+    if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
+      setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
+    }
+  }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
+
+  useEffect(() => {
+    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
+      setPaperIbkrSmartEnabled(false);
+    }
+  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
+
+  useEffect(() => {
+    if (!onMarketTimerContextChange) {
+      return undefined;
+    }
+
+    onMarketTimerContextChange(marketTimerContext);
+    return () => {
+      onMarketTimerContextChange(null);
+    };
+  }, [marketTimerContext, onMarketTimerContextChange]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(
+        TRADING_VIEW_SAVED_TICKERS_STORAGE_KEY,
+        JSON.stringify(savedTickers)
+      );
+    } catch (_error) {
+      // ignore storage failures
+    }
+  }, [savedTickers]);
 
   function toggleStrategyType(strategyTypeKey) {
     setSelectedStrategyTypeKeys((current) => {
@@ -937,6 +1665,230 @@ export default function TradingViewStrategyWorkspace({
     setDetailCollapsed(false);
   }
 
+  function handleSaveTickerTag() {
+    if (!normalizedSymbolTag) {
+      return;
+    }
+
+    setSavedTickers((current) =>
+      [normalizedSymbolTag, ...current.filter((ticker) => ticker !== normalizedSymbolTag)].slice(
+        0,
+        MAX_TRADING_VIEW_SAVED_TICKERS
+      )
+    );
+  }
+
+  function handleSelectSavedTicker(ticker) {
+    setSymbolInput(ticker);
+  }
+
+  function handleRemoveSavedTicker(ticker) {
+    setSavedTickers((current) => current.filter((item) => item !== ticker));
+  }
+
+  function updateScenarioDraftLeg(legId, patch) {
+    setScenarioOrderDraft((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        legs: current.legs.map((leg) => {
+          if (leg.id !== legId) {
+            return leg;
+          }
+
+          const nextLeg = {
+            ...leg,
+            ...patch
+          };
+
+          return {
+            ...nextLeg,
+            label: buildTradingViewLegTitle(nextLeg)
+          };
+        })
+      };
+    });
+  }
+
+  async function handleCreatePaperTrade() {
+    if (!selectedScenarioOrder || !onCreatePaperOrder) {
+      return;
+    }
+
+    setPaperOrderSaving(true);
+    setPaperOrderState(null);
+
+    try {
+      if (paperExecutionRoute === "ibkr-paper") {
+        if (!ibkrReady) {
+          throw new Error(
+            ibkrStatus?.error || "IBKR paper gateway is not ready. Check the connection on the paper-trading page."
+          );
+        }
+
+        if (!(selectedScenarioOrder.legs ?? []).length) {
+          throw new Error("This setup does not have any option legs to route to IBKR.");
+        }
+
+        if (paperIbkrOrderType === "LMT") {
+          if (paperIbkrLimitPrice === "") {
+            throw new Error("Enter an IBKR limit price before routing this order.");
+          }
+
+          const parsedLimitPrice = Number(paperIbkrLimitPrice);
+          const optionLegCount = (selectedScenarioOrder.legs ?? []).filter((leg) => leg?.kind === "option").length;
+          const allowsSignedNet = optionLegCount > 1;
+
+          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
+            throw new Error(
+              allowsSignedNet
+                ? "Enter a valid IBKR net limit price before routing this order."
+                : "Enter a valid (non-negative) IBKR limit price before routing this order."
+            );
+          }
+        }
+      }
+
+      if (paperExecutionRoute === "tws-paper") {
+        if (!twsReady) {
+          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
+        }
+
+        if (!(selectedScenarioOrder.legs ?? []).length) {
+          throw new Error("This setup does not have any option legs to route to TWS.");
+        }
+
+        if (paperIbkrOrderType === "LMT") {
+          if (paperIbkrLimitPrice === "") {
+            throw new Error("Enter a TWS limit price before routing this order.");
+          }
+
+          const parsedLimitPrice = Number(paperIbkrLimitPrice);
+          const optionLegCount = (selectedScenarioOrder.legs ?? []).filter((leg) => leg?.kind === "option").length;
+          const allowsSignedNet = optionLegCount > 1;
+
+          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
+            throw new Error(
+              allowsSignedNet
+                ? "Enter a valid TWS net limit price before routing this order."
+                : "Enter a valid (non-negative) TWS limit price before routing this order."
+            );
+          }
+        }
+      }
+
+      const execution =
+        paperExecutionRoute === "ibkr-paper"
+          ? {
+              route: "ibkr-paper",
+              orderType: paperIbkrOrderType,
+              tif: paperIbkrTif,
+              outsideRth: paperIbkrOutsideRth,
+              limitPrice:
+                paperIbkrOrderType === "LMT"
+                  ? Number(paperIbkrLimitPrice)
+                  : null,
+              accountId: ibkrStatus?.selectedAccount ?? "",
+              smart: {
+                enabled: paperIbkrOrderType === "LMT" && paperIbkrSmartEnabled
+              }
+            }
+          : paperExecutionRoute === "tws-paper"
+            ? {
+                route: "tws-paper",
+                orderType: paperIbkrOrderType,
+                tif: paperIbkrTif,
+                outsideRth: paperIbkrOutsideRth,
+                limitPrice:
+                  paperIbkrOrderType === "LMT"
+                    ? Number(paperIbkrLimitPrice)
+                    : null,
+                accountId: twsStatus?.selectedAccount ?? ""
+              }
+          : {
+              route: "local-paper"
+            };
+      const createResponse = await onCreatePaperOrder(
+        buildTradingViewPaperOrderPayload({
+          order: selectedScenarioOrder,
+          row: selectedRow,
+          strategyDefinition,
+          purchaseDate: paperTradeDate || selectedScenarioOrder.purchaseDate || new Date().toISOString().slice(0, 10),
+          execution
+        })
+      );
+      const pendingConfirmation = getPendingConfirmation(createResponse?.order);
+
+      setPaperOrderState({
+        tone:
+          (paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper") &&
+          createResponse?.message?.toLowerCase().includes("failed")
+            ? "warning"
+            : pendingConfirmation
+              ? "warning"
+              : "success",
+        message:
+          createResponse?.message ||
+          (paperExecutionRoute === "ibkr-paper"
+            ? "IBKR paper order submitted. You can monitor it from the paper-trading page."
+            : paperExecutionRoute === "tws-paper"
+              ? "TWS paper order submitted. You can monitor it from the paper-trading page."
+              : "Order saved to paper trading."),
+        confirmation: pendingConfirmation
+      });
+    } catch (error) {
+      setPaperOrderState({
+        tone: "error",
+        message: error.message,
+        confirmation: null
+      });
+    } finally {
+      setPaperOrderSaving(false);
+    }
+  }
+
+  async function handlePaperExecutionConfirmation(confirmed) {
+    const pendingConfirmation = paperOrderState?.confirmation;
+    if (!pendingConfirmation?.orderId || !onConfirmPaperExecution) {
+      return;
+    }
+
+    setPaperOrderSaving(true);
+
+    try {
+      const payload = await onConfirmPaperExecution(pendingConfirmation.orderId, {
+        confirmed
+      });
+      const nextConfirmation = getPendingConfirmation(payload?.order);
+
+      setPaperOrderState({
+        tone:
+          confirmed !== true
+            ? "warning"
+            : nextConfirmation
+              ? "warning"
+              : "success",
+        message:
+          payload?.message ??
+          (confirmed === true
+            ? "Broker confirmation sent."
+            : "Broker confirmation declined."),
+        confirmation: nextConfirmation
+      });
+    } catch (error) {
+      setPaperOrderState((current) => ({
+        tone: "error",
+        message: error.message,
+        confirmation: current?.confirmation ?? null
+      }));
+    } finally {
+      setPaperOrderSaving(false);
+    }
+  }
+
   function applyDatePreset(preset) {
     setDateFrom(preset.from);
     setDateTo(preset.to);
@@ -974,28 +1926,74 @@ export default function TradingViewStrategyWorkspace({
     setOptionSpreadMax(preset.max == null ? "" : String(preset.max));
   }
 
-  function toggleSort(nextSortKey) {
-    if (sortKey === nextSortKey) {
-      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
-      return;
-    }
+  function toggleSort(nextSortKey, options = {}) {
+    const isAdditive = options.additive === true;
 
-    setSortKey(nextSortKey);
-    setSortDirection(SORT_DEFAULT_DIRECTIONS[nextSortKey] ?? "desc");
+    setSortState((current) => {
+      const currentSortState = Array.isArray(current) ? current : [];
+      const existingIndex = currentSortState.findIndex((sortDescriptor) => sortDescriptor?.key === nextSortKey);
+      const existingDescriptor = existingIndex >= 0 ? currentSortState[existingIndex] : null;
+      const defaultDirection = SORT_DEFAULT_DIRECTIONS[nextSortKey] ?? "desc";
+      const hasSingleActiveSort = existingIndex === 0 && currentSortState.length === 1;
+
+      if (!isAdditive) {
+        if (hasSingleActiveSort) {
+          const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+          return [{ key: nextSortKey, direction }];
+        }
+
+        const direction = existingDescriptor?.direction ?? defaultDirection;
+        return [{ key: nextSortKey, direction }];
+      }
+
+      if (existingIndex >= 0) {
+        const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+        const nextSortState = [...currentSortState];
+        nextSortState[existingIndex] = { key: nextSortKey, direction };
+        return nextSortState;
+      }
+
+      const nextSortState =
+        currentSortState.length >= MAX_SORT_PRIORITIES
+          ? currentSortState.slice(0, MAX_SORT_PRIORITIES - 1)
+          : currentSortState;
+
+      return [...nextSortState, { key: nextSortKey, direction: defaultDirection }];
+    });
   }
 
   function renderSortHeader(nextSortKey, label) {
-    const isActive = sortKey === nextSortKey;
+    const sortIndex = sortState.findIndex((sortDescriptor) => sortDescriptor?.key === nextSortKey);
+    const isActive = sortIndex >= 0;
+    const sortDescriptor = isActive ? sortState[sortIndex] : null;
+    const direction =
+      sortDescriptor?.direction === "asc"
+        ? "asc"
+        : sortDescriptor?.direction === "desc"
+          ? "desc"
+          : SORT_DEFAULT_DIRECTIONS[nextSortKey] ?? "desc";
 
     return (
       <button
         type="button"
         className={`tv-finder__sort-button ${isActive ? "tv-finder__sort-button--active" : ""}`}
-        onClick={() => toggleSort(nextSortKey)}
+        title="Click to sort. Shift-click (or Ctrl/⌘-click) to add up to 4 sort priorities."
+        onClick={(event) =>
+          toggleSort(nextSortKey, {
+            additive: event.shiftKey || event.metaKey || event.ctrlKey
+          })
+        }
       >
         <span>{label}</span>
         <span className="tv-finder__sort-icon" aria-hidden="true">
-          {isActive ? (sortDirection === "asc" ? "^" : "v") : ""}
+          {isActive ? (
+            <span className="finder-sort__indicator">
+              <span className="finder-sort__priority">{sortIndex + 1}</span>
+              <span className="finder-sort__direction">{direction === "asc" ? "↑" : "↓"}</span>
+            </span>
+          ) : (
+            ""
+          )}
         </span>
       </button>
     );
@@ -1027,15 +2025,58 @@ export default function TradingViewStrategyWorkspace({
       <section className="insight-card tv-finder__toolbar">
         <form className="tv-finder__toolbar-form" onSubmit={handleSubmit}>
           <div className="tv-finder__query-row">
-            <label className="tv-finder__symbol-field">
-              <span>Underlying symbol</span>
-              <input
-                type="text"
-                value={symbolInput}
-                onChange={(event) => setSymbolInput(event.target.value)}
-                placeholder="SPY or NASDAQ:TSLA"
-              />
-            </label>
+            <div className="tv-finder__symbol-block">
+              <div className="tv-finder__symbol-entry">
+                <label className="tv-finder__symbol-field">
+                  <span>Underlying symbol</span>
+                  <input
+                    type="text"
+                    value={symbolInput}
+                    onChange={(event) => setSymbolInput(event.target.value)}
+                    placeholder="SPY or NASDAQ:TSLA"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="chart-toggle tv-finder__save-ticker-button"
+                  onClick={handleSaveTickerTag}
+                  disabled={!normalizedSymbolTag}
+                >
+                  Tag
+                </button>
+              </div>
+
+              {savedTickers.length ? (
+                <div className="tv-finder__saved-tickers" aria-label="Saved tickers">
+                  {savedTickers.map((ticker) => (
+                    <div key={ticker} className="tv-finder__saved-ticker">
+                      <button
+                        type="button"
+                        className={`tv-finder__saved-ticker-button ${
+                          normalizedSymbolTag === ticker ? "tv-finder__saved-ticker-button--active" : ""
+                        }`}
+                        onClick={() => handleSelectSavedTicker(ticker)}
+                        title={`Use ${ticker}`}
+                      >
+                        <span>{ticker}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="tv-finder__saved-ticker-remove"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleRemoveSavedTicker(ticker);
+                        }}
+                        aria-label={`Remove ${ticker}`}
+                        title={`Remove ${ticker}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
 
             <div className="tv-finder__toolbar-actions">
               <button type="submit" className="finder-action tv-finder__run-button" disabled={loading}>
@@ -1545,6 +2586,161 @@ export default function TradingViewStrategyWorkspace({
                 </div>
               </div>
             </details>
+
+            <details className="finder-menu tv-finder__compact-menu">
+              <summary
+                className={`finder-control tv-finder__filter-control ${
+                  normalizedVolumeRange ? "tv-finder__filter-control--active" : ""
+                }`}
+              >
+                <span>{normalizedVolumeSummary}</span>
+              </summary>
+              <div className="finder-menu__panel">
+                <div className="finder-menu__header">
+                  <strong>Opt vol (norm)</strong>
+                  <button
+                    type="button"
+                    className="finder-menu__reset"
+                    onClick={() => {
+                      setNormalizedVolumeMin("");
+                      setNormalizedVolumeMax("");
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div className="finder-menu__custom">
+                  <span className="tv-finder__manual-label">Manual setup...</span>
+                  <div className="tv-finder__range-grid">
+                    <label>
+                      <span>Min</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={normalizedVolumeMin}
+                        onChange={(event) => setNormalizedVolumeMin(event.target.value)}
+                        placeholder="0"
+                      />
+                    </label>
+                    <label>
+                      <span>Max</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={normalizedVolumeMax}
+                        onChange={(event) => setNormalizedVolumeMax(event.target.value)}
+                        placeholder="Any"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details className="finder-menu tv-finder__compact-menu">
+              <summary
+                className={`finder-control tv-finder__filter-control ${
+                  maxLossRange ? "tv-finder__filter-control--active" : ""
+                }`}
+              >
+                <span>{maxLossSummary}</span>
+              </summary>
+              <div className="finder-menu__panel">
+                <div className="finder-menu__header">
+                  <strong>Max loss</strong>
+                  <button
+                    type="button"
+                    className="finder-menu__reset"
+                    onClick={() => {
+                      setTableMaxLossMin("");
+                      setTableMaxLossMax("");
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div className="finder-menu__custom">
+                  <span className="tv-finder__manual-label">Manual setup...</span>
+                  <div className="tv-finder__range-grid">
+                    <label>
+                      <span>Min</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={tableMaxLossMin}
+                        onChange={(event) => setTableMaxLossMin(event.target.value)}
+                        placeholder="-500"
+                      />
+                    </label>
+                    <label>
+                      <span>Max</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={tableMaxLossMax}
+                        onChange={(event) => setTableMaxLossMax(event.target.value)}
+                        placeholder="-50"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details className="finder-menu tv-finder__compact-menu">
+              <summary
+                className={`finder-control tv-finder__filter-control ${
+                  midMinusTheoRange ? "tv-finder__filter-control--active" : ""
+                }`}
+              >
+                <span>{midMinusTheoSummary}</span>
+              </summary>
+              <div className="finder-menu__panel">
+                <div className="finder-menu__header">
+                  <strong>Avg B/A - Theo</strong>
+                  <button
+                    type="button"
+                    className="finder-menu__reset"
+                    onClick={() => {
+                      setMidMinusTheoMin("");
+                      setMidMinusTheoMax("");
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div className="finder-menu__custom">
+                  <span className="tv-finder__manual-label">Manual setup...</span>
+                  <div className="tv-finder__range-grid">
+                    <label>
+                      <span>Min</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={midMinusTheoMin}
+                        onChange={(event) => setMidMinusTheoMin(event.target.value)}
+                        placeholder="-1.00"
+                      />
+                    </label>
+                    <label>
+                      <span>Max</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={midMinusTheoMax}
+                        onChange={(event) => setMidMinusTheoMax(event.target.value)}
+                        placeholder="1.00"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </details>
           </div>
         </form>
 
@@ -1584,7 +2780,7 @@ export default function TradingViewStrategyWorkspace({
       <section className="insight-card screening-v2__table-card">
         <div className="section-heading">
           <span>TradingView-ranked strategies</span>
-          <span className="pill pill--ghost">{sortedRows.length}</span>
+          <span className="pill pill--ghost">{visibleRowsCountLabel}</span>
         </div>
 
         {loading && !payload ? (
@@ -1598,6 +2794,8 @@ export default function TradingViewStrategyWorkspace({
                   <th>{renderSortHeader("daysToExpiration", "Days")}</th>
                   <th>{renderSortHeader("strategyTypeLabel", "Strategy type")}</th>
                   <th>Formula</th>
+                  <th>{renderSortHeader("normalizedOptionVolume", "Opt vol (norm)")}</th>
+                  <th>{renderSortHeader("midMinusTheo", "Avg B/A - Theo")}</th>
                   <th>{renderSortHeader("maxProfit", "Max profit")}</th>
                   <th>{renderSortHeader("maxLoss", "Max loss")}</th>
                   <th>{renderSortHeader("rewardRisk", "Reward/Risk")}</th>
@@ -1637,6 +2835,12 @@ export default function TradingViewStrategyWorkspace({
                               </span>
                             ))}
                           </div>
+                        </td>
+                        <td>{formatCompactCount(row.normalizedOptionVolume)}</td>
+                        <td>
+                          <span className={getTradingViewMidMinusTheoTone(row)}>
+                            {formatCurrency(getTradingViewMidMinusTheo(row))}
+                          </span>
                         </td>
                         <td>
                           <span className={getMetricTone(row.maxProfit)}>
@@ -1730,6 +2934,35 @@ export default function TradingViewStrategyWorkspace({
                                   </div>
 
                                   <div className="detail-card__actions">
+                                    <button
+                                      type="button"
+                                      className={`chart-toggle ${strategyEditorOpen ? "chart-toggle--active" : ""}`}
+                                      onClick={() => setStrategyEditorOpen((current) => !current)}
+                                    >
+                                      {strategyEditorOpen ? "Close editor" : "Edit strategy"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`finder-action ${paperOrderSaving ? "chart-toggle--active" : ""}`}
+                                      onClick={handleCreatePaperTrade}
+                                      disabled={
+                                        !onCreatePaperOrder ||
+                                        paperOrderSaving ||
+                                        (paperExecutionRoute === "ibkr-paper" && !ibkrReady) ||
+                                        (paperExecutionRoute === "tws-paper" && !twsReady)
+                                      }
+                                    >
+                                      {paperOrderSaving ? "Saving..." : "Place order"}
+                                    </button>
+                                    {onOpenPaperTrading ? (
+                                      <button
+                                        type="button"
+                                        className="chart-toggle"
+                                        onClick={onOpenPaperTrading}
+                                      >
+                                        View holdings
+                                      </button>
+                                    ) : null}
                                     {row.pageUrl ? (
                                       <a href={row.pageUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
                                         Open TradingView screen
@@ -1737,6 +2970,355 @@ export default function TradingViewStrategyWorkspace({
                                     ) : null}
                                   </div>
                                 </div>
+
+                                {paperOrderState ? (
+                                  <div className={`refresh-feedback refresh-feedback--${paperOrderState.tone}`}>
+                                    <span>{paperOrderState.message}</span>
+                                    {paperOrderState.confirmation?.orderId ? (
+                                      <div className="refresh-feedback__actions">
+                                        <button
+                                          type="button"
+                                          className={`chart-toggle ${paperOrderSaving ? "chart-toggle--active" : ""}`}
+                                          onClick={() => handlePaperExecutionConfirmation(true)}
+                                          disabled={paperOrderSaving || !onConfirmPaperExecution}
+                                        >
+                                          {paperOrderSaving ? "Working..." : "Submit anyway"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="chart-toggle"
+                                          onClick={() => handlePaperExecutionConfirmation(false)}
+                                          disabled={paperOrderSaving || !onConfirmPaperExecution}
+                                        >
+                                          Decline
+                                        </button>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+
+                                <section className="paper-order-ticket">
+                                  <div>
+                                    <span className="brand__eyebrow">Paper-trade this setup</span>
+                                    <strong className="paper-order-ticket__title">
+                                      {row.underlyingSymbol} · {row.strategyTypeLabel}
+                                    </strong>
+                                    <p className="card-copy">
+                                      Save the current edited leg prices and contract amounts as a new paper order, or
+                                      route the option legs to your IBKR paper gateway or TWS paper session.
+                                    </p>
+                                    <div className="paper-order-ticket__status">
+                                      <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
+                                        {paperExecutionRoute === "ibkr-paper"
+                                          ? "IBKR paper route"
+                                          : paperExecutionRoute === "tws-paper"
+                                            ? "TWS paper route"
+                                            : "Local paper route"}
+                                      </span>
+                                      {paperExecutionRoute === "ibkr-paper" ? (
+                                        <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
+                                          {ibkrReady
+                                            ? `Gateway ready${ibkrStatus?.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
+                                            : "Gateway not ready"}
+                                        </span>
+                                      ) : paperExecutionRoute === "tws-paper" ? (
+                                        <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
+                                          {twsReady
+                                            ? `TWS ready${twsStatus?.selectedAccount ? ` · ${twsStatus.selectedAccount}` : ""}`
+                                            : "TWS not ready"}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    {paperExecutionRoute === "ibkr-paper" ? (
+                                      <p className="paper-order-ticket__note">
+                                        {ibkrReady
+                                          ? "HedgeHub will submit the option legs to the connected IBKR paper session and keep the local portfolio synced to broker status."
+                                          : ibkrReloginNeeded
+                                            ? (
+                                                <>
+                                                  IBKR session expired or was signed out. Re-login at{" "}
+                                                  <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
+                                                    {ibkrLoginUrl}
+                                                  </a>{" "}
+                                                  and wait a few seconds before routing this order.
+                                                </>
+                                              )
+                                            : ibkrStatus?.error || "Start the IBKR Client Portal Gateway in paper mode before routing this order."}
+                                      </p>
+                                    ) : null}
+                                    {paperExecutionRoute === "tws-paper" ? (
+                                      <p className="paper-order-ticket__note">
+                                        {twsReady
+                                          ? "HedgeHub will submit the option legs to the connected TWS paper session and keep order status synced. Update/cancel/close orders manually inside TWS."
+                                          : twsStatus?.error ||
+                                            "Connect TWS in paper mode and enable API socket clients, then enter the IP/port in the sidebar and connect."}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                  <div className="paper-order-ticket__actions">
+                                    <label>
+                                      <span>Purchase date</span>
+                                      <input
+                                        type="date"
+                                        value={paperTradeDate}
+                                        onChange={(event) => setPaperTradeDate(event.target.value)}
+                                      />
+                                    </label>
+	                                    <label>
+	                                      <span>Execution</span>
+	                                      <select
+	                                        value={paperExecutionRoute}
+	                                        onChange={(event) => setPaperExecutionRoute(event.target.value)}
+	                                      >
+	                                        <option value="local-paper">Local paper</option>
+	                                        <option value="ibkr-paper">IBKR paper</option>
+	                                        <option value="tws-paper">TWS paper</option>
+	                                      </select>
+	                                    </label>
+	                                    <label className="paper-order-ticket__quantity">
+	                                      <span>Quantity</span>
+	                                      <div className="paper-order-ticket__quantity-controls">
+	                                        {[1, 5, 10].map((preset) => (
+	                                          <button
+	                                            key={`qty-preset:${preset}`}
+	                                            type="button"
+	                                            className={`chart-toggle chart-toggle--compact ${paperComboQuantity === preset ? "chart-toggle--active" : ""}`}
+	                                            onClick={() => applyPaperComboQuantity(preset)}
+	                                            disabled={!selectedScenarioOrder}
+	                                          >
+	                                            {preset}x
+	                                          </button>
+	                                        ))}
+	                                        <input
+	                                          className="paper-order-ticket__quantity-input"
+	                                          type="number"
+	                                          min="1"
+	                                          step="1"
+	                                          value={paperComboQuantityInput}
+	                                          onChange={handlePaperComboQuantityChange}
+	                                          onBlur={handlePaperComboQuantityBlur}
+	                                        />
+	                                      </div>
+	                                    </label>
+                                    {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
+                                      <label>
+                                        <span>Order type</span>
+                                        <select
+                                          value={paperIbkrOrderType}
+                                          onChange={(event) => setPaperIbkrOrderType(event.target.value)}
+                                        >
+                                          <option value="LMT">Limit</option>
+                                          <option value="MKT">Market</option>
+                                        </select>
+                                      </label>
+                                    ) : null}
+                                    {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
+                                      <label>
+                                        <span>IBKR limit</span>
+                                        <input
+                                          type="number"
+                                          step="0.01"
+                                          value={paperIbkrLimitPrice}
+                                          onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
+                                        />
+                                      </label>
+                                    ) : null}
+                                    {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
+                                      <label>
+                                        <span>TWS limit</span>
+                                        <select
+                                          value={paperIbkrLimitPrice}
+                                          onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
+                                        >
+                                          {twsLimitPriceWindow.map((option) => (
+                                            <option key={`tws-limit:${option}`} value={option}>
+                                              {option}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                    ) : null}
+                                    {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
+                                      <label>
+                                        <span>TIF</span>
+                                        <select
+                                          value={paperIbkrTif}
+                                          onChange={(event) => setPaperIbkrTif(event.target.value)}
+                                        >
+                                          <option value="DAY">DAY</option>
+                                          <option value="GTC">GTC</option>
+                                        </select>
+                                      </label>
+                                    ) : null}
+                                    {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
+                                      <label className="paper-order-ticket__toggle">
+                                        <span>Outside RTH</span>
+                                        <span className="paper-order-ticket__toggle-control">
+                                          <input
+                                            type="checkbox"
+                                            checked={paperIbkrOutsideRth}
+                                            onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
+                                          />
+                                        </span>
+                                      </label>
+                                    ) : null}
+                                    {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
+                                      <label className="paper-order-ticket__toggle">
+                                        <span>Smart entry</span>
+                                        <span className="paper-order-ticket__toggle-control">
+                                          <input
+                                            type="checkbox"
+                                            checked={paperIbkrSmartEnabled}
+                                            onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
+                                          />
+                                        </span>
+                                      </label>
+                                    ) : null}
+                                  </div>
+                                </section>
+
+                                {strategyEditorOpen && selectedScenarioOrder ? (
+                                  <section className="strategy-editor">
+                                    <div className="strategy-editor__header">
+                                      <div>
+                                        <span className="brand__eyebrow">Strategy editor</span>
+                                        <p className="detail-chart__copy">
+                                          Adjust the selected TradingView legs before sending the setup into HedgeHub&apos;s paper book.
+                                        </p>
+                                      </div>
+                                      <div className="detail-badges">
+                                        <span className="pill pill--ghost">Manual editor</span>
+                                        <span className="pill pill--live">{selectedScenarioOrder.assetLabel}</span>
+                                      </div>
+                                    </div>
+
+                                    <div className="strategy-editor__grid">
+                                      {(selectedScenarioOrder.legs ?? []).map((leg, index) => (
+                                        <article key={leg.id} className="strategy-editor__card">
+                                          <div className="strategy-editor__card-head">
+                                            <strong>Leg {index + 1}</strong>
+                                            <span className="pill pill--ghost">{leg.contractSymbol || formatStrategyLegLabel(leg)}</span>
+                                          </div>
+
+                                          <div className="strategy-editor__row">
+                                            <label>
+                                              <span>Action</span>
+                                              <select
+                                                value={leg.action}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, { action: event.target.value })
+                                                }
+                                              >
+                                                <option value="LONG">Long</option>
+                                                <option value="SHORT">Short</option>
+                                              </select>
+                                            </label>
+
+                                            <label>
+                                              <span>Type</span>
+                                              <select
+                                                value={leg.optionType}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, { optionType: event.target.value })
+                                                }
+                                              >
+                                                <option value="call">Call</option>
+                                                <option value="put">Put</option>
+                                              </select>
+                                            </label>
+
+                                            <label>
+                                              <span>Expiry</span>
+                                              <input
+                                                type="date"
+                                                value={leg.expiry ?? ""}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, { expiry: event.target.value })
+                                                }
+                                              />
+                                            </label>
+
+                                            <label>
+                                              <span>Qty</span>
+                                              <input
+                                                type="number"
+                                                min="1"
+                                                step="1"
+                                                value={leg.quantity ?? 1}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, {
+                                                    quantity: Math.max(Number(event.target.value || 1), 1)
+                                                  })
+                                                }
+                                              />
+                                            </label>
+                                          </div>
+
+                                          <div className="strategy-editor__row">
+                                            <label>
+                                              <span>Strike</span>
+                                              <input
+                                                type="number"
+                                                step="0.01"
+                                                value={leg.strike ?? 0}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, {
+                                                    strike: Number(event.target.value || 0)
+                                                  })
+                                                }
+                                              />
+                                            </label>
+
+                                            <label>
+                                              <span>Entry</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={leg.entryPrice ?? 0}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, {
+                                                    entryPrice: Number(event.target.value || 0)
+                                                  })
+                                                }
+                                              />
+                                            </label>
+
+                                            <label>
+                                              <span>Bid</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={leg.bid ?? 0}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, {
+                                                    bid: Number(event.target.value || 0)
+                                                  })
+                                                }
+                                              />
+                                            </label>
+
+                                            <label>
+                                              <span>Ask</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                                value={leg.ask ?? 0}
+                                                onChange={(event) =>
+                                                  updateScenarioDraftLeg(leg.id, {
+                                                    ask: Number(event.target.value || 0)
+                                                  })
+                                                }
+                                              />
+                                            </label>
+                                          </div>
+                                        </article>
+                                      ))}
+                                    </div>
+                                  </section>
+                                ) : null}
 
                                 <div className="screening-v2__selected-grid">
                                   <section className="screening-v2__selected-panel">
@@ -1819,7 +3401,7 @@ export default function TradingViewStrategyWorkspace({
                                           </tr>
                                         </thead>
                                         <tbody>
-                                          {(row.legs ?? []).map((leg) => (
+                                          {(selectedScenarioOrder?.legs ?? []).map((leg) => (
                                             <tr key={`${row.id}:${leg.contractSymbol}:${leg.action}`}>
                                               <td>{leg.action}</td>
                                               <td>{leg.quantity}</td>

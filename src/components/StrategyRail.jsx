@@ -1,24 +1,111 @@
+import { useEffect, useMemo, useState } from "react";
+import { buildMarketTimerModel, buildUnderlyingMarketMonitorModels } from "../marketTimers.js";
 import LiveMonitoringPanel from "./LiveMonitoringPanel.jsx";
 
+const OPTION_SESSION_ENTRY_KEYS = new Set(["option-pre", "option-open", "option-post"]);
+const PINNED_UNDERLYING_MARKETS = [
+  {
+    source: "underlying-monitor-gold",
+    label: "Gold",
+    underlyingSymbol: "XAU-USD",
+    referenceSymbol: "COMEX:GC1!"
+  },
+  {
+    source: "underlying-monitor-oil",
+    label: "Oil",
+    underlyingSymbol: "WTI-USD",
+    referenceSymbol: "NYMEX:CL1!"
+  },
+  {
+    source: "underlying-monitor-spy-spx",
+    label: "SPY / SPX",
+    underlyingSymbol: "SPY",
+    referenceSymbol: "NYSE:SPY"
+  }
+];
+
+function getStateToneClassName(tone) {
+  if (tone === "live") {
+    return "macro-layout-diagnostics__state--live";
+  }
+
+  if (tone === "warning") {
+    return "macro-layout-diagnostics__state--retrying";
+  }
+
+  return "macro-layout-diagnostics__state--idle";
+}
+
 export default function StrategyRail({
+  sidebarId,
   activeView,
   strategies,
   selectedStrategyId,
   streamDiagnostics,
+  marketStatusPayload,
+  marketTimerContext,
   onOpenDashboard,
   onOpenSettings,
   onOpenScreening,
   onOpenPaperTrading,
+  onOpenOrderManagement,
   onSelect,
   paperPortfolio,
-  screeningSummary
+  screeningSummary,
+  isMobile = false,
+  isOpen = true,
+  onCloseMobile = null
 }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const paperSummary = paperPortfolio?.summary ?? null;
   const paperPnL = Number(paperSummary?.profitLossValue ?? 0);
   const closedPaperPnL = Number(paperSummary?.totalClosedProfitLossValue ?? 0);
+  const marketTimerModel = useMemo(
+    () => buildMarketTimerModel(marketTimerContext, marketStatusPayload, nowMs),
+    [marketStatusPayload, marketTimerContext, nowMs]
+  );
+  const optionSessionEntries = useMemo(
+    () => marketTimerModel?.entries.filter((entry) => OPTION_SESSION_ENTRY_KEYS.has(entry.key)) ?? [],
+    [marketTimerModel]
+  );
+  const marketTimerEntries = useMemo(
+    () => marketTimerModel?.entries.filter((entry) => !OPTION_SESSION_ENTRY_KEYS.has(entry.key)) ?? [],
+    [marketTimerModel]
+  );
+  const underlyingMarketMonitorModels = useMemo(
+    () => buildUnderlyingMarketMonitorModels(PINNED_UNDERLYING_MARKETS, marketStatusPayload, nowMs),
+    [marketStatusPayload, nowMs]
+  );
+  const sidebarClassName = [
+    "sidebar",
+    isMobile ? "sidebar--mobile" : "",
+    isMobile && isOpen ? "sidebar--open" : "",
+    isMobile && !isOpen ? "sidebar--hidden" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
 
   return (
-    <aside className="sidebar">
+    <aside id={sidebarId} className={sidebarClassName} aria-hidden={isMobile && !isOpen}>
+      {isMobile ? (
+        <div className="sidebar__mobile-bar">
+          <span className="brand__eyebrow">Navigation</span>
+          <button type="button" className="sidebar-close" onClick={onCloseMobile}>
+            Hide sidebar
+          </button>
+        </div>
+      ) : null}
+
       <div className="brand">
         <span className="brand__eyebrow">Hedge strategy desk</span>
         <h1>HedgeHub</h1>
@@ -35,6 +122,86 @@ export default function StrategyRail({
             className="sidebar-live-monitor"
           />
 
+          {marketTimerModel ? (
+            <div className="macro-layout-diagnostics sidebar-market-timers">
+              <div className="sidebar-market-timers__header">
+                <span className="brand__eyebrow">Market timers</span>
+                <span
+                  className={`macro-layout-diagnostics__state ${getStateToneClassName(marketTimerModel.status?.tone)}`}
+                >
+                  {marketTimerModel.status?.label ?? "Focus"}
+                </span>
+              </div>
+              <strong className="sidebar-market-timers__title">{marketTimerModel.title}</strong>
+              {marketTimerModel.subtitle ? <span className="sidebar-market-timers__subtitle">{marketTimerModel.subtitle}</span> : null}
+
+              <div className="sidebar-market-timers__list">
+                {optionSessionEntries.length ? (
+                  <div
+                    className="macro-layout-diagnostics__row sidebar-market-timers__row sidebar-market-timers__row--combined"
+                  >
+                    <span className="macro-layout-diagnostics__label sidebar-market-timers__label">Option</span>
+                    <div className="sidebar-market-timers__combined-states">
+                      {optionSessionEntries.map((entry) => (
+                        <span key={entry.key} className="sidebar-market-timers__combined-state">
+                          <span className="sidebar-market-timers__combined-label">
+                            {entry.label.replace(/^Option\s+/u, "")}
+                          </span>
+                          <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
+                            {entry.countdown}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {marketTimerEntries.map((entry) => (
+                  <div
+                    key={entry.key}
+                    className="macro-layout-diagnostics__row sidebar-market-timers__row"
+                  >
+                    <span className="macro-layout-diagnostics__label sidebar-market-timers__label">{entry.label}</span>
+                    <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
+                      {entry.countdown}
+                    </span>
+                    <span className="sidebar-market-timers__detail">{entry.detail}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {underlyingMarketMonitorModels.length ? (
+            <div className="macro-layout-diagnostics sidebar-market-timers sidebar-underlying-monitor">
+              <div className="sidebar-market-timers__header">
+                <span className="brand__eyebrow">Underlying markets</span>
+                <span className="macro-layout-diagnostics__state macro-layout-diagnostics__state--idle">
+                  Tracked
+                </span>
+              </div>
+
+              <div className="sidebar-underlying-monitor__list">
+                {underlyingMarketMonitorModels.map((market) => (
+                  <div
+                    key={market.key}
+                    className="macro-layout-diagnostics__row sidebar-underlying-monitor__row"
+                  >
+                    <span className="macro-layout-diagnostics__label sidebar-underlying-monitor__label">
+                      {market.title}
+                    </span>
+                    <span className={`macro-layout-diagnostics__state ${getStateToneClassName(market.status?.tone)}`}>
+                      {market.status?.label ?? "Closed"}
+                    </span>
+                    <span className="sidebar-underlying-monitor__detail">
+                      Open {market.open?.countdown ?? "n/a"} · Close {market.close?.countdown ?? "n/a"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <button
             type="button"
             className={`dashboard-button ${activeView === "dashboard" ? "dashboard-button--active" : ""}`}
@@ -48,6 +215,13 @@ export default function StrategyRail({
             onClick={onOpenSettings}
           >
             Strategy settings
+          </button>
+          <button
+            type="button"
+            className={`dashboard-button ${activeView === "orders" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenOrderManagement}
+          >
+            Order management
           </button>
         </div>
 

@@ -85,6 +85,13 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS delta_hedge_scanner_symbols (
+    symbol TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 const upsertStrategy = db.prepare(`
@@ -264,6 +271,24 @@ const upsertStrategyAssetMappingStatement = db.prepare(`
 const deleteStrategyAssetMappingStatement = db.prepare(`
   DELETE FROM strategy_asset_mappings
   WHERE id = ?
+`);
+
+const upsertDeltaHedgeScannerSymbolStatement = db.prepare(`
+  INSERT INTO delta_hedge_scanner_symbols (
+    symbol,
+    label
+  ) VALUES (
+    @symbol,
+    @label
+  )
+  ON CONFLICT(symbol) DO UPDATE SET
+    label = excluded.label,
+    updated_at = CURRENT_TIMESTAMP
+`);
+
+const deleteDeltaHedgeScannerSymbolStatement = db.prepare(`
+  DELETE FROM delta_hedge_scanner_symbols
+  WHERE symbol = ?
 `);
 
 export function getStrategies() {
@@ -668,6 +693,51 @@ export function upsertStrategyAssetMapping(mapping) {
 
 export function deleteStrategyAssetMapping(id) {
   return deleteStrategyAssetMappingStatement.run(id).changes > 0;
+}
+
+export function listDeltaHedgeScannerSymbols() {
+  return db
+    .prepare(
+      `
+        SELECT
+          symbol,
+          label,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM delta_hedge_scanner_symbols
+        ORDER BY updated_at DESC, symbol ASC
+      `
+    )
+    .all()
+    .map((row) => ({
+      ...row,
+      isCustom: true
+    }));
+}
+
+export function upsertDeltaHedgeScannerSymbol(symbolRecord) {
+  upsertDeltaHedgeScannerSymbolStatement.run({
+    symbol: symbolRecord.symbol,
+    label: symbolRecord.label
+  });
+
+  return db
+    .prepare(
+      `
+        SELECT
+          symbol,
+          label,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM delta_hedge_scanner_symbols
+        WHERE symbol = ?
+      `
+    )
+    .get(symbolRecord.symbol);
+}
+
+export function deleteDeltaHedgeScannerSymbol(symbol) {
+  return deleteDeltaHedgeScannerSymbolStatement.run(symbol).changes > 0;
 }
 
 export default db;

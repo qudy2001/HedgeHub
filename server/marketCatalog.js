@@ -363,6 +363,13 @@ export const sidebarStrategies = [
     description: "Use binary macro views to finance short-dated optionality."
   },
   {
+    id: "strategy-4",
+    name: "Delta Hedge Scanner",
+    status: "ready",
+    assetLabel: "AMD / NVDA / AAPL + 22",
+    description: "Rank screenshot watchlist names by ATM straddle liquidity, gamma response, and hedgeability."
+  },
+  {
     id: "strategy-tv-finder",
     name: "TradingView Finder",
     status: "ready",

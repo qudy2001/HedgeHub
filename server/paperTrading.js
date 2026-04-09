@@ -108,9 +108,17 @@ function normalizePaperOrderStatus(value) {
 }
 
 function normalizeExecutionRoute(value) {
-  return String(value ?? "local-paper").trim().toLowerCase() === "ibkr-paper"
-    ? "ibkr-paper"
-    : "local-paper";
+  const normalized = String(value ?? "local-paper").trim().toLowerCase();
+
+  if (normalized === "ibkr-paper") {
+    return "ibkr-paper";
+  }
+
+  if (normalized === "tws-paper") {
+    return "tws-paper";
+  }
+
+  return "local-paper";
 }
 
 function normalizeExecutionPurpose(value) {
@@ -122,6 +130,17 @@ function normalizeExecutionStatus(value, fallback = "local") {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "_");
+}
+
+function normalizeSmartExecutionStatus(value, fallback = "disabled") {
+  const normalized = String(value ?? fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+
+  return new Set(["disabled", "watching", "pending_replace", "paused", "completed"]).has(normalized)
+    ? normalized
+    : fallback;
 }
 
 function sanitizeExecutionLeg(leg, index) {
@@ -140,6 +159,78 @@ function sanitizeExecutionLeg(leg, index) {
     contractMultiplier: Math.max(toNumber(leg?.contractMultiplier, 100) ?? 100, 1),
     brokerConid: String(leg?.brokerConid ?? ""),
     localSymbol: String(leg?.localSymbol ?? "")
+  };
+}
+
+function sanitizeStringList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function sanitizeSmartExecutionPayload(source, defaults = {}, { limitPrice = null } = {}) {
+  const hasSourceObject = source && typeof source === "object";
+  const hasDefaultObject = defaults && typeof defaults === "object";
+
+  if (!hasSourceObject && !hasDefaultObject) {
+    return {
+      enabled: false,
+      status: "disabled",
+      mode: "balanced",
+      anchorLimitPrice: limitPrice == null ? null : toNumber(limitPrice, null),
+      anchorWidthPrice: null,
+      guardrailLimitPrice: null,
+      thresholdPrice: null,
+      minTick: 0.05,
+      maxReplaceCount: 3,
+      replaceCount: 0,
+      cooldownMs: 30000,
+      pendingLimitPrice: null,
+      lastMarketPrice: null,
+      lastSuggestedLimitPrice: null,
+      lastTriggeredAt: "",
+      lastDecision: "",
+      lastDecisionReason: ""
+    };
+  }
+
+  const mergedSource = {
+    ...(hasDefaultObject ? defaults : {}),
+    ...(hasSourceObject ? source : {})
+  };
+  const enabled = mergedSource.enabled === true;
+
+  return {
+    enabled,
+    status: normalizeSmartExecutionStatus(mergedSource.status, enabled ? "watching" : "disabled"),
+    mode: "balanced",
+    anchorLimitPrice:
+      mergedSource.anchorLimitPrice == null
+        ? limitPrice == null
+          ? null
+          : toNumber(limitPrice, null)
+        : toNumber(mergedSource.anchorLimitPrice, null),
+    anchorWidthPrice:
+      mergedSource.anchorWidthPrice == null ? null : Math.max(toNumber(mergedSource.anchorWidthPrice, null) ?? 0, 0),
+    guardrailLimitPrice:
+      mergedSource.guardrailLimitPrice == null ? null : toNumber(mergedSource.guardrailLimitPrice, null),
+    thresholdPrice:
+      mergedSource.thresholdPrice == null ? null : Math.max(toNumber(mergedSource.thresholdPrice, null) ?? 0, 0),
+    minTick: Math.max(toNumber(mergedSource.minTick, 0.05) ?? 0.05, 0.01),
+    maxReplaceCount: Math.max(Math.round(toNumber(mergedSource.maxReplaceCount, 3) ?? 3), 0),
+    replaceCount: Math.max(Math.round(toNumber(mergedSource.replaceCount, 0) ?? 0), 0),
+    cooldownMs: Math.max(Math.round(toNumber(mergedSource.cooldownMs, 30000) ?? 30000), 5000),
+    pendingLimitPrice:
+      mergedSource.pendingLimitPrice == null ? null : toNumber(mergedSource.pendingLimitPrice, null),
+    lastMarketPrice:
+      mergedSource.lastMarketPrice == null ? null : toNumber(mergedSource.lastMarketPrice, null),
+    lastSuggestedLimitPrice:
+      mergedSource.lastSuggestedLimitPrice == null ? null : toNumber(mergedSource.lastSuggestedLimitPrice, null),
+    lastTriggeredAt: normalizeTimestamp(mergedSource.lastTriggeredAt ?? ""),
+    lastDecision: String(mergedSource.lastDecision ?? ""),
+    lastDecisionReason: String(mergedSource.lastDecisionReason ?? "")
   };
 }
 
@@ -177,6 +268,10 @@ function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, pu
           cancelledAt: "",
           lastError: "",
           lastWarning: "",
+          warningMessages: [],
+          pendingReplyId: "",
+          pendingReplyMessages: [],
+          smart: sanitizeSmartExecutionPayload(null, null),
           requestedLegs: []
         };
   }
@@ -192,14 +287,18 @@ function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, pu
     : Array.isArray(mergedSource.legs)
       ? mergedSource.legs
       : [];
+  const warningMessages = sanitizeStringList(mergedSource.warningMessages);
+  const pendingReplyMessages = sanitizeStringList(mergedSource.pendingReplyMessages);
+  const normalizedLimitPrice =
+    mergedSource.limitPrice == null ? null : toNumber(mergedSource.limitPrice, null);
 
   return {
     route,
-    broker: route === "ibkr-paper" ? "ibkr" : "",
+    broker: route === "ibkr-paper" ? "ibkr" : route === "tws-paper" ? "tws" : "",
     purpose: normalizedPurpose,
     status: normalizeExecutionStatus(
       mergedSource.status,
-      route === "ibkr-paper" ? "pending_submit" : "local"
+      route === "ibkr-paper" || route === "tws-paper" ? "pending_submit" : "local"
     ),
     statusText: String(
       mergedSource.statusText ??
@@ -207,7 +306,11 @@ function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, pu
           ? normalizedPurpose === "exit"
             ? "IBKR exit pending"
             : "IBKR entry pending"
-          : "Local paper order")
+          : route === "tws-paper"
+            ? normalizedPurpose === "exit"
+              ? "TWS exit pending"
+              : "TWS entry pending"
+            : "Local paper order")
     ),
     accountId: String(mergedSource.accountId ?? ""),
     accountAlias: String(mergedSource.accountAlias ?? ""),
@@ -217,8 +320,7 @@ function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, pu
     orderType: String(mergedSource.orderType ?? "LMT").trim().toUpperCase() === "MKT" ? "MKT" : "LMT",
     tif: String(mergedSource.tif ?? "DAY").trim().toUpperCase() === "GTC" ? "GTC" : "DAY",
     outsideRth: mergedSource.outsideRth === true,
-    limitPrice:
-      mergedSource.limitPrice == null ? null : toNumber(mergedSource.limitPrice, null),
+    limitPrice: normalizedLimitPrice,
     avgFillPrice: mergedSource.avgFillPrice == null ? null : toNumber(mergedSource.avgFillPrice, null),
     combo: mergedSource.combo === true,
     totalQuantity: toNumber(mergedSource.totalQuantity, null),
@@ -230,7 +332,13 @@ function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, pu
     filledAt: normalizeTimestamp(mergedSource.filledAt ?? ""),
     cancelledAt: normalizeTimestamp(mergedSource.cancelledAt ?? ""),
     lastError: String(mergedSource.lastError ?? ""),
-    lastWarning: String(mergedSource.lastWarning ?? ""),
+    lastWarning: String(mergedSource.lastWarning ?? warningMessages.join(" | ")),
+    warningMessages,
+    pendingReplyId: String(mergedSource.pendingReplyId ?? ""),
+    pendingReplyMessages,
+    smart: sanitizeSmartExecutionPayload(mergedSource.smart, hasDefaultObject ? defaults.smart : null, {
+      limitPrice: normalizedLimitPrice
+    }),
     requestedLegs: requestedLegsInput.map(sanitizeExecutionLeg)
   };
 }
@@ -638,6 +746,12 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
     strike: kind === "option" ? toNumber(leg?.strike, 0) ?? 0 : null,
     contractSymbol: kind === "option" ? String(leg?.contractSymbol ?? "") : "",
     rootSymbol: kind === "option" ? String(leg?.rootSymbol ?? proxySymbol ?? "") : "",
+    bid: kind === "option" ? toNumber(leg?.bid, null) : null,
+    ask: kind === "option" ? toNumber(leg?.ask, null) : null,
+    bidSize: kind === "option" ? toNumber(leg?.bidSize, null) : null,
+    askSize: kind === "option" ? toNumber(leg?.askSize, null) : null,
+    volume: kind === "option" ? toNumber(leg?.volume, null) : null,
+    openInterest: kind === "option" ? toNumber(leg?.openInterest, null) : null,
     brokerConid: kind === "option" ? String(leg?.brokerConid ?? "") : "",
     localSymbol: kind === "option" ? String(leg?.localSymbol ?? "") : "",
     impliedVolatility: kind === "option" ? normalizeVolatility(leg?.impliedVolatility, 0.24) : null,
@@ -646,6 +760,8 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
     isLive: leg?.isLive === true,
     polymarketMarketId: kind === "binary" ? String(leg?.polymarketMarketId ?? "") : "",
     outcome: kind === "binary" ? (String(leg?.outcome ?? "YES").toUpperCase() === "NO" ? "NO" : "YES") : null,
+    marketVolume: kind === "binary" ? toNumber(leg?.marketVolume, null) : null,
+    marketLiquidity: kind === "binary" ? toNumber(leg?.marketLiquidity, null) : null,
     closedPrice,
     closedExposure:
       orderStatus === "closed"
@@ -1165,6 +1281,10 @@ export function buildPaperPortfolio({
           ...leg,
           quantity,
           currentPrice: markPrice,
+          marketVolume:
+            toNumber(liveMarket?.volume, toNumber(leg.marketVolume, null)),
+          marketLiquidity:
+            toNumber(liveMarket?.liquidity, toNumber(leg.marketLiquidity, null)),
           entryExposure,
           currentExposure,
           netEntryValue: direction * (toNumber(leg.entryPrice, 0) ?? 0) * quantity,
@@ -1210,6 +1330,12 @@ export function buildPaperPortfolio({
         ...leg,
         quantity,
         contractUnits,
+        bid: toNumber(liveOption?.bid, toNumber(leg.bid, null)),
+        ask: toNumber(liveOption?.ask, toNumber(leg.ask, null)),
+        bidSize: toNumber(liveOption?.bidSize, toNumber(leg.bidSize, null)),
+        askSize: toNumber(liveOption?.askSize, toNumber(leg.askSize, null)),
+        volume: toNumber(liveOption?.volume, toNumber(leg.volume, null)),
+        openInterest: toNumber(liveOption?.openInterest, toNumber(leg.openInterest, null)),
         currentPrice: markPrice,
         entryExposure,
         currentExposure,

@@ -2,6 +2,7 @@ import {
   defaultStrategyConfig,
   strategyScreenerV2AssetUniverse as baseStrategyScreenerV2AssetUniverse
 } from "./marketCatalog.js";
+import { summarizeOptionStrategyLiquidity } from "./liquidityMetrics.js";
 import { pickOptionReferencePrice } from "./optionPricing.js";
 import { hasPublicPolymarketEvent, isTradablePolymarketMarket } from "./providers/polymarket.js";
 import { parseTargetFromQuestion } from "./strategyEngine.js";
@@ -493,6 +494,9 @@ function evaluatePosition({
     estimateOptionExposure(optionLegs, currentSpot),
     1
   );
+  const optionLiquidity = summarizeOptionStrategyLiquidity(optionLegs, {
+    side: "entry"
+  });
   const hedgeQualityScore = (() => {
     if (eventScenario.total >= 0 && failScenario.total >= 0) {
       return 100;
@@ -581,6 +585,9 @@ function evaluatePosition({
     strategyCloseDate: [eventDate, optionLegs[0]?.expiration ?? ""].filter(Boolean).sort()[0] ?? eventDate,
     daysToEvent: daysUntil(eventDate),
     daysToExpiry: daysUntil(optionLegs[0]?.expiration ?? eventDate),
+    polymarketVolume: formatNumber(Number(market.volume ?? 0), 0),
+    normalizedOptionVolume: formatNumber(optionLiquidity.normalizedVolume, 0),
+    normalizedOptionOpenInterest: formatNumber(optionLiquidity.normalizedOpenInterest, 0),
     settlementType,
     exerciseStyle,
     polymarketProbability: formatNumber(polymarketProbability * 100, 2),
@@ -648,12 +655,19 @@ function calculateExitLiquidityScore(optionContracts) {
   }
 
   const averageDepth = optionContracts.reduce((sum, contract) => sum + Number(contract.depthLevels ?? 0), 0) / optionContracts.length;
-  const averageOpenInterest =
-    optionContracts.reduce((sum, contract) => sum + Number(contract.openInterest ?? 0), 0) / optionContracts.length;
-  const averageVolume = optionContracts.reduce((sum, contract) => sum + Number(contract.volume ?? 0), 0) / optionContracts.length;
+  const optionLiquidity = summarizeOptionStrategyLiquidity(optionContracts, {
+    side: "exit"
+  });
   const averageSpread = optionContracts.reduce((sum, contract) => sum + Number(contract.spreadPct ?? 0), 0) / optionContracts.length;
 
-  return clamp(averageDepth * 18 + averageVolume / 20 + averageOpenInterest / 40 - averageSpread * 4, 0, 100);
+  return clamp(
+    averageDepth * 18 +
+      optionLiquidity.normalizedVolume / 20 +
+      optionLiquidity.normalizedOpenInterest / 40 -
+      averageSpread * 4,
+    0,
+    100
+  );
 }
 
 function hasPinRisk(contracts, currentSpot) {
@@ -717,11 +731,12 @@ function buildStrategyA({
     const polymarketLeg = {
       side: "YES",
       entryPrice: polymarketProbability,
-      quantity: Math.max(1, Math.round((defaultStrategyConfig.yesLeg?.allocation ?? 1000) / polymarketProbability))
+      quantity: Math.max(1, Math.round((defaultStrategyConfig.yesLeg?.allocation ?? 1000) / polymarketProbability)),
+      volume: Number(market.volume ?? 0)
     };
     const optionLegs = [buildOptionLeg(longPut, "LONG", quantity), buildOptionLeg(shortPut, "SHORT", quantity)];
     const executionRiskScore = calculateExecutionRisk([longPut, shortPut]);
-    const exitLiquidityScore = calculateExitLiquidityScore([longPut, shortPut]);
+    const exitLiquidityScore = calculateExitLiquidityScore(optionLegs);
 
     return evaluatePosition({
       name: "Strategy A",
@@ -790,11 +805,12 @@ function buildStrategyB({
     const polymarketLeg = {
       side: "NO",
       entryPrice: polymarketNoPrice,
-      quantity: Math.max(1, Math.round((defaultStrategyConfig.yesLeg?.allocation ?? 1000) / polymarketNoPrice))
+      quantity: Math.max(1, Math.round((defaultStrategyConfig.yesLeg?.allocation ?? 1000) / polymarketNoPrice)),
+      volume: Number(market.volume ?? 0)
     };
     const optionLegs = [buildOptionLeg(longCall, "LONG", quantity), buildOptionLeg(shortCall, "SHORT", quantity)];
     const executionRiskScore = calculateExecutionRisk([longCall, shortCall]);
-    const exitLiquidityScore = calculateExitLiquidityScore([longCall, shortCall]);
+    const exitLiquidityScore = calculateExitLiquidityScore(optionLegs);
 
     return evaluatePosition({
       name: "Strategy B",
@@ -875,7 +891,8 @@ function buildStrategyC({
   const polymarketLeg = {
     side: "YES",
     entryPrice: polymarketProbability,
-    quantity: Math.max(1, Math.round((defaultStrategyConfig.yesLeg?.allocation ?? 500) / polymarketProbability))
+    quantity: Math.max(1, Math.round((defaultStrategyConfig.yesLeg?.allocation ?? 500) / polymarketProbability)),
+    volume: Number(market.volume ?? 0)
   };
   const position = chooseBestQuantity((quantity) => {
     const optionLegs = [
@@ -887,7 +904,7 @@ function buildStrategyC({
     ];
     const contracts = [shortPut, shortCall, ...(useIronCondor ? [longPutWing, longCallWing] : [])];
     const executionRiskScore = calculateExecutionRisk(contracts);
-    const exitLiquidityScore = calculateExitLiquidityScore(contracts);
+    const exitLiquidityScore = calculateExitLiquidityScore(optionLegs);
 
     return evaluatePosition({
       name: "Strategy C",
@@ -927,6 +944,7 @@ export function buildStrategyScreenerV2({
   const rows = [];
   const assumptions = [
     "Polymarket event liquidity uses a minimum volume threshold of 1000.",
+    "Multi-leg option liquidity rollups use a harmonic mean, so one weak contract can drag the normalized reading down instead of being hidden by stronger legs.",
     "Depth is estimated conservatively from displayed quote size, volume, and open interest because full order-book levels are not available in the live snapshot.",
     "Assignment risk is treated as elevated for physical/American short legs that are already in the money at the current spot.",
     "Expected value is weighted by the midpoint of Polymarket and options-implied probabilities to avoid assuming either market is fully correct.",

@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CompanyEventsPanel from "./components/CompanyEventsPanel.jsx";
+import DeltaHedgeScannerWorkspace from "./components/DeltaHedgeScannerWorkspace.jsx";
 import EconomicCalendarPanel from "./components/EconomicCalendarPanel.jsx";
+import IbkrOrderManagementWorkspace from "./components/IbkrOrderManagementWorkspace.jsx";
 import MacroHeatmapDashboard from "./components/MacroHeatmapDashboard.jsx";
 import PaperTradingWorkspace from "./components/PaperTradingWorkspace.jsx";
 import StrategyFinderWorkspace from "./components/StrategyFinderWorkspace.jsx";
@@ -10,6 +12,7 @@ import StrategyScreeningWorkspace from "./components/StrategyScreeningWorkspace.
 import TradingViewStrategyWorkspace from "./components/TradingViewStrategyWorkspace.jsx";
 import TradingViewWidget from "./components/TradingViewWidget.jsx";
 import VolCrushEarningsWorkspace from "./components/VolCrushEarningsWorkspace.jsx";
+import { createMarketTimerContext } from "./marketTimers.js";
 import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
 
 function readRoute() {
@@ -19,6 +22,13 @@ function readRoute() {
   if (pathname === "/paper-trading") {
     return {
       activeView: "paper",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
+  if (pathname === "/order-management") {
+    return {
+      activeView: "orders",
       selectedStrategyId: "strategy-1"
     };
   }
@@ -55,6 +65,10 @@ function buildPath(activeView, strategyId) {
     return "/paper-trading";
   }
 
+  if (activeView === "orders") {
+    return "/order-management";
+  }
+
   if (activeView === "screening") {
     return "/screening";
   }
@@ -84,6 +98,15 @@ function isTimestampStale(timestamp, maxAgeMs) {
 }
 
 const ROUTE_REFRESH_STALE_MS = 6 * 60 * 1000;
+const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 900px)";
+
+function matchesMobileSidebarViewport() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+
+  return window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY).matches;
+}
 
 function buildPaperPortfolioPreview(paperPortfolio) {
   if (!paperPortfolio) {
@@ -96,17 +119,54 @@ function buildPaperPortfolioPreview(paperPortfolio) {
   };
 }
 
+function buildFallbackMarketTimerContext(strategyPayload) {
+  const preferredFinderRow =
+    strategyPayload?.primaryStrategy?.finder?.rows?.find(
+      (row) => row?.assetLabel && (row?.optionExpiry || row?.marketContext?.proxySymbol)
+    ) ?? null;
+
+  if (preferredFinderRow) {
+    return createMarketTimerContext({
+      source: "fallback-finder",
+      label: preferredFinderRow.assetLabel,
+      optionSymbol: preferredFinderRow.marketContext?.proxySymbol ?? "",
+      underlyingSymbol: preferredFinderRow.marketContext?.underlyingSymbol ?? "",
+      referenceSymbol: preferredFinderRow.optionReference ?? "",
+      optionExpiries: [preferredFinderRow.optionExpiry]
+    });
+  }
+
+  const preferredAsset =
+    strategyPayload?.strategySettings?.assets?.find((asset) => asset?.label && asset?.optionSymbol) ?? null;
+
+  if (preferredAsset) {
+    return createMarketTimerContext({
+      source: "fallback-settings",
+      label: preferredAsset.label,
+      optionSymbol: preferredAsset.optionSymbol,
+      underlyingSymbol: preferredAsset.underlyingSymbol,
+      referenceSymbol: preferredAsset.referenceSymbol
+    });
+  }
+
+  return null;
+}
+
 export default function App() {
   const initialRoute = readRoute();
   const [theme, setTheme] = useState(() => getInitialTheme());
+  const [isMobileViewport, setIsMobileViewport] = useState(() => matchesMobileSidebarViewport());
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => !matchesMobileSidebarViewport());
   const [dashboard, setDashboard] = useState(null);
   const [streamDiagnostics, setStreamDiagnostics] = useState(null);
+  const [marketStatusPayload, setMarketStatusPayload] = useState(null);
   const [strategyPayload, setStrategyPayload] = useState(null);
   const [paperPortfolioPreview, setPaperPortfolioPreview] = useState(null);
   const [paperPortfolio, setPaperPortfolio] = useState(null);
   const [paperPortfolioLastUpdated, setPaperPortfolioLastUpdated] = useState(null);
   const [activeView, setActiveView] = useState(initialRoute.activeView);
   const [selectedStrategyId, setSelectedStrategyId] = useState(initialRoute.selectedStrategyId);
+  const [marketTimerContext, setMarketTimerContext] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState(null);
@@ -170,11 +230,15 @@ export default function App() {
       setSelectedStrategyId(strategyId);
     }
 
+    if (isMobileViewport) {
+      setIsSidebarOpen(false);
+    }
+
     const nextPath = buildPath(nextView, strategyId);
     if (window.location.pathname !== nextPath) {
       window.history.pushState({ activeView: nextView, strategyId }, "", nextPath);
     }
-  }, [selectedStrategyId]);
+  }, [isMobileViewport, selectedStrategyId]);
 
   const runStrategyRefresh = useCallback(async ({ announceStart = true } = {}) => {
     setRefreshing(true);
@@ -234,13 +298,33 @@ export default function App() {
       },
       ...options
     });
-    const payload = await response.json().catch(() => null);
+    let payload = null;
+    let rawBody = "";
+
+    try {
+      rawBody = await response.text();
+    } catch (_error) {
+      rawBody = "";
+    }
+
+    if (rawBody) {
+      try {
+        payload = JSON.parse(rawBody);
+      } catch (_error) {
+        payload = null;
+      }
+    }
 
     if (!response.ok) {
       if (payload?.paperPortfolio) {
         applyPaperPortfolioUpdate(payload.paperPortfolio, new Date().toISOString());
       }
-      throw new Error(payload?.error || "Paper-trading request failed");
+      const errorMessage =
+        payload?.error ||
+        payload?.message ||
+        (rawBody && typeof rawBody === "string" ? rawBody.trim() : "") ||
+        `Paper-trading request failed (${response.status})`;
+      throw new Error(errorMessage);
     }
 
     if (payload?.paperPortfolio) {
@@ -288,6 +372,13 @@ export default function App() {
 
   const handleExecutePaperOrder = useCallback((orderId, payload = {}) => {
     return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/execute`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }, [mutatePaperOrders]);
+
+  const handleConfirmPaperExecution = useCallback((orderId, payload = {}) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/confirm-execution`, {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -355,6 +446,58 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    const mediaQuery = window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY);
+
+    function handleViewportChange(event) {
+      setIsMobileViewport(event.matches);
+      setIsSidebarOpen(!event.matches);
+    }
+
+    handleViewportChange(mediaQuery);
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleViewportChange);
+      return () => {
+        mediaQuery.removeEventListener("change", handleViewportChange);
+      };
+    }
+
+    mediaQuery.addListener(handleViewportChange);
+    return () => {
+      mediaQuery.removeListener(handleViewportChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+
+    if (isMobileViewport && isSidebarOpen) {
+      document.body.style.overflow = "hidden";
+    }
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isMobileViewport, isSidebarOpen]);
+
+  useEffect(() => {
+    if (!(isMobileViewport && isSidebarOpen)) {
+      return undefined;
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setIsSidebarOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isMobileViewport, isSidebarOpen]);
+
+  useEffect(() => {
     let isActive = true;
 
     async function load() {
@@ -416,6 +559,37 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let isActive = true;
+
+    async function loadMarketStatus() {
+      try {
+        const response = await fetch("/api/market-status");
+
+        if (!response.ok) {
+          throw new Error(`Market status request failed with ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (isActive) {
+          setMarketStatusPayload(payload);
+        }
+      } catch (_error) {
+        // Keep the last known market schedule visible if the lightweight Polygon poll fails.
+      }
+    }
+
+    void loadMarketStatus();
+    const interval = window.setInterval(() => {
+      void loadMarketStatus();
+    }, 60_000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
     if (loading) {
       return;
     }
@@ -441,7 +615,7 @@ export default function App() {
   }, [activeView, dashboard?.lastUpdated, loading, runStrategyRefresh, selectedStrategyId]);
 
   useEffect(() => {
-    if (loading || activeView !== "paper") {
+    if (loading || !(activeView === "paper" || activeView === "orders")) {
       return;
     }
 
@@ -474,10 +648,18 @@ export default function App() {
   }, [activeView, applyPaperPortfolioUpdate, fetchPaperPortfolio, loading, paperPortfolio]);
 
   useEffect(() => {
+    setMarketTimerContext(null);
+  }, [activeView, selectedStrategyId]);
+
+  useEffect(() => {
     function handlePopState() {
       const nextRoute = readRoute();
       setActiveView(nextRoute.activeView);
       setSelectedStrategyId(nextRoute.selectedStrategyId);
+
+      if (matchesMobileSidebarViewport()) {
+        setIsSidebarOpen(false);
+      }
     }
 
     window.addEventListener("popstate", handlePopState);
@@ -485,6 +667,11 @@ export default function App() {
       window.removeEventListener("popstate", handlePopState);
     };
   }, []);
+
+  const effectiveMarketTimerContext = useMemo(
+    () => marketTimerContext ?? buildFallbackMarketTimerContext(strategyPayload),
+    [marketTimerContext, strategyPayload]
+  );
 
   if (loading) {
     return <div className="app-state">Loading HedgeHub…</div>;
@@ -504,11 +691,17 @@ export default function App() {
   const showScreening = activeView === "screening";
   const showStrategyFinder = activeView === "strategy" && selectedStrategyId === "strategy-1";
   const showVolCrushEarnings = activeView === "strategy" && selectedStrategyId === "strategy-2";
+  const showDeltaHedgeScanner = activeView === "strategy" && selectedStrategyId === "strategy-4";
   const showTradingViewStrategyFinder =
     activeView === "strategy" && selectedStrategyId === "strategy-tv-finder";
   const showPlannedStrategy =
-    activeView === "strategy" && !showStrategyFinder && !showVolCrushEarnings && !showTradingViewStrategyFinder;
+    activeView === "strategy" &&
+    !showStrategyFinder &&
+    !showVolCrushEarnings &&
+    !showDeltaHedgeScanner &&
+    !showTradingViewStrategyFinder;
   const showPaperTrading = activeView === "paper";
+  const showOrderManagement = activeView === "orders";
   const nextThemeLabel = theme === "dark" ? "Light mode" : "Dark mode";
 
   return (
@@ -525,6 +718,17 @@ export default function App() {
 
       <div className="app-shell">
         <div className="app-toolbar">
+          {isMobileViewport ? (
+            <button
+              type="button"
+              className={`sidebar-toggle ${isSidebarOpen ? "sidebar-toggle--active" : ""}`}
+              aria-controls="app-sidebar"
+              aria-expanded={isSidebarOpen}
+              onClick={() => setIsSidebarOpen((current) => !current)}
+            >
+              {isSidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="theme-toggle"
@@ -535,19 +739,35 @@ export default function App() {
           </button>
         </div>
 
+        {isMobileViewport && isSidebarOpen ? (
+          <button
+            type="button"
+            className="app-sidebar-backdrop"
+            aria-label="Hide sidebar"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+        ) : null}
+
         <div className="app-grid">
           <StrategyRail
+            sidebarId="app-sidebar"
             activeView={activeView}
             strategies={strategies}
             selectedStrategyId={selectedStrategyId}
             streamDiagnostics={streamDiagnostics}
+            marketStatusPayload={marketStatusPayload}
+            marketTimerContext={effectiveMarketTimerContext}
             onOpenDashboard={() => navigateTo("dashboard")}
             onOpenSettings={() => navigateTo("settings")}
             onOpenScreening={() => navigateTo("screening")}
             onOpenPaperTrading={() => navigateTo("paper")}
+            onOpenOrderManagement={() => navigateTo("orders")}
             onSelect={(strategyId) => navigateTo("strategy", strategyId)}
-            paperPortfolio={paperPortfolioPreview}
+            paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
             screeningSummary={v2Screener?.summary ?? null}
+            isMobile={isMobileViewport}
+            isOpen={!isMobileViewport || isSidebarOpen}
+            onCloseMobile={() => setIsSidebarOpen(false)}
           />
 
           {showPaperTrading ? (
@@ -559,9 +779,22 @@ export default function App() {
               onDeletePaperOrder={handleDeletePaperOrder}
               onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
               onExecutePaperOrder={handleExecutePaperOrder}
+              onConfirmPaperExecution={handleConfirmPaperExecution}
               onSyncPaperExecution={handleSyncPaperExecution}
               onCancelPaperExecution={handleCancelPaperExecution}
               theme={theme}
+            />
+          ) : showOrderManagement ? (
+            <IbkrOrderManagementWorkspace
+              paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
+              lastUpdated={paperPortfolioLastUpdated ?? strategyPayload?.lastUpdated ?? null}
+              onUpdatePaperOrder={handleUpdatePaperOrder}
+              onExecutePaperOrder={handleExecutePaperOrder}
+              onConfirmPaperExecution={handleConfirmPaperExecution}
+              onSyncPaperExecution={handleSyncPaperExecution}
+              onCancelPaperExecution={handleCancelPaperExecution}
+              onOpenStrategy={(strategyId) => navigateTo("strategy", strategyId)}
+              onOpenPaperTrading={() => navigateTo("paper")}
             />
           ) : showScreening ? (
             <StrategyScreeningWorkspace
@@ -569,6 +802,7 @@ export default function App() {
               onManualRefresh={handleManualRefresh}
               refreshing={refreshing}
               refreshNotice={refreshNotice}
+              onMarketTimerContextChange={setMarketTimerContext}
               theme={theme}
             />
           ) : showSettings ? (
@@ -586,7 +820,9 @@ export default function App() {
               refreshNotice={refreshNotice}
               paperPortfolio={strategyPaperContext}
               onCreatePaperOrder={handleCreatePaperOrder}
+              onConfirmPaperExecution={handleConfirmPaperExecution}
               onOpenPaperTrading={() => navigateTo("paper")}
+              onMarketTimerContextChange={setMarketTimerContext}
               theme={theme}
             />
           ) : showVolCrushEarnings ? (
@@ -594,11 +830,23 @@ export default function App() {
               strategyDefinition={selectedStrategy}
               onCreatePaperOrder={handleCreatePaperOrder}
               onOpenPaperTrading={() => navigateTo("paper")}
+              onMarketTimerContextChange={setMarketTimerContext}
+              theme={theme}
+            />
+          ) : showDeltaHedgeScanner ? (
+            <DeltaHedgeScannerWorkspace
+              strategyDefinition={selectedStrategy}
+              onMarketTimerContextChange={setMarketTimerContext}
               theme={theme}
             />
           ) : showTradingViewStrategyFinder ? (
             <TradingViewStrategyWorkspace
               strategyDefinition={selectedStrategy}
+              paperPortfolio={strategyPaperContext}
+              onCreatePaperOrder={handleCreatePaperOrder}
+              onConfirmPaperExecution={handleConfirmPaperExecution}
+              onOpenPaperTrading={() => navigateTo("paper")}
+              onMarketTimerContextChange={setMarketTimerContext}
               theme={theme}
             />
           ) : showPlannedStrategy ? (

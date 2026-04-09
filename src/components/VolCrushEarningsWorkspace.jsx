@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 
 function formatCurrency(value) {
@@ -33,6 +34,17 @@ function toOptionalNumber(value, fallback = null) {
 
   const numericValue = Number(value);
   return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function getQuoteQualityTone(quality) {
+  const normalized = String(quality ?? "").trim().toLowerCase();
+  if (normalized.includes("nbbo")) {
+    return "live";
+  }
+  if (normalized.includes("snapshot")) {
+    return "mapped";
+  }
+  return "seed";
 }
 
 function compareRows(left, right, sortKey, sortDirection) {
@@ -128,10 +140,13 @@ const columns = [
   { key: "quoteQuality", label: "Quote quality" }
 ];
 
+const MAX_SORT_PRIORITIES = 4;
+
 export default function VolCrushEarningsWorkspace({
   strategyDefinition,
   onCreatePaperOrder = null,
   onOpenPaperTrading = null,
+  onMarketTimerContextChange = null,
   theme = "dark"
 }) {
   const [payload, setPayload] = useState(null);
@@ -144,8 +159,7 @@ export default function VolCrushEarningsWorkspace({
   const [maxDaysToEvent, setMaxDaysToEvent] = useState("14");
   const [minLiquidity, setMinLiquidity] = useState("");
   const [maxSpread, setMaxSpread] = useState("");
-  const [sortKey, setSortKey] = useState("compositeScore");
-  const [sortDirection, setSortDirection] = useState("desc");
+  const [sortState, setSortState] = useState([{ key: "compositeScore", direction: "desc" }]);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
   const [paperOrderState, setPaperOrderState] = useState(null);
 
@@ -216,8 +230,23 @@ export default function VolCrushEarningsWorkspace({
   }, [maxDaysToEvent, maxSpread, minLiquidity, payload?.rows, selectedQuoteQualities, selectedSessions]);
 
   const sortedRows = useMemo(
-    () => [...filteredRows].sort((left, right) => compareRows(left, right, sortKey, sortDirection)),
-    [filteredRows, sortDirection, sortKey]
+    () =>
+      [...filteredRows].sort((left, right) => {
+        for (const sortDescriptor of sortState) {
+          if (!sortDescriptor?.key) {
+            continue;
+          }
+
+          const direction = sortDescriptor.direction === "asc" ? "asc" : "desc";
+          const comparedValue = compareRows(left, right, sortDescriptor.key, direction);
+          if (comparedValue !== 0) {
+            return comparedValue;
+          }
+        }
+
+        return compareRows(left, right, "id", "asc");
+      }),
+    [filteredRows, sortState]
   );
 
   useEffect(() => {
@@ -236,6 +265,36 @@ export default function VolCrushEarningsWorkspace({
     () => buildScenarioOrderFromVolCrushRow(selectedRow, payload?.generatedAt),
     [payload?.generatedAt, selectedRow]
   );
+  const marketTimerContext = useMemo(() => {
+    if (!selectedRow) {
+      return null;
+    }
+
+    return createMarketTimerContext({
+      source: "vol-crush",
+      label: selectedRow.symbol,
+      optionSymbol: selectedRow.optionLegs?.[0]?.rootSymbol ?? selectedRow.symbol,
+      underlyingSymbol: selectedRow.marketContext?.underlyingSymbol ?? selectedRow.symbol,
+      referenceSymbol: selectedRow.symbol,
+      optionExpiries: [
+        selectedRow.expiration,
+        ...(selectedRow.optionLegs ?? []).map((leg) => leg.expiration)
+      ],
+      exerciseStyle: "american",
+      settlementType: "physical"
+    });
+  }, [selectedRow]);
+
+  useEffect(() => {
+    if (!onMarketTimerContextChange) {
+      return undefined;
+    }
+
+    onMarketTimerContextChange(marketTimerContext);
+    return () => {
+      onMarketTimerContextChange(null);
+    };
+  }, [marketTimerContext, onMarketTimerContextChange]);
 
   function toggleSession(session) {
     setSelectedSessions((current) => {
@@ -257,14 +316,39 @@ export default function VolCrushEarningsWorkspace({
     });
   }
 
-  function handleSort(columnKey) {
-    if (sortKey === columnKey) {
-      setSortDirection((current) => (current === "desc" ? "asc" : "desc"));
-      return;
-    }
+  function handleSort(columnKey, options = {}) {
+    const isAdditive = options.additive === true;
 
-    setSortKey(columnKey);
-    setSortDirection("desc");
+    setSortState((current) => {
+      const currentSortState = Array.isArray(current) ? current : [];
+      const existingIndex = currentSortState.findIndex((sortDescriptor) => sortDescriptor?.key === columnKey);
+      const existingDescriptor = existingIndex >= 0 ? currentSortState[existingIndex] : null;
+      const hasSingleActiveSort = existingIndex === 0 && currentSortState.length === 1;
+
+      if (!isAdditive) {
+        if (hasSingleActiveSort) {
+          const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+          return [{ key: columnKey, direction }];
+        }
+
+        const direction = existingDescriptor?.direction === "asc" ? "asc" : "desc";
+        return [{ key: columnKey, direction }];
+      }
+
+      if (existingIndex >= 0) {
+        const direction = existingDescriptor?.direction === "asc" ? "desc" : "asc";
+        const nextSortState = [...currentSortState];
+        nextSortState[existingIndex] = { key: columnKey, direction };
+        return nextSortState;
+      }
+
+      const nextSortState =
+        currentSortState.length >= MAX_SORT_PRIORITIES
+          ? currentSortState.slice(0, MAX_SORT_PRIORITIES - 1)
+          : currentSortState;
+
+      return [...nextSortState, { key: columnKey, direction: "desc" }];
+    });
   }
 
   function resetFilters() {
@@ -494,49 +578,72 @@ export default function VolCrushEarningsWorkspace({
         </div>
 
         {sortedRows.length ? (
-          <div className="screening-v2__table-wrap">
-            <table className="screening-v2__table">
-              <thead>
-                <tr>
-                  {columns.map((column) => (
-                    <th key={column.key}>
-                      <button type="button" onClick={() => handleSort(column.key)}>
-                        {column.label}
-                        {sortKey === column.key ? (sortDirection === "asc" ? " ↑" : " ↓") : ""}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedRows.map((row) => (
-                  <tr
-                    key={row.id}
-                    className={row.id === selectedRowId ? "screening-v2__table-row--active" : ""}
-                    onClick={() => setSelectedRowId(row.id)}
-                  >
-                    <td>{row.compositeScore?.toFixed?.(2) ?? "n/a"}</td>
-                    <td>
-                      <strong>{row.symbol}</strong>
-                      <div className="screening-v2__subtle">{row.companyName}</div>
-                    </td>
-                    <td>
-                      <strong>{row.eventDate}</strong>
-                      <div className="screening-v2__subtle">{row.daysToEvent}d</div>
-                    </td>
-                    <td>{row.releaseSession}</td>
-                    <td>{row.strategyType}</td>
-                    <td>{row.expiration}</td>
-                    <td>{formatPercent(row.expectedMovePct)}</td>
-                    <td>{formatCurrency(Number(row.netCredit ?? 0) * 100)}</td>
-                    <td>{formatCurrency(row.maxLoss)}</td>
-                    <td>{row.netSpreadPct != null ? formatPercent(row.netSpreadPct) : "n/a"}</td>
-                    <td>{row.liquidityScore?.toFixed?.(2) ?? "n/a"}</td>
-                    <td>{row.quoteQuality}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="finder-table finder-table--vol-crush">
+            <div className="finder-table__head finder-table__head--vol-crush">
+              {columns.map((column) => (
+                <button
+                  key={column.key}
+                  type="button"
+                  className="finder-sort"
+                  title="Click to sort. Shift-click (or Ctrl/⌘-click) to add up to 4 sort priorities."
+                  onClick={(event) =>
+                    handleSort(column.key, {
+                      additive: event.shiftKey || event.metaKey || event.ctrlKey
+                    })
+                  }
+                >
+                  <span className="finder-sort__label">{column.label}</span>
+                  {(() => {
+                    const sortIndex = sortState.findIndex((sortDescriptor) => sortDescriptor?.key === column.key);
+                    if (sortIndex < 0) {
+                      return null;
+                    }
+
+                    const sortDescriptor = sortState[sortIndex];
+                    const direction = sortDescriptor?.direction === "asc" ? "asc" : "desc";
+
+                    return (
+                      <span className="finder-sort__indicator" aria-hidden="true">
+                        <span className="finder-sort__priority">{sortIndex + 1}</span>
+                        <span className="finder-sort__direction">{direction === "asc" ? "↑" : "↓"}</span>
+                      </span>
+                    );
+                  })()}
+                </button>
+              ))}
+            </div>
+
+            {sortedRows.map((row) => (
+              <button
+                key={row.id}
+                type="button"
+                className={`finder-row finder-row--vol-crush ${row.id === selectedRowId ? "finder-row--active" : ""}`}
+                onClick={() => setSelectedRowId(row.id)}
+              >
+                <span>{row.compositeScore?.toFixed?.(2) ?? "n/a"}</span>
+                <span className="finder-asset-cell finder-asset-cell--vol-crush">
+                  <span>{row.symbol}</span>
+                  <span className="screening-v2__subtle">{row.companyName}</span>
+                </span>
+                <span className="finder-cell-stack">
+                  <strong>{row.eventDate}</strong>
+                  <div className="screening-v2__subtle">{row.daysToEvent}d</div>
+                </span>
+                <span>{row.releaseSession}</span>
+                <span>
+                  <span className="bias-pill bias-pill--range">{row.strategyType}</span>
+                </span>
+                <span>{row.expiration}</span>
+                <span>{formatPercent(row.expectedMovePct)}</span>
+                <span className="positive">{formatCurrency(Number(row.netCredit ?? 0) * 100)}</span>
+                <span className="negative">{formatCurrency(row.maxLoss)}</span>
+                <span className="negative">{row.netSpreadPct != null ? formatPercent(row.netSpreadPct) : "n/a"}</span>
+                <span>{row.liquidityScore?.toFixed?.(2) ?? "n/a"}</span>
+                <span className={`source-pill source-pill--${getQuoteQualityTone(row.quoteQuality)}`}>
+                  {row.quoteQuality}
+                </span>
+              </button>
+            ))}
           </div>
         ) : (
           <div className="app-state app-state--inline">

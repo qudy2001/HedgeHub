@@ -25,6 +25,82 @@ function formatPercent(value) {
   return `${Number(value).toFixed(2)}%`;
 }
 
+function formatWholeNumber(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 0
+  }).format(numericValue);
+}
+
+function formatWholeUsd(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0
+  }).format(numericValue);
+}
+
+function formatQuoteSizePair(bidSize, askSize) {
+  const numericBidSize = Number(bidSize);
+  const numericAskSize = Number(askSize);
+
+  if (
+    !Number.isFinite(numericBidSize) ||
+    numericBidSize < 0 ||
+    !Number.isFinite(numericAskSize) ||
+    numericAskSize < 0
+  ) {
+    return "n/a";
+  }
+
+  return `${formatWholeNumber(numericBidSize)}/${formatWholeNumber(numericAskSize)}`;
+}
+
+function getCloseSideQuoteSize(leg) {
+  return String(leg?.action ?? "LONG").trim().toUpperCase() === "SHORT"
+    ? Number(leg?.askSize)
+    : Number(leg?.bidSize);
+}
+
+function buildPaperLegLiquidityMeta(leg) {
+  if (leg?.kind === "binary") {
+    return leg?.marketVolume != null && Number.isFinite(Number(leg.marketVolume))
+      ? `Market volume ${formatWholeUsd(leg.marketVolume)}`
+      : "";
+  }
+
+  const parts = [];
+  const closeSideQuoteSize = getCloseSideQuoteSize(leg);
+
+  if (Number.isFinite(closeSideQuoteSize) && closeSideQuoteSize >= 0) {
+    parts.push(`Close size ${formatWholeNumber(closeSideQuoteSize)}`);
+  }
+
+  const quoteSizePair = formatQuoteSizePair(leg?.bidSize, leg?.askSize);
+  if (quoteSizePair !== "n/a") {
+    parts.push(`B/A size ${quoteSizePair}`);
+  }
+
+  if (leg?.volume != null && Number.isFinite(Number(leg.volume))) {
+    parts.push(`Vol ${formatWholeNumber(leg.volume)}`);
+  }
+
+  if (leg?.openInterest != null && Number.isFinite(Number(leg.openInterest))) {
+    parts.push(`OI ${formatWholeNumber(leg.openInterest)}`);
+  }
+
+  return parts.join(" · ");
+}
+
 function parseIsoDate(value) {
   if (!value) {
     return null;
@@ -229,6 +305,54 @@ function isIbkrPaperOrder(order) {
   return String(order?.execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
 }
 
+function isTwsPaperOrder(order) {
+  return String(order?.execution?.route ?? "").trim().toLowerCase() === "tws-paper";
+}
+
+function isTwsEntryFilled(order) {
+  return isTwsPaperOrder(order) && String(order?.execution?.status ?? "").trim().toLowerCase() === "filled";
+}
+
+function getSmartExecution(order) {
+  return order?.execution?.smart ?? null;
+}
+
+function normalizeSmartStatusLabel(value, enabled = false) {
+  if (enabled !== true) {
+    return "Disabled";
+  }
+
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return "Watching";
+  }
+
+  return normalized
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function getSmartStatusTone(smartExecution) {
+  const status = String(smartExecution?.status ?? "").trim().toLowerCase();
+  if (smartExecution?.enabled !== true) {
+    return "";
+  }
+
+  if (status === "watching") {
+    return "positive";
+  }
+
+  if (status === "pending_replace") {
+    return "warning";
+  }
+
+  if (status === "paused") {
+    return "negative";
+  }
+
+  return "";
+}
+
 function normalizeExecutionStatusLabel(value) {
   const normalized = String(value ?? "").trim();
   if (!normalized) {
@@ -254,12 +378,37 @@ function getExecutionTone(execution) {
   return "";
 }
 
+function isIbkrPaperExecution(execution) {
+  return String(execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
+}
+
+function isTwsPaperExecution(execution) {
+  return String(execution?.route ?? "").trim().toLowerCase() === "tws-paper";
+}
+
 function getActiveExecution(order) {
   if (String(order?.status ?? "").toLowerCase() === "closed") {
-    return order?.closeExecution ?? order?.execution ?? null;
+    if (isIbkrPaperExecution(order?.closeExecution) || isTwsPaperExecution(order?.closeExecution)) {
+      return {
+        phase: "exit",
+        execution: order.closeExecution
+      };
+    }
+
+    if (order?.execution) {
+      return {
+        phase: "entry",
+        execution: order.execution
+      };
+    }
+
+    return null;
   }
 
-  if (order?.closeExecution && String(order.closeExecution.status ?? "").trim()) {
+  if (
+    (isIbkrPaperExecution(order?.closeExecution) || isTwsPaperExecution(order?.closeExecution)) &&
+    String(order.closeExecution.status ?? "").trim()
+  ) {
     return {
       phase: "exit",
       execution: order.closeExecution
@@ -274,6 +423,13 @@ function getActiveExecution(order) {
   }
 
   return null;
+}
+
+function isExecutionConfirmationPending(execution) {
+  return (
+    String(execution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
+    String(execution?.pendingReplyId ?? "").trim().length > 0
+  );
 }
 
 function hasWorkingBrokerOrder(order) {
@@ -751,23 +907,37 @@ function BrokerExecutionPanel({
   orderBusy,
   onRetryEntry,
   onSyncExecution,
-  onCancelExecution
+  onCancelExecution,
+  onRespondExecutionConfirmation,
+  onToggleSmartExecution
 }) {
-  if (!isIbkrPaperOrder(order)) {
+  if (!isIbkrPaperOrder(order) && !isTwsPaperOrder(order)) {
     return null;
   }
 
   const activeExecution = getActiveExecution(order);
   const execution = activeExecution?.execution ?? order.execution ?? null;
+  const isIbkr = isIbkrPaperExecution(execution);
+  const isTws = isTwsPaperExecution(execution);
+  const smartExecution = activeExecution?.phase === "entry" ? getSmartExecution(order) : null;
+  const smartAvailable =
+    isIbkr && activeExecution?.phase !== "exit" && String(execution?.orderType ?? "").trim().toUpperCase() === "LMT";
+  const smartEnabled = smartExecution?.enabled === true;
+  const smartStatusTone = getSmartStatusTone(smartExecution);
   const statusTone = getExecutionTone(execution);
-  const canRetryEntry =
+  const confirmationPending = isIbkr && isExecutionConfirmationPending(execution);
+  const normalizedStatus = String(execution?.status ?? "").trim().toLowerCase();
+  const canRetryEntry = isIbkr &&
+    !confirmationPending &&
     activeExecution?.phase !== "exit" &&
-    ["cancelled", "rejected", "error", "inactive"].includes(String(order.execution?.status ?? "").trim().toLowerCase());
+    ["cancelled", "rejected", "error", "inactive"].includes(normalizedStatus);
+  const canRetryTwsEntry =
+    isTws && activeExecution?.phase !== "exit" && ["cancelled", "rejected", "error", "inactive"].includes(normalizedStatus);
 
   return (
     <section className="paper-broker-panel">
       <div className="paper-broker-panel__copy">
-        <span className="brand__eyebrow">IBKR paper execution</span>
+        <span className="brand__eyebrow">{isTws ? "TWS paper execution" : "IBKR paper execution"}</span>
         <strong>
           {activeExecution?.phase === "exit" ? "Exit order" : "Entry order"} ·{" "}
           <span className={statusTone}>{normalizeExecutionStatusLabel(execution?.status)}</span>
@@ -778,6 +948,12 @@ function BrokerExecutionPanel({
           {execution?.tif ? ` · ${execution.tif}` : ""}
           {execution?.brokerOrderId ? ` · Order ${execution.brokerOrderId}` : ""}
         </p>
+        {smartAvailable ? (
+          <small className={smartStatusTone}>
+            Smart entry {normalizeSmartStatusLabel(smartExecution?.status, smartEnabled)}
+          </small>
+        ) : null}
+        {smartAvailable && smartExecution?.lastDecisionReason ? <small>{smartExecution.lastDecisionReason}</small> : null}
         {execution?.statusDescription ? <small>{execution.statusDescription}</small> : null}
         {execution?.lastError ? <small className="negative">{execution.lastError}</small> : null}
         {execution?.lastWarning ? <small>{execution.lastWarning}</small> : null}
@@ -786,6 +962,7 @@ function BrokerExecutionPanel({
       <div className="paper-broker-panel__metrics">
         <span>Filled {execution?.filledQuantity ?? "n/a"}</span>
         <span>Remaining {execution?.remainingQuantity ?? "n/a"}</span>
+        <span>Avg fill {execution?.avgFillPrice != null ? formatCurrency(execution.avgFillPrice) : "n/a"}</span>
         <span>
           Last sync {execution?.lastSyncAt ? formatDateTimeLabel(execution.lastSyncAt, { includeSeconds: true }) : "n/a"}
         </span>
@@ -795,22 +972,56 @@ function BrokerExecutionPanel({
         <button type="button" className="chart-toggle" onClick={onSyncExecution} disabled={orderBusy}>
           {orderBusy ? "Working..." : "Sync broker"}
         </button>
-        <button
-          type="button"
-          className="chart-toggle"
-          onClick={onCancelExecution}
-          disabled={orderBusy || !hasWorkingBrokerOrder(order)}
-        >
-          Cancel broker order
-        </button>
-        <button
-          type="button"
-          className="chart-toggle"
-          onClick={onRetryEntry}
-          disabled={orderBusy || !canRetryEntry}
-        >
-          Retry entry
-        </button>
+        {confirmationPending && onRespondExecutionConfirmation ? (
+          <button
+            type="button"
+            className="chart-toggle"
+            onClick={() => onRespondExecutionConfirmation(true)}
+            disabled={orderBusy}
+          >
+            {orderBusy ? "Working..." : "Submit anyway"}
+          </button>
+        ) : null}
+        {confirmationPending && onRespondExecutionConfirmation ? (
+          <button
+            type="button"
+            className="chart-toggle"
+            onClick={() => onRespondExecutionConfirmation(false)}
+            disabled={orderBusy}
+          >
+            Decline
+          </button>
+        ) : null}
+        {isIbkr ? (
+          <button
+            type="button"
+            className="chart-toggle"
+            onClick={onCancelExecution}
+            disabled={orderBusy || confirmationPending || !hasWorkingBrokerOrder(order)}
+          >
+            Cancel broker order
+          </button>
+        ) : null}
+        {canRetryEntry || canRetryTwsEntry ? (
+          <button
+            type="button"
+            className="chart-toggle"
+            onClick={onRetryEntry}
+            disabled={orderBusy}
+          >
+            Retry entry
+          </button>
+        ) : null}
+        {smartAvailable && onToggleSmartExecution && isIbkr ? (
+          <button
+            type="button"
+            className={`chart-toggle ${smartEnabled ? "chart-toggle--active" : ""}`}
+            onClick={onToggleSmartExecution}
+            disabled={orderBusy || confirmationPending}
+          >
+            {smartEnabled ? "Disable smart entry" : "Enable smart entry"}
+          </button>
+        ) : null}
       </div>
     </section>
   );
@@ -826,6 +1037,8 @@ function OpenOrderDetails({
   onRetryEntry,
   onSyncExecution,
   onCancelExecution,
+  onToggleSmartExecution,
+  onRespondExecutionConfirmation,
   onSave,
   onDelete,
   onUpdateDraft,
@@ -847,6 +1060,8 @@ function OpenOrderDetails({
         onRetryEntry={onRetryEntry}
         onSyncExecution={onSyncExecution}
         onCancelExecution={onCancelExecution}
+        onToggleSmartExecution={onToggleSmartExecution}
+        onRespondExecutionConfirmation={onRespondExecutionConfirmation}
       />
 
       <div className="paper-order-editbar">
@@ -905,6 +1120,7 @@ function OpenOrderDetails({
               <span className="paper-legs-table__label">
                 <strong>{getLegTitle(order, leg)}</strong>
                 <small>{renderLegDescriptor(leg)}</small>
+                {buildPaperLegLiquidityMeta(leg) ? <small>{buildPaperLegLiquidityMeta(leg)}</small> : null}
                 {legUrl ? (
                   <a href={legUrl} target="_blank" rel="noreferrer">
                     {legUrl}
@@ -992,6 +1208,8 @@ function OpenOrderTableRows({
   onRetryEntry,
   onSyncExecution,
   onCancelExecution,
+  onToggleSmartExecution,
+  onRespondExecutionConfirmation,
   onSave,
   onClose,
   onDelete,
@@ -1069,7 +1287,7 @@ function OpenOrderTableRows({
             type="button"
             className="chart-toggle paper-order-card__close-button"
             onClick={onClose}
-            disabled={orderBusy}
+            disabled={orderBusy || (isTwsPaperOrder(order) && !isTwsEntryFilled(order))}
           >
             {orderBusy
               ? "Working..."
@@ -1077,6 +1295,10 @@ function OpenOrderTableRows({
                 ? order.closeExecution
                   ? "Exit working"
                   : "Send exit order"
+                : isTwsPaperOrder(order)
+                  ? isTwsEntryFilled(order)
+                    ? "Move to closed"
+                    : "Waiting fill"
                 : "Close order"}
           </button>
         </td>
@@ -1111,6 +1333,8 @@ function OpenOrderTableRows({
                 onRetryEntry={onRetryEntry}
                 onSyncExecution={onSyncExecution}
                 onCancelExecution={onCancelExecution}
+                onToggleSmartExecution={onToggleSmartExecution}
+                onRespondExecutionConfirmation={onRespondExecutionConfirmation}
                 onSave={onSave}
                 onDelete={onDelete}
                 onUpdateDraft={onUpdateDraft}
@@ -1201,6 +1425,7 @@ function ClosedOrderDetails({
               <span className="paper-legs-table__label">
                 <strong>{getLegTitle(order, leg)}</strong>
                 <small>{renderLegDescriptor(leg)}</small>
+                {buildPaperLegLiquidityMeta(leg) ? <small>{buildPaperLegLiquidityMeta(leg)}</small> : null}
                 {getLegUrl(order, leg) ? (
                   <a href={getLegUrl(order, leg)} target="_blank" rel="noreferrer">
                     {getLegUrl(order, leg)}
@@ -1390,6 +1615,7 @@ export default function PaperTradingWorkspace({
   onDeletePaperOrder,
   onSaveCalculatorSnapshot,
   onExecutePaperOrder,
+  onConfirmPaperExecution = null,
   onSyncPaperExecution,
   onCancelPaperExecution,
   theme = "dark"
@@ -1478,6 +1704,8 @@ export default function PaperTradingWorkspace({
       !window.confirm(
         isIbkrPaperOrder(order)
           ? `Send an IBKR paper exit order for "${order.combinationLabel}"? The order will move to history after the broker exit fills.`
+          : isTwsPaperOrder(order)
+            ? `Move filled TWS order "${order.combinationLabel}" to closed history? Close/cancel orders manually inside TWS. HedgeHub will capture close fills from TWS executions when you move it to history.`
           : `Close open order "${order.combinationLabel}" and move it to history?`
       )
     ) {
@@ -1493,7 +1721,7 @@ export default function PaperTradingWorkspace({
     try {
       const payload = await onClosePaperOrder(order.id, buildPatchFromDraft(order, draft));
 
-      if (isIbkrPaperOrder(order) && payload?.message) {
+      if ((isIbkrPaperOrder(order) || isTwsPaperOrder(order)) && payload?.message) {
         setFeedbackByOrder((current) => ({
           ...current,
           [String(order.id)]: {
@@ -1526,11 +1754,12 @@ export default function PaperTradingWorkspace({
       const payload = await onExecutePaperOrder(order.id, {
         purpose: "entry"
       });
+      const brokerLabel = isTwsPaperOrder(order) ? "TWS" : isIbkrPaperOrder(order) ? "IBKR" : "Broker";
       setFeedbackByOrder((current) => ({
         ...current,
         [String(order.id)]: {
           tone: "success",
-          message: payload?.message ?? "IBKR paper entry order submitted."
+          message: payload?.message ?? `${brokerLabel} paper entry order submitted.`
         }
       }));
     } catch (error) {
@@ -1593,6 +1822,89 @@ export default function PaperTradingWorkspace({
         [String(order.id)]: {
           tone: "success",
           message: payload?.message ?? "Cancel request sent to IBKR."
+        }
+      }));
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleToggleSmartExecution(order) {
+    const currentSmart = getSmartExecution(order) ?? {};
+    const nextEnabled = currentSmart.enabled !== true;
+
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      await onUpdatePaperOrder(order.id, {
+        execution: {
+          smart: {
+            ...currentSmart,
+            enabled: nextEnabled,
+            status: nextEnabled ? "watching" : "disabled",
+            pendingLimitPrice: null,
+            lastDecision: nextEnabled ? "armed" : "disabled",
+            lastDecisionReason: nextEnabled
+              ? "Smart pricing enabled. HedgeHub will monitor this entry order and reprice stale limits conservatively."
+              : "Smart pricing disabled by user."
+          }
+        }
+      });
+
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: nextEnabled ? "Smart entry enabled for this order." : "Smart entry disabled for this order."
+        }
+      }));
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleRespondExecutionConfirmation(order, confirmed) {
+    if (!onConfirmPaperExecution) {
+      return;
+    }
+
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onConfirmPaperExecution(order.id, {
+        confirmed
+      });
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: confirmed === true ? "success" : "warning",
+          message:
+            payload?.message ??
+            (confirmed === true ? "Broker confirmation sent." : "Broker confirmation declined.")
         }
       }));
     } catch (error) {
@@ -1786,6 +2098,10 @@ export default function PaperTradingWorkspace({
                               onRetryEntry={() => handleRetryEntry(order)}
                               onSyncExecution={() => handleSyncExecution(order)}
                               onCancelExecution={() => handleCancelExecution(order)}
+                              onToggleSmartExecution={() => handleToggleSmartExecution(order)}
+                              onRespondExecutionConfirmation={(confirmed) =>
+                                handleRespondExecutionConfirmation(order, confirmed)
+                              }
                               onSave={() => handleSave(order)}
                               onClose={() => handleClose(order)}
                               onDelete={() => handleDelete(order, "open order")}
