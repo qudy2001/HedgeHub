@@ -79,15 +79,36 @@ function startOfMonthIso(dateIso) {
 
 function getOptionSearchWindowForMarket(market, fallbackExpiry = defaultStrategyConfig.optionLeg.expiry) {
   const referenceExpiry = market.endDate?.slice(0, 10) || fallbackExpiry;
+  const referenceExpiryDate = new Date(`${referenceExpiry}T00:00:00.000Z`);
+  const monthStart = startOfMonthIso(referenceExpiry);
+  const calendarLookback = toIsoDate(addDays(referenceExpiryDate, -14));
   return {
     referenceExpiry,
-    from: startOfMonthIso(referenceExpiry),
-    to: toIsoDate(addDays(new Date(`${referenceExpiry}T00:00:00.000Z`), 5))
+    from: minIsoDate([monthStart, calendarLookback]),
+    to: toIsoDate(addDays(referenceExpiryDate, 5))
   };
 }
 
 function isIsoDateWithinRange(dateIso, from, to) {
   return Boolean(dateIso) && (!from || dateIso >= from) && (!to || dateIso <= to);
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function marketQuestionMentionsSymbol(question, symbol) {
+  const normalizedSymbol = String(symbol ?? "").trim();
+  const normalizedQuestion = String(question ?? "").trim();
+  if (!normalizedSymbol || !normalizedQuestion) {
+    return false;
+  }
+
+  try {
+    return new RegExp(`\\b${escapeRegExp(normalizedSymbol)}\\b`, "i").test(normalizedQuestion);
+  } catch (_error) {
+    return normalizedQuestion.toUpperCase().includes(normalizedSymbol.toUpperCase());
+  }
 }
 
 export function parseTargetFromQuestion(question) {
@@ -502,12 +523,17 @@ function getOptionUniverseForMarket({
   fallbackVolatility,
   optionType = "call"
 }) {
-  const marketSignal = parsePolymarketQuestionSignal(market.question);
-  const targetValue = marketSignal?.targetValue || currentUnderlyingSpot || currentOptionSpot;
+  const marketQuestion = String(market?.question ?? "");
+  const marketSignal = parsePolymarketQuestionSignal(marketQuestion);
+  const targetInProxyUnits = marketQuestionMentionsSymbol(marketQuestion, asset.optionSymbol);
+  const effectiveUnderlyingSpot = targetInProxyUnits ? currentOptionSpot : currentUnderlyingSpot;
+  const targetValue = marketSignal?.targetValue || effectiveUnderlyingSpot || currentOptionSpot;
   const ratio =
-    currentUnderlyingSpot > 0 && currentOptionSpot > 0
-      ? currentOptionSpot / currentUnderlyingSpot
-      : asset.conversionFallback;
+    targetInProxyUnits
+      ? 1
+      : currentUnderlyingSpot > 0 && currentOptionSpot > 0
+        ? currentOptionSpot / currentUnderlyingSpot
+        : asset.conversionFallback;
   const targetSpot = Math.max(
     projectPolymarketTargetProxySpot({
       targetValue,
@@ -977,34 +1003,26 @@ const polymarketStructures = [
     id: "pm-no",
     legs: [{ outcome: "NO", action: "LONG", label: "PM NO", budgetShare: 1 }],
     displayOutcome: "NO"
-  },
-  {
-    id: "pm-yes-short",
-    legs: [{ outcome: "YES", action: "SHORT", label: "PM YES Short", budgetShare: 1 }],
-    displayOutcome: "YES"
-  },
-  {
-    id: "pm-no-short",
-    legs: [{ outcome: "NO", action: "SHORT", label: "PM NO Short", budgetShare: 1 }],
-    displayOutcome: "NO"
-  },
-  {
-    id: "pm-yes-plus-no-short",
-    legs: [
-      { outcome: "YES", action: "LONG", label: "PM YES", budgetShare: 0.5 },
-      { outcome: "NO", action: "SHORT", label: "PM NO Short", budgetShare: 0.5 }
-    ],
-    displayOutcome: "YES"
-  },
-  {
-    id: "pm-no-plus-yes-short",
-    legs: [
-      { outcome: "NO", action: "LONG", label: "PM NO", budgetShare: 0.5 },
-      { outcome: "YES", action: "SHORT", label: "PM YES Short", budgetShare: 0.5 }
-    ],
-    displayOutcome: "NO"
   }
 ];
+
+function invertBinaryOutcome(outcome) {
+  return outcome === "NO" ? "YES" : "NO";
+}
+
+function normalizePolymarketStructureId(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+
+  if (normalized === "pm-yes-short" || normalized === "pm-no-plus-yes-short") {
+    return "pm-no";
+  }
+
+  if (normalized === "pm-no-short" || normalized === "pm-yes-plus-no-short") {
+    return "pm-yes";
+  }
+
+  return normalized;
+}
 
 function buildPolymarketBlueprints(market, structure) {
   const yesPrice = clamp(market.yesPrice, 0.001, 0.999);
@@ -1014,19 +1032,44 @@ function buildPolymarketBlueprints(market, structure) {
     0.999
   );
 
-  return structure.legs.map((leg) => ({
-    id: `${market.id}-${structure.id}-${leg.outcome.toLowerCase()}-${leg.action.toLowerCase()}`,
-    kind: "binary",
-    outcome: leg.outcome,
-    action: leg.action,
-    label: leg.label,
-    entryPrice: leg.outcome === "YES" ? yesPrice : noPrice,
-    budgetShare: leg.budgetShare,
-    displayPrice:
-      structure.displayOutcome === "YES"
-        ? yesPrice
-        : noPrice
-  }));
+  const mergedLegs = new Map();
+
+  for (const leg of structure.legs ?? []) {
+    const legOutcome = leg?.outcome === "NO" ? "NO" : "YES";
+    const legAction = String(leg?.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const normalizedOutcome = legAction === "SHORT" ? invertBinaryOutcome(legOutcome) : legOutcome;
+    const normalizedAction = "LONG";
+    const key = `${normalizedOutcome}-${normalizedAction}`;
+    const existing = mergedLegs.get(key);
+
+    if (existing) {
+      existing.budgetShare += Number(leg?.budgetShare ?? 1) || 0;
+      continue;
+    }
+
+    mergedLegs.set(key, {
+      outcome: normalizedOutcome,
+      action: normalizedAction,
+      label:
+        legAction === "SHORT" ? `PM ${normalizedOutcome}` : String(leg?.label ?? `PM ${normalizedOutcome}`),
+      budgetShare: Number(leg?.budgetShare ?? 1) || 0
+    });
+  }
+
+  const normalizedDisplayOutcome = structure.displayOutcome === "NO" ? "NO" : "YES";
+
+  return [...mergedLegs.values()]
+    .filter((leg) => leg.budgetShare > 0)
+    .map((leg) => ({
+      id: `${market.id}-${structure.id}-${leg.outcome.toLowerCase()}-${leg.action.toLowerCase()}`,
+      kind: "binary",
+      outcome: leg.outcome,
+      action: leg.action,
+      label: leg.label,
+      entryPrice: leg.outcome === "YES" ? yesPrice : noPrice,
+      budgetShare: leg.budgetShare,
+      displayPrice: normalizedDisplayOutcome === "YES" ? yesPrice : noPrice
+    }));
 }
 
 function buildCombination({
@@ -1039,12 +1082,18 @@ function buildCombination({
   currentOptionSpot,
   currentUnderlyingSpot
 }) {
-  const marketSignal = parsePolymarketQuestionSignal(market.question);
-  const targetThreshold = marketSignal?.targetValue || currentUnderlyingSpot;
+  const marketQuestion = String(market?.question ?? "");
+  const marketSignal = parsePolymarketQuestionSignal(marketQuestion);
+  const targetInProxyUnits = marketQuestionMentionsSymbol(marketQuestion, asset.optionSymbol);
+  const effectiveUnderlyingSymbol = targetInProxyUnits ? asset.optionSymbol : asset.underlyingSymbol;
+  const effectiveUnderlyingSpot = targetInProxyUnits ? currentOptionSpot : currentUnderlyingSpot;
   const conversionRatio =
-    currentUnderlyingSpot > 0 && currentOptionSpot > 0
-      ? currentOptionSpot / currentUnderlyingSpot
-      : asset.conversionFallback;
+    targetInProxyUnits
+      ? 1
+      : effectiveUnderlyingSpot > 0 && currentOptionSpot > 0
+        ? currentOptionSpot / effectiveUnderlyingSpot
+        : asset.conversionFallback;
+  const targetThreshold = marketSignal?.targetValue || effectiveUnderlyingSpot;
   const polymarketBudget = 1000;
   const optionBudget = 1000;
   const structureEntryPerUnit = optionLegBlueprints.reduce((sum, leg) => {
@@ -1085,7 +1134,7 @@ function buildCombination({
     targetThreshold: optionLegBlueprints[0]?.targetSpot || currentOptionSpot,
     binaryTargetThreshold: targetThreshold,
     binarySignal: marketSignal,
-    currentUnderlyingSpot,
+    currentUnderlyingSpot: effectiveUnderlyingSpot,
     conversionRatio,
     marketReferenceYesPrice: market.yesPrice,
     strategyCloseDate,
@@ -1196,9 +1245,9 @@ function buildCombination({
     },
     marketContext: {
       proxySymbol: asset.optionSymbol,
-      underlyingSymbol: asset.underlyingSymbol,
+      underlyingSymbol: effectiveUnderlyingSymbol,
       currentProxySpot: formatNumber(currentOptionSpot, 4),
-      currentUnderlyingSpot: formatNumber(currentUnderlyingSpot, 2),
+      currentUnderlyingSpot: formatNumber(effectiveUnderlyingSpot, 2),
       conversionRatio: formatNumber(conversionRatio, 6),
       targetUnderlyingValue: formatNumber(targetThreshold, 2),
       polymarketDirection: marketSignal?.direction ?? "up",
@@ -1369,13 +1418,20 @@ function buildStrategyFinder({
         };
       };
 
-      return expiries.flatMap((expiry) => {
+      return expiries.flatMap((expiry, expiryIndex) => {
         const expiryCalls = [...(callUniverseByExpiry.get(expiry) ?? [])].sort(
           (left, right) => left.strike - right.strike
         );
         const expiryPuts = [...(putUniverseByExpiry.get(expiry) ?? [])].sort(
           (left, right) => left.strike - right.strike
         );
+        const previousExpiry = expiryIndex > 0 ? expiries[expiryIndex - 1] : null;
+        const previousExpiryPuts = previousExpiry
+          ? [...(putUniverseByExpiry.get(previousExpiry) ?? [])].sort((left, right) => left.strike - right.strike)
+          : [];
+        const previousExpiryCalls = previousExpiry
+          ? [...(callUniverseByExpiry.get(previousExpiry) ?? [])].sort((left, right) => left.strike - right.strike)
+          : [];
 
         if (expiryCalls.length < 1 && expiryPuts.length < 1) {
           return [];
@@ -1391,12 +1447,46 @@ function buildStrategyFinder({
         const distinctLowerCall = lowerCall && nearCall && lowerCall.strike !== nearCall.strike ? lowerCall : null;
         const distinctHigherPut = higherPut && nearPut && higherPut.strike !== nearPut.strike ? higherPut : null;
         const distinctLowerPut = lowerPut && nearPut && lowerPut.strike !== nearPut.strike ? lowerPut : null;
+        const calendarFrontCall =
+          nearCall && previousExpiryCalls.length ? pickNearestOption(previousExpiryCalls, nearCall.strike) : null;
+        const calendarFrontPut =
+          nearPut && previousExpiryPuts.length ? pickNearestOption(previousExpiryPuts, nearPut.strike) : null;
+        const bullishPolymarketStructureId = marketSignal?.direction === "down" ? "pm-no" : "pm-yes";
+        const bearishPolymarketStructureId = marketSignal?.direction === "down" ? "pm-yes" : "pm-no";
 
         const optionStrategies = [
           nearCall ? { label: "Long Call", legs: [buildLeg(nearCall, "LONG")] } : null,
           nearCall ? { label: "Short Call", legs: [buildLeg(nearCall, "SHORT")] } : null,
           nearPut ? { label: "Long Put", legs: [buildLeg(nearPut, "LONG")] } : null,
           nearPut ? { label: "Short Put", legs: [buildLeg(nearPut, "SHORT")] } : null,
+          calendarFrontCall
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bearishPolymarketStructureId],
+                legs: [buildLeg(nearCall, "LONG"), buildLeg(calendarFrontCall, "SHORT")]
+              }
+            : null,
+          calendarFrontCall
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bullishPolymarketStructureId],
+                legs: [buildLeg(nearCall, "SHORT"), buildLeg(calendarFrontCall, "LONG")]
+              }
+            : null,
+          calendarFrontPut
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bullishPolymarketStructureId],
+                legs: [buildLeg(nearPut, "LONG"), buildLeg(calendarFrontPut, "SHORT")]
+              }
+            : null,
+          calendarFrontPut
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bearishPolymarketStructureId],
+                legs: [buildLeg(nearPut, "SHORT"), buildLeg(calendarFrontPut, "LONG")]
+              }
+            : null,
           distinctLowerCall && nearCall
             ? {
                 label: "Bull Call Spread",
@@ -1487,11 +1577,18 @@ function buildStrategyFinder({
             );
           });
 
-        return polymarketStructures.flatMap((polymarketStructure) => {
-          const polymarketBlueprints = buildPolymarketBlueprints(market, polymarketStructure);
+        return optionStrategies.flatMap((strategy) => {
+          const requestedPolymarketStructures = strategy.polymarketStructureIds?.length
+            ? new Set(strategy.polymarketStructureIds.map(normalizePolymarketStructureId))
+            : null;
+          const eligiblePolymarketStructures = requestedPolymarketStructures
+            ? polymarketStructures.filter((structure) => requestedPolymarketStructures.has(structure.id))
+            : polymarketStructures;
 
-          return optionStrategies.map((strategy) =>
-            buildCombination({
+          return eligiblePolymarketStructures.map((polymarketStructure) => {
+            const polymarketBlueprints = buildPolymarketBlueprints(market, polymarketStructure);
+
+            return buildCombination({
               asset,
               market,
               polymarketBlueprints,
@@ -1500,8 +1597,8 @@ function buildStrategyFinder({
               optionLegBlueprints: strategy.legs,
               currentOptionSpot,
               currentUnderlyingSpot
-            })
-          );
+            });
+          });
         });
       });
     });
@@ -1775,20 +1872,24 @@ function buildAssetScans({
       const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
       const hasAssetQuoteSizeData = liveOptions.some((option) => hasUsableQuoteSize(option));
 
-      const opportunities = matches
-        .map((market) => {
-          const marketSignal = parsePolymarketQuestionSignal(market.question);
-          const parsedTarget = marketSignal?.targetValue ?? null;
-          const targetValue = parsedTarget || 0;
-          const preferredOptionType = marketSignal?.direction === "down" ? "put" : "call";
-          const ratio =
-            currentUnderlyingSpot > 0 && currentOptionSpot > 0
-              ? currentOptionSpot / currentUnderlyingSpot
-              : asset.conversionFallback;
-          const proxyTarget = projectPolymarketTargetProxySpot({
-            targetValue,
-            direction: marketSignal?.direction,
-            conversionRatio: ratio,
+	      const opportunities = matches
+	        .map((market) => {
+	          const marketQuestion = String(market?.question ?? "");
+	          const marketSignal = parsePolymarketQuestionSignal(marketQuestion);
+	          const parsedTarget = marketSignal?.targetValue ?? null;
+	          const targetValue = parsedTarget || 0;
+	          const preferredOptionType = marketSignal?.direction === "down" ? "put" : "call";
+	          const targetInProxyUnits = marketQuestionMentionsSymbol(marketQuestion, asset.optionSymbol);
+	          const ratio =
+	            targetInProxyUnits
+	              ? 1
+	              : currentUnderlyingSpot > 0 && currentOptionSpot > 0
+	                ? currentOptionSpot / currentUnderlyingSpot
+	                : asset.conversionFallback;
+	          const proxyTarget = projectPolymarketTargetProxySpot({
+	            targetValue,
+	            direction: marketSignal?.direction,
+	            conversionRatio: ratio,
             currentProxySpot: currentOptionSpot || 0
           });
           const optionUniverse = getOptionUniverseForMarket({

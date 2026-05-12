@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
-IMAGE_REPO="${IMAGE_REPO:-ghcr.io/qudy2001/hedgehub-livedata-ibkr}"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/qudy2001/hedgehub-postgresql-ibkr}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER_NAME="${BUILDER_NAME:-codex-ghcr}"
@@ -21,7 +21,7 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/publish-ibkr-image.sh [options]
 
-Builds and pushes the embedded IBKR image to GHCR.
+Builds and pushes the PostgreSQL embedded IBKR image to GHCR.
 
 Options:
   --image <repo>        Image repository to publish.
@@ -56,6 +56,30 @@ die() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+check_docker_daemon() {
+  local docker_host=""
+  local socket_path=""
+
+  log "Checking Docker daemon connectivity"
+
+  docker_host="${DOCKER_HOST:-}"
+  if [[ -z "${docker_host}" ]]; then
+    docker_host="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+  fi
+
+  if [[ "${docker_host}" == unix://* ]]; then
+    socket_path="${docker_host#unix://}"
+    if ! curl --unix-socket "${socket_path}" --max-time 5 -fsS http://localhost/_ping >/dev/null 2>&1; then
+      die "Docker daemon is not responding at ${docker_host}. If you're on Docker Desktop, try: docker desktop restart"
+    fi
+    return
+  fi
+
+  if ! docker version >/dev/null 2>&1; then
+    die "Docker daemon is not responding. If you're on Docker Desktop, try: docker desktop restart"
+  fi
 }
 
 cleanup_verify_container() {
@@ -124,6 +148,7 @@ fetch_digest() {
 verify_image() {
   local host_port=""
   local health=""
+  local status=""
 
   log "Smoke testing ${IMAGE_REF}"
 
@@ -131,9 +156,10 @@ verify_image() {
   trap cleanup_verify_container EXIT
 
   docker pull "${IMAGE_REF}" >/dev/null
-  docker run -d --rm \
+  docker run -d \
     --name "${VERIFY_CONTAINER_NAME}" \
     -e HEDGEHUB_START_IBKR_GATEWAY=false \
+    -e DB_TYPE=sqlite \
     -p 127.0.0.1::8787 \
     "${IMAGE_REF}" \
     >/dev/null
@@ -146,15 +172,22 @@ verify_image() {
 
   [[ -n "${host_port}" ]] || die "Could not determine the mapped verification port."
 
-  for _attempt in {1..20}; do
+  for _attempt in {1..45}; do
     if health="$(curl -fsS "http://127.0.0.1:${host_port}/api/health" 2>/dev/null)"; then
       echo "Health check: ${health}"
       return
     fi
+
+    status="$(docker inspect --format '{{.State.Status}}' "${VERIFY_CONTAINER_NAME}" 2>/dev/null || true)"
+    if [[ "${status}" == "exited" || "${status}" == "dead" ]]; then
+      break
+    fi
+
     sleep 1
   done
 
-  docker logs --tail 100 "${VERIFY_CONTAINER_NAME}" >&2 || true
+  echo "Verification container status: $(docker inspect --format '{{.State.Status}} (exit {{.State.ExitCode}})' "${VERIFY_CONTAINER_NAME}" 2>/dev/null || echo 'unknown')" >&2
+  docker logs --tail 200 "${VERIFY_CONTAINER_NAME}" >&2 || true
   die "Health check failed for ${IMAGE_REF}"
 }
 
@@ -218,6 +251,7 @@ fi
 
 [[ -f "${DOCKERFILE_ABS}" ]] || die "Dockerfile not found: ${DOCKERFILE_ABS}"
 
+check_docker_daemon
 show_git_context
 ensure_builder
 publish_image

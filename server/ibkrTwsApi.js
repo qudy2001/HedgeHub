@@ -765,6 +765,7 @@ export class TwsPaperApi extends EventEmitter {
     const submittedAt = new Date().toISOString();
 
     return {
+      route: "tws-paper",
       accountId: this.status.selectedAccount,
       accountAlias: "",
       isPaper: this.status.isPaper === true,
@@ -808,6 +809,97 @@ export class TwsPaperApi extends EventEmitter {
         brokerConid: String(leg.brokerConid),
         localSymbol: String(leg.localSymbol ?? "")
       }))
+    };
+  }
+
+  async submitStockOrder({ order, purpose = "entry" }) {
+    if (!this.ib || !this.status.connected) {
+      throw new Error("TWS is not connected");
+    }
+
+    if (this.status.isPaper !== true) {
+      throw new Error("TWS must be logged into a paper account (starts with D/DU) for HedgeHub paper routing.");
+    }
+
+    if (!Number.isInteger(this.nextOrderId) || this.nextOrderId <= 0) {
+      throw new Error("TWS is connected but not ready (missing nextValidId)");
+    }
+
+    const normalizedPurpose = String(purpose ?? "entry").trim().toLowerCase() === "exit" ? "exit" : "entry";
+    const stockLeg = (order?.legs ?? []).find((leg) => leg?.kind === "stock") ?? null;
+    const orderQuantity = Math.max(Math.round(Number(stockLeg?.quantity ?? 0) || 0), 0);
+
+    if (!(orderQuantity > 0)) {
+      throw new Error("No stock hedge leg is available to route through TWS");
+    }
+
+    const symbol = String(stockLeg?.rootSymbol ?? order?.marketContext?.underlyingSymbol ?? order?.marketContext?.proxySymbol ?? "")
+      .trim()
+      .toUpperCase();
+
+    if (!symbol) {
+      throw new Error("Stock symbol is required for TWS routing");
+    }
+
+    const orderType = "MKT";
+    const tif = normalizeTif(order?.execution?.tif);
+    const outsideRth = order?.execution?.outsideRth === true;
+    const rawAction = String(stockLeg?.action ?? "LONG").trim().toUpperCase();
+    const isShort = rawAction === "SHORT";
+    const action =
+      normalizedPurpose === "exit"
+        ? isShort
+          ? "BUY"
+          : "SELL"
+        : isShort
+          ? "SELL"
+          : "BUY";
+
+    const orderRef = `hedgehub-stock:${Number(order.id)}:${normalizedPurpose}:${Date.now()}`;
+
+    const orderId = this.nextOrderId;
+    this.nextOrderId += 1;
+
+    const contract = this.ib.contract.stock(symbol, "SMART", "USD");
+    const baseOrder = this.ib.order.market(action, orderQuantity, true);
+    baseOrder.tif = tif;
+    baseOrder.outsideRth = outsideRth;
+    baseOrder.orderRef = orderRef;
+    baseOrder.account = this.status.selectedAccount || undefined;
+
+    this.ib.placeOrder(orderId, contract, baseOrder);
+
+    const submittedAt = new Date().toISOString();
+
+    return {
+      accountId: this.status.selectedAccount,
+      accountAlias: "",
+      isPaper: this.status.isPaper === true,
+      status: "submitted",
+      statusText: "Submitted",
+      statusDescription: "",
+      brokerOrderId: String(orderId),
+      orderRef,
+      orderType,
+      tif,
+      outsideRth,
+      limitPrice: null,
+      avgFillPrice: null,
+      combo: false,
+      purpose: normalizedPurpose,
+      totalQuantity: orderQuantity,
+      filledQuantity: 0,
+      remainingQuantity: orderQuantity,
+      submittedAt,
+      lastSyncAt: submittedAt,
+      filledAt: "",
+      cancelledAt: "",
+      lastError: "",
+      lastWarning: "",
+      warningMessages: [],
+      pendingReplyId: "",
+      pendingReplyMessages: [],
+      requestedLegs: []
     };
   }
 

@@ -6,6 +6,7 @@ on:
       - main
       - master
       - codex/livedata
+      - codex/postgresql
       - codex/embedded-ibkr-gateway
     tags:
       - "v*"
@@ -38,6 +39,8 @@ jobs:
 
           if [[ "${GITHUB_REF_NAME}" == "codex/livedata" || "${GITHUB_REF_NAME}" == "codex/embedded-ibkr-gateway" ]]; then
             image_name="${image_name}-livedata"
+          elif [[ "${GITHUB_REF_NAME}" == "codex/postgresql" ]]; then
+            image_name="${image_name}-postgresql"
           fi
 
           image_name="${image_name}${{ matrix.suffix }}"

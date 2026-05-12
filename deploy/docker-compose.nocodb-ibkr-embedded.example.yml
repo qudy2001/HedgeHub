@@ -1,9 +1,35 @@
 services:
-  hedgehub:
-    container_name: hedgehub
-    image: ghcr.io/qudy2001/hedgehub-livedata-ibkr:latest
+  postgres:
+    container_name: hedgehub-postgres
+    image: timescale/timescaledb:latest-pg16
     init: true
     restart: unless-stopped
+    networks:
+      - nocodb_network
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-optionsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - hedgehub_postgres_data:/var/lib/postgresql/data
+      - ../db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-optionsdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hedgehub:
+    container_name: hedgehub
+    image: ghcr.io/qudy2001/hedgehub-postgresql-ibkr:latest
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - nocodb_network
     ports:
@@ -12,6 +38,14 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8787
+      DB_TYPE: ${DB_TYPE:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/optionsdb}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-optionsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/app/data/hedgehub.db}
       TZ: Europe/London
       POLYGON_API_KEY: ${POLYGON_API_KEY:-}
       POLYGON_WS_URL: ${POLYGON_WS_URL:-}
@@ -45,3 +79,6 @@ services:
 networks:
   nocodb_network:
     external: true
+
+volumes:
+  hedgehub_postgres_data:

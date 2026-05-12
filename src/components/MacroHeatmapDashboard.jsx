@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getMacroTileColors } from "../theme.js";
 
 const DEFAULT_SECTION_HEIGHTS = {
@@ -172,6 +172,120 @@ function formatTimestamp(value) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(timestamp);
+}
+
+function round(value) {
+  return Number(Number(value).toFixed(2));
+}
+
+function getTileLookbackChange(tile, lookback) {
+  const sparkline = tile?.sparklines?.[lookback];
+
+  if (!Array.isArray(sparkline) || sparkline.length < 2) {
+    return {
+      changeUsd: tile?.changeUsd ?? 0,
+      changePct: tile?.changePct ?? 0
+    };
+  }
+
+  const startValue = sparkline[0];
+  const endValue = sparkline[sparkline.length - 1];
+
+  if (!Number.isFinite(startValue) || !Number.isFinite(endValue) || startValue === 0) {
+    return {
+      changeUsd: tile?.changeUsd ?? 0,
+      changePct: tile?.changePct ?? 0
+    };
+  }
+
+  const changeUsd = endValue - startValue;
+  const changePct = (changeUsd / startValue) * 100;
+
+  return {
+    changeUsd: round(changeUsd),
+    changePct: round(changePct)
+  };
+}
+
+function summarizeTiles(tiles) {
+  const totalValueUsd = tiles.reduce((sum, tile) => sum + (tile?.valueUsd ?? 0), 0);
+  const weightedChangePct =
+    totalValueUsd > 0
+      ? tiles.reduce((sum, tile) => sum + (tile?.valueUsd ?? 0) * (tile?.changePct ?? 0), 0) / totalValueUsd
+      : 0;
+
+  return {
+    totalValueUsd,
+    weightedChangePct: round(weightedChangePct)
+  };
+}
+
+function buildMacroDashboardLookbackView(macroDashboard, lookback) {
+  if (!macroDashboard) {
+    return null;
+  }
+
+  const sections = (macroDashboard.sections ?? []).map((section) => {
+    const groups = (section.groups ?? []).map((group) => {
+      const tiles = (group.tiles ?? []).map((tile) => {
+        const change = getTileLookbackChange(tile, lookback);
+
+        return {
+          ...tile,
+          changeUsd: change.changeUsd,
+          changePct: change.changePct
+        };
+      });
+      const groupSummary = summarizeTiles(tiles);
+
+      return {
+        ...group,
+        tiles,
+        totalValueUsd: groupSummary.totalValueUsd,
+        weightedChangePct: groupSummary.weightedChangePct
+      };
+    });
+
+    const sectionTiles = groups.flatMap((group) => group.tiles ?? []);
+    const sectionSummary = summarizeTiles(sectionTiles);
+
+    return {
+      ...section,
+      groups,
+      totalValueUsd: sectionSummary.totalValueUsd,
+      weightedChangePct: sectionSummary.weightedChangePct
+    };
+  });
+
+  const flowTiles = sections.flatMap((section) =>
+    (section.groups ?? []).flatMap((group) =>
+      (group.tiles ?? []).map((tile) => ({
+        id: tile.id,
+        label: tile.label,
+        groupTitle: group.title,
+        sectionTitle: section.title,
+        changeUsd: tile.changeUsd,
+        changePct: tile.changePct
+      }))
+    )
+  );
+
+  const positiveChangeUsd = flowTiles.reduce((sum, tile) => sum + Math.max(tile.changeUsd ?? 0, 0), 0);
+  const negativeChangeUsd = flowTiles.reduce((sum, tile) => sum + Math.min(tile.changeUsd ?? 0, 0), 0);
+
+  const flowSummary = {
+    positiveChangeUsd: round(positiveChangeUsd),
+    negativeChangeUsd: round(negativeChangeUsd),
+    netChangeUsd: round(positiveChangeUsd + negativeChangeUsd),
+    largestInflows: [...flowTiles].sort((left, right) => (right.changeUsd ?? 0) - (left.changeUsd ?? 0)).slice(0, 5),
+    largestOutflows: [...flowTiles].sort((left, right) => (left.changeUsd ?? 0) - (right.changeUsd ?? 0)).slice(0, 5)
+  };
+
+  return {
+    ...macroDashboard,
+    sections,
+    flowSummary
+  };
 }
 
 function splitBalanced(items, valueKey) {
@@ -747,11 +861,17 @@ export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }
     setSelectedLookback((currentLookback) => normalizeDisplayLookback(currentLookback, defaultLookback));
   }, [macroDashboard]);
 
+  const heatmapLookback = DISPLAY_LOOKBACK_TO_HEATMAP[selectedLookback] ?? "30D";
+  const macroDashboardView = useMemo(
+    () => buildMacroDashboardLookbackView(macroDashboard, heatmapLookback) || macroDashboard,
+    [macroDashboard, heatmapLookback]
+  );
+
   if (!macroDashboard) {
     return null;
   }
 
-  const orderedSections = orderSections(macroDashboard.sections, sectionLayout.order);
+  const orderedSections = orderSections(macroDashboardView.sections, sectionLayout.order);
 
   async function refreshSavedDashboards() {
     const response = await fetch("/api/dashboards");
@@ -938,17 +1058,17 @@ export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }
           <div className="macro-pulse">
             <div>
               <span>Net tracked change</span>
-              <strong className={macroDashboard.flowSummary.netChangeUsd >= 0 ? "positive" : "negative"}>
-                {formatFlowUsd(macroDashboard.flowSummary.netChangeUsd)}
+              <strong className={macroDashboardView.flowSummary.netChangeUsd >= 0 ? "positive" : "negative"}>
+                {formatFlowUsd(macroDashboardView.flowSummary.netChangeUsd)}
               </strong>
             </div>
             <div>
               <span>Gross expansion</span>
-              <strong className="positive">{formatFlowUsd(macroDashboard.flowSummary.positiveChangeUsd)}</strong>
+              <strong className="positive">{formatFlowUsd(macroDashboardView.flowSummary.positiveChangeUsd)}</strong>
             </div>
             <div>
               <span>Gross contraction</span>
-              <strong className="negative">{formatFlowUsd(macroDashboard.flowSummary.negativeChangeUsd)}</strong>
+              <strong className="negative">{formatFlowUsd(macroDashboardView.flowSummary.negativeChangeUsd)}</strong>
             </div>
           </div>
         </article>
@@ -956,22 +1076,22 @@ export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }
         <FlowColumn
           title="Largest inflows"
           accentClass="pill--live"
-          items={macroDashboard.flowSummary.largestInflows}
+          items={macroDashboardView.flowSummary.largestInflows}
         />
 
         <FlowColumn
           title="Largest outflows"
           accentClass="pill--ghost"
-          items={macroDashboard.flowSummary.largestOutflows}
+          items={macroDashboardView.flowSummary.largestOutflows}
         />
 
         <AtlasControlsCard
-          totalValueUsd={macroDashboard.totals.grossTrackedValueUsd}
+          totalValueUsd={macroDashboardView.totals.grossTrackedValueUsd}
           lookbacks={lookbacks}
           selectedLookback={selectedLookback}
           onSelectLookback={setSelectedLookback}
-          refreshedAt={macroDashboard.refreshedAt}
-          nextRefreshAt={macroDashboard.nextRefreshAt}
+          refreshedAt={macroDashboardView.refreshedAt}
+          nextRefreshAt={macroDashboardView.nextRefreshAt}
         />
       </div>
 
@@ -983,7 +1103,7 @@ export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }
             <HeatmapSection
               key={section.id}
               section={section}
-              lookback={DISPLAY_LOOKBACK_TO_HEATMAP[selectedLookback] ?? "30D"}
+              lookback={heatmapLookback}
               theme={theme}
               surfaceHeight={surfaceHeight}
               editMode={editMode}

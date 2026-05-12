@@ -4,7 +4,8 @@ HedgeHub is a personal hedge-strategy workstation with:
 
 - a React frontend tuned for dense market monitoring
 - an Express backend for live quote refresh and strategy analytics
-- SQLite storage through `better-sqlite3`
+- SQLite compatibility through `better-sqlite3`
+- PostgreSQL 16 + TimescaleDB bootstrap for historical-data migration
 - TradingView widgets for market context and calendars
 
 ## Run
@@ -24,6 +25,15 @@ npm run build
 npm start
 ```
 
+Service scripts:
+
+```bash
+./scripts/startup.sh
+./scripts/startup.sh --local-db
+./scripts/restart.sh
+./scripts/shutdown.sh
+```
+
 Docker / NAS deployment:
 
 ```bash
@@ -31,6 +41,12 @@ cp .env.compose.example .env
 docker compose pull
 docker compose up -d
 ```
+
+The default compose stack now includes:
+
+- `postgres` using `timescale/timescaledb:latest-pg16`
+- deterministic SQL bootstrap from `db/init/`
+- persistent Postgres data in the `postgres_data` volume
 
 With the optional IBKR sidecar:
 
@@ -52,7 +68,7 @@ If you run on an existing external Docker network such as `nocodb_network`, a re
 - `deploy/docker-compose.nocodb-ibkr-embedded.example.yml`
 
 - app: `http://localhost:8787` by default, or the host port set in `.env`
-- image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub-livedata:latest`
+- image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub-postgresql:latest`
 - `POLYGON_API_KEY` is optional and can be added to `.env` if you want live Polygon option-chain data
 - `IBKR_CP_BASE_URL` defaults to `https://ibkr-gateway:5000/v1/api` for the optional Docker sidecar
 - `IBKR_CP_ACCOUNT_ID` is optional if you want HedgeHub to pin a specific IBKR paper account
@@ -61,9 +77,10 @@ If you run on an existing external Docker network such as `nocodb_network`, a re
 - `IBKR_SYNC_INTERVAL_MS` controls how often HedgeHub refreshes broker-backed paper orders
 - `IBKR_GATEWAY_DIR` should point to the unzipped `clientportal.gw` bundle when you enable the `ibkr` profile
 - `IBKR_GATEWAY_IMAGE` defaults to `ghcr.io/qudy2001/hedgehub-ibkr-gateway:latest`
-- `HEDGEHUB_IBKR_IMAGE` defaults to `ghcr.io/qudy2001/hedgehub-livedata-ibkr:latest`
+- `HEDGEHUB_IBKR_IMAGE` defaults to `ghcr.io/qudy2001/hedgehub-postgresql-ibkr:latest`
 - `IBKR_GATEWAY_HOST_PORT` defaults to `5001`, so the NAS-hosted gateway login page is exposed on `https://<nas-host>:5001`
 - persistent data: `data/` for SQLite and `dashboards/` for saved layouts
+- persistent PostgreSQL data: Docker volume `postgres_data`
 - logs: use `docker compose logs -f hedgehub`
 - default dashboard layouts are seeded automatically on first boot if the dashboards volume starts empty
 
@@ -84,7 +101,8 @@ GitHub image publishing:
 - a GitHub Actions workflow at `.github/workflows/docker-publish.yml` builds multi-arch images for `linux/amd64` and `linux/arm64`
 - pushes on `main`, `master`, `codex/livedata`, `codex/embedded-ibkr-gateway`, tags starting with `v`, and manual runs
 - publishes to GitHub Container Registry as `ghcr.io/<owner>/<repo>`
-- the `codex/livedata` and `codex/embedded-ibkr-gateway` branches publish a separate image line at `ghcr.io/qudy2001/hedgehub-livedata`
+- the `codex/livedata` and `codex/embedded-ibkr-gateway` branches still publish the legacy `ghcr.io/qudy2001/hedgehub-livedata` line
+- the `codex/postgresql` branch publishes the PostgreSQL line at `ghcr.io/qudy2001/hedgehub-postgresql`
 - if the package stays private, the NAS must log in first with `docker login ghcr.io`
 
 Nginx reverse proxy:
@@ -106,15 +124,60 @@ Service scripts:
 ./scripts/startup.sh
 ./scripts/restart.sh
 ./scripts/shutdown.sh
+./scripts/publish-image.sh
+./scripts/publish-image-fast.sh
 ./scripts/publish-ibkr-image.sh
 ./scripts/publish-ibkr-image-fast.sh
 ```
 
 The scripts write the PID file and application log under `logs/`.
 
-Manual embedded-image publish:
+## Database modes
+
+App configuration is now environment-driven:
+
+```env
+DB_TYPE=postgres
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=optionsdb
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/optionsdb
+
+SQLITE_DATA_DIR=./data
+SQLITE_DB_PATH=./data/hedgehub.db
+```
+
+Local macOS PostgreSQL:
 
 ```bash
+brew install postgresql@16
+brew services start postgresql@16
+createdb optionsdb
+psql postgresql://postgres:postgres@localhost:5432/optionsdb -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+./scripts/startup.sh --local-db
+```
+
+SQLite fallback remains available:
+
+```bash
+DB_TYPE=sqlite ./scripts/startup.sh
+```
+
+SQLite-to-PostgreSQL migration:
+
+```bash
+./scripts/migrate_sqlite_to_postgres.py --resume
+```
+
+More detail lives in [docs/database.md](/Users/raylv/Developer/HedgeHub SQL/docs/database.md:1).
+
+Manual PostgreSQL image publish:
+
+```bash
+./scripts/publish-image.sh
+./scripts/publish-image-fast.sh
 ./scripts/publish-ibkr-image.sh
 ./scripts/publish-ibkr-image-fast.sh
 ```
@@ -127,6 +190,27 @@ Manual embedded-image publish:
 - P&L timeline for daily BTC-to-80k scenarios through March 31
 - Greek-aware option model using delta, gamma, vega, and theta
 - TradingView embeds for ticker tape, advanced chart, market overview, economic calendar, and events
+- shared scanner persistence for TradingView Finder and Covered Income runs
+- candidate rank history and paper-trade promotion tracking for scanner workflows
+- regime-aware scanner payloads with IV rank, IV/HV spread, EV/BP, portfolio impact, and explainability data
+- progressive-disclosure scanner UI with a lean decision grid and deeper analytics in the detail area
+
+## Scanner intelligence
+
+The scanner platform is moving from stateless tables to persistent strategy-intelligence workflows:
+
+- shared run persistence and presets
+- candidate rank drift tracking
+- volatility regime classification
+- portfolio overlap diagnostics
+- explainable score breakdowns
+
+Implementation notes live here:
+
+- [docs/scanner-architecture.md](/Users/raylv/Developer/HedgeHub SQL/docs/scanner-architecture.md:1)
+- [docs/scoring-system.md](/Users/raylv/Developer/HedgeHub SQL/docs/scoring-system.md:1)
+- [docs/volatility-regime.md](/Users/raylv/Developer/HedgeHub SQL/docs/volatility-regime.md:1)
+- [docs/ui-architecture.md](/Users/raylv/Developer/HedgeHub SQL/docs/ui-architecture.md:1)
 
 ## Current limits
 
@@ -172,7 +256,7 @@ Docker / NAS embedded gateway:
 
 Notes:
 
-- The embedded image publishes a separate image line: `ghcr.io/qudy2001/hedgehub-livedata-ibkr:latest`.
+- The embedded image publishes a separate PostgreSQL image line: `ghcr.io/qudy2001/hedgehub-postgresql-ibkr:latest`.
 - This is the simplest NAS deployment path when the IBKR Gateway IP allowlist rejects sibling containers on a Docker bridge network.
 - If the gateway still returns `403 Access Denied` after browser login, use `network_mode: host` on Linux NAS deployments so the browser login and HedgeHub API calls share the host network namespace.
 - The sidecar deployment remains available if you prefer separate containers.

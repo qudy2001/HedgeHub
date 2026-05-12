@@ -1,28 +1,87 @@
 import http from "node:http";
 import https from "node:https";
+import { logInfo, logWarn } from "./logger.js";
 
-const IBKR_CP_BASE_URL = String(
-  process.env.IBKR_CP_BASE_URL || "https://127.0.0.1:5000/v1/api"
-)
-  .trim()
-  .replace(/\/+$/, "");
-const IBKR_CP_TIMEOUT_MS = Math.max(Number(process.env.IBKR_CP_TIMEOUT_MS ?? 15000) || 15000, 5000);
-const IBKR_CP_ALLOW_SELF_SIGNED =
-  String(process.env.IBKR_CP_ALLOW_SELF_SIGNED ?? "true").trim().toLowerCase() !== "false";
-const IBKR_CP_ACCOUNT_ID = String(process.env.IBKR_CP_ACCOUNT_ID ?? "").trim();
-const IBKR_CP_REQUIRE_PAPER =
-  String(process.env.IBKR_CP_REQUIRE_PAPER ?? "true").trim().toLowerCase() !== "false";
-const IBKR_CP_EXT_OPERATOR = String(process.env.IBKR_CP_EXT_OPERATOR ?? "").trim();
-const IBKR_CP_MANUAL_INDICATOR =
-  String(process.env.IBKR_CP_MANUAL_INDICATOR ?? "false").trim().toLowerCase() === "true";
+const DEFAULT_IBKR_CONFIG = Object.freeze({
+  baseUrl: String(process.env.IBKR_CP_BASE_URL || "https://127.0.0.1:5000/v1/api")
+    .trim()
+    .replace(/\/+$/, ""),
+  timeoutMs: Math.max(Number(process.env.IBKR_CP_TIMEOUT_MS ?? 15000) || 15000, 5000),
+  allowSelfSigned: String(process.env.IBKR_CP_ALLOW_SELF_SIGNED ?? "true").trim().toLowerCase() !== "false",
+  accountId: String(process.env.IBKR_CP_ACCOUNT_ID ?? "").trim(),
+  requirePaper: String(process.env.IBKR_CP_REQUIRE_PAPER ?? "true").trim().toLowerCase() !== "false",
+  extOperator: String(process.env.IBKR_CP_EXT_OPERATOR ?? "").trim(),
+  manualIndicator: String(process.env.IBKR_CP_MANUAL_INDICATOR ?? "false").trim().toLowerCase() === "true"
+});
 const IBKR_DEFAULT_USD_COMBO_SPREAD_CONID = "28812380";
 
-const SESSION_COOKIES = new Map();
+const SESSION_COOKIES_BY_KEY = new Map();
 const OPTION_CONTRACT_CACHE = new Map();
+const STOCK_CONTRACT_CACHE = new Map();
 
 function toNumber(value, fallback = null) {
   const numericValue = Number(value);
   return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function normalizeIbkrBaseUrl(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+function resolveIbkrConfig(overrides = null) {
+  const patch = overrides && typeof overrides === "object" ? overrides : {};
+  const baseUrl = normalizeIbkrBaseUrl(patch.baseUrl ?? patch.IBKR_CP_BASE_URL ?? DEFAULT_IBKR_CONFIG.baseUrl);
+
+  return {
+    baseUrl,
+    timeoutMs: Math.max(Number(patch.timeoutMs ?? patch.IBKR_CP_TIMEOUT_MS ?? DEFAULT_IBKR_CONFIG.timeoutMs) || DEFAULT_IBKR_CONFIG.timeoutMs, 5000),
+    allowSelfSigned:
+      typeof patch.allowSelfSigned === "boolean"
+        ? patch.allowSelfSigned
+        : patch.IBKR_CP_ALLOW_SELF_SIGNED != null
+          ? String(patch.IBKR_CP_ALLOW_SELF_SIGNED).trim().toLowerCase() !== "false"
+          : DEFAULT_IBKR_CONFIG.allowSelfSigned,
+    accountId: String(patch.accountId ?? patch.IBKR_CP_ACCOUNT_ID ?? DEFAULT_IBKR_CONFIG.accountId ?? "").trim(),
+    requirePaper:
+      typeof patch.requirePaper === "boolean"
+        ? patch.requirePaper
+        : patch.IBKR_CP_REQUIRE_PAPER != null
+          ? String(patch.IBKR_CP_REQUIRE_PAPER).trim().toLowerCase() !== "false"
+          : DEFAULT_IBKR_CONFIG.requirePaper,
+    extOperator: String(patch.extOperator ?? patch.IBKR_CP_EXT_OPERATOR ?? DEFAULT_IBKR_CONFIG.extOperator ?? "").trim(),
+    manualIndicator:
+      typeof patch.manualIndicator === "boolean"
+        ? patch.manualIndicator
+        : patch.IBKR_CP_MANUAL_INDICATOR != null
+          ? String(patch.IBKR_CP_MANUAL_INDICATOR).trim().toLowerCase() === "true"
+          : DEFAULT_IBKR_CONFIG.manualIndicator
+  };
+}
+
+function getCookieJar(cookieJarKey) {
+  const normalizedKey = String(cookieJarKey ?? "default").trim() || "default";
+  const existing = SESSION_COOKIES_BY_KEY.get(normalizedKey);
+  if (existing) {
+    return existing;
+  }
+
+  const created = new Map();
+  SESSION_COOKIES_BY_KEY.set(normalizedKey, created);
+  return created;
+}
+
+function resolveIbkrContext({ config, cookieJarKey } = {}) {
+  const resolvedConfig = resolveIbkrConfig(config);
+  const baseKey = String(cookieJarKey ?? "default").trim() || "default";
+  const jarKey = `${baseKey}:${resolvedConfig.baseUrl || "unset"}`;
+
+  return {
+    config: resolvedConfig,
+    cookieJar: getCookieJar(jarKey),
+    jarKey
+  };
 }
 
 function normalizeTimestamp(value) {
@@ -74,14 +133,14 @@ function isPaperAccountId(value) {
   return accountId.startsWith("D");
 }
 
-function deriveIbkrPaperSession(accountsPayload) {
+function deriveIbkrPaperSession(accountsPayload, configuredAccountId = "") {
   if (typeof accountsPayload?.isPaper === "boolean") {
     return accountsPayload.isPaper;
   }
 
   const availableAccounts = Array.isArray(accountsPayload?.accounts) ? accountsPayload.accounts : [];
   const selectedAccount = normalizeAccountId(accountsPayload?.selectedAccount);
-  const configuredAccount = normalizeAccountId(IBKR_CP_ACCOUNT_ID);
+  const configuredAccount = normalizeAccountId(configuredAccountId);
   const normalizedAvailableAccounts = availableAccounts.map((accountId) => normalizeAccountId(accountId)).filter(Boolean);
 
   if (selectedAccount) {
@@ -117,7 +176,7 @@ function parseSetCookie(setCookieValue) {
   };
 }
 
-function storeCookies(setCookieHeader) {
+function storeCookies(cookieJar, setCookieHeader) {
   const cookieValues = Array.isArray(setCookieHeader)
     ? setCookieHeader
     : setCookieHeader
@@ -130,18 +189,18 @@ function storeCookies(setCookieHeader) {
       return;
     }
 
-    SESSION_COOKIES.set(parsed.name, parsed.value);
+    cookieJar.set(parsed.name, parsed.value);
   });
 }
 
-function buildCookieHeader() {
-  return [...SESSION_COOKIES.entries()]
+function buildCookieHeader(cookieJar) {
+  return [...cookieJar.entries()]
     .map(([name, value]) => `${name}=${value}`)
     .join("; ");
 }
 
-function clearCookies() {
-  SESSION_COOKIES.clear();
+function clearCookies(cookieJar) {
+  cookieJar.clear();
 }
 
 function extractIbkrError(payload) {
@@ -173,8 +232,8 @@ function extractIbkrError(payload) {
     .join(" | ");
 }
 
-function buildUrl(pathname, query = {}) {
-  const url = new URL(pathname.startsWith("http") ? pathname : `${IBKR_CP_BASE_URL}${pathname}`);
+function buildUrl(baseUrl, pathname, query = {}) {
+  const url = new URL(pathname.startsWith("http") ? pathname : `${baseUrl}${pathname}`);
 
   Object.entries(query).forEach(([key, value]) => {
     if (value == null || value === "") {
@@ -191,11 +250,20 @@ function getTransport(url) {
   return url.protocol === "https:" ? https : http;
 }
 
-async function ibkrRequestOnce(method, pathname, { query, body, includeCookies = true } = {}) {
-  const url = buildUrl(pathname, query);
+async function ibkrRequestOnce(context, method, pathname, { query, body, includeCookies = true } = {}) {
+  const resolvedContext =
+    context && typeof context === "object" && context.config && context.cookieJar
+      ? context
+      : resolveIbkrContext(context && typeof context === "object" ? context : {});
+  const baseUrl = String(resolvedContext.config?.baseUrl ?? "").trim();
+  if (!baseUrl) {
+    throw new Error("IBKR baseUrl is not configured");
+  }
+
+  const url = buildUrl(baseUrl, pathname, query);
   const transport = getTransport(url);
   const payload = body == null ? null : JSON.stringify(body);
-  const cookieHeader = includeCookies ? buildCookieHeader() : "";
+  const cookieHeader = includeCookies ? buildCookieHeader(resolvedContext.cookieJar) : "";
 
   const headers = {
     Accept: "application/json",
@@ -215,8 +283,8 @@ async function ibkrRequestOnce(method, pathname, { query, body, includeCookies =
       {
         method,
         headers,
-        timeout: IBKR_CP_TIMEOUT_MS,
-        rejectUnauthorized: !(url.protocol === "https:" && IBKR_CP_ALLOW_SELF_SIGNED)
+        timeout: resolvedContext.config.timeoutMs,
+        rejectUnauthorized: !(url.protocol === "https:" && resolvedContext.config.allowSelfSigned)
       },
       (response) => {
         const chunks = [];
@@ -225,7 +293,7 @@ async function ibkrRequestOnce(method, pathname, { query, body, includeCookies =
           chunks.push(chunk);
         });
         response.on("end", () => {
-          storeCookies(response.headers["set-cookie"]);
+          storeCookies(resolvedContext.cookieJar, response.headers["set-cookie"]);
           const rawBody = chunks.join("").trim();
           let parsedBody = rawBody;
 
@@ -263,7 +331,7 @@ async function ibkrRequestOnce(method, pathname, { query, body, includeCookies =
     });
 
     request.on("timeout", () => {
-      request.destroy(new Error(`IBKR request timed out after ${IBKR_CP_TIMEOUT_MS}ms`));
+      request.destroy(new Error(`IBKR request timed out after ${resolvedContext.config.timeoutMs}ms`));
     });
 
     if (payload) {
@@ -274,13 +342,18 @@ async function ibkrRequestOnce(method, pathname, { query, body, includeCookies =
   });
 }
 
-async function ibkrRequest(method, pathname, options = {}) {
+async function ibkrRequest(context, method, pathname, options = {}) {
+  const resolvedContext =
+    context && typeof context === "object" && context.config && context.cookieJar
+      ? context
+      : resolveIbkrContext(context && typeof context === "object" ? context : {});
+
   try {
-    return await ibkrRequestOnce(method, pathname, options);
+    return await ibkrRequestOnce(resolvedContext, method, pathname, options);
   } catch (error) {
-    if ((error?.statusCode === 401 || error?.statusCode === 403) && SESSION_COOKIES.size) {
-      clearCookies();
-      return ibkrRequestOnce(method, pathname, { ...options, includeCookies: false });
+    if ((error?.statusCode === 401 || error?.statusCode === 403) && resolvedContext.cookieJar.size) {
+      clearCookies(resolvedContext.cookieJar);
+      return ibkrRequestOnce(resolvedContext, method, pathname, { ...options, includeCookies: false });
     }
 
     throw error;
@@ -491,13 +564,13 @@ function readIbkrOrderStatusText(payload, fallback = "") {
   ).trim();
 }
 
-async function getAuthStatus() {
-  const authStatus = await ibkrRequest("POST", "/iserver/auth/status", {
+async function getAuthStatus(context) {
+  const authStatus = await ibkrRequest(context, "POST", "/iserver/auth/status", {
     body: {}
   });
 
   if (!authStatus?.authenticated && authStatus?.connected !== false) {
-    const initialized = await ibkrRequest("POST", "/iserver/auth/ssodh/init", {
+    const initialized = await ibkrRequest(context, "POST", "/iserver/auth/ssodh/init", {
       body: {
         publish: true,
         compete: true
@@ -510,36 +583,39 @@ async function getAuthStatus() {
   return authStatus;
 }
 
-async function getAccountsPayload() {
-  return ibkrRequest("GET", "/iserver/accounts");
+async function getAccountsPayload(context) {
+  return ibkrRequest(context, "GET", "/iserver/accounts");
 }
 
-async function selectAccount(accountId) {
+async function selectAccount(context, accountId) {
   if (!accountId) {
     return null;
   }
 
-  return ibkrRequest("POST", "/iserver/account", {
+  return ibkrRequest(context, "POST", "/iserver/account", {
     body: {
       acctId: accountId
     }
   });
 }
 
-export async function tickleIbkrSession() {
-  if (!IBKR_CP_BASE_URL) {
+export async function tickleIbkrSession(contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
+  if (!context.config.baseUrl) {
     return null;
   }
 
   try {
-    return await ibkrRequest("POST", "/tickle", { body: {} });
+    return await ibkrRequest(context, "POST", "/tickle", { body: {} });
   } catch (_error) {
     return null;
   }
 }
 
-export async function getIbkrStatus() {
-  if (!IBKR_CP_BASE_URL) {
+export async function getIbkrStatus(contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
+
+  if (!context.config.baseUrl) {
     return {
       configured: false,
       connected: false,
@@ -549,21 +625,21 @@ export async function getIbkrStatus() {
       accounts: [],
       aliases: {},
       allowedAssetTypes: "",
-      error: "IBKR_CP_BASE_URL is not configured"
+      error: "IBKR baseUrl is not configured"
     };
   }
 
   try {
-    const authStatus = await getAuthStatus();
-    const accounts = authStatus?.connected ? await getAccountsPayload() : null;
-    const isPaper = deriveIbkrPaperSession(accounts);
+    const authStatus = await getAuthStatus(context);
+    const accounts = authStatus?.connected ? await getAccountsPayload(context) : null;
+    const isPaper = deriveIbkrPaperSession(accounts, context.config.accountId);
 
     return {
       configured: true,
       connected: authStatus?.connected === true,
       authenticated: authStatus?.authenticated === true,
       isPaper,
-      selectedAccount: String(accounts?.selectedAccount ?? IBKR_CP_ACCOUNT_ID ?? "").trim(),
+      selectedAccount: String(accounts?.selectedAccount ?? context.config.accountId ?? "").trim(),
       accounts: Array.isArray(accounts?.accounts) ? accounts.accounts : [],
       aliases: accounts?.aliases ?? {},
       allowedAssetTypes: String(accounts?.allowFeatures?.allowedAssetTypes ?? "").trim(),
@@ -585,24 +661,26 @@ export async function getIbkrStatus() {
   }
 }
 
-export async function ensureIbkrPaperSession(accountIdHint = "") {
-  if (!IBKR_CP_BASE_URL) {
-    throw new Error("IBKR_CP_BASE_URL is not configured");
+export async function ensureIbkrPaperSession(accountIdHint = "", contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
+
+  if (!context.config.baseUrl) {
+    throw new Error("IBKR baseUrl is not configured");
   }
 
-  const authStatus = await getAuthStatus();
+  const authStatus = await getAuthStatus(context);
   if (authStatus?.connected !== true || authStatus?.authenticated !== true) {
     throw new Error("IBKR Client Portal Gateway is not authenticated");
   }
 
-  const accountsPayload = await getAccountsPayload();
-  const isPaper = deriveIbkrPaperSession(accountsPayload);
-  if (IBKR_CP_REQUIRE_PAPER && isPaper !== true) {
+  const accountsPayload = await getAccountsPayload(context);
+  const isPaper = deriveIbkrPaperSession(accountsPayload, context.config.accountId);
+  if (context.config.requirePaper && isPaper !== true) {
     throw new Error("IBKR Gateway session is not in paper mode");
   }
 
   const availableAccounts = Array.isArray(accountsPayload?.accounts) ? accountsPayload.accounts : [];
-  const requestedAccountId = String(accountIdHint || IBKR_CP_ACCOUNT_ID || accountsPayload?.selectedAccount || "")
+  const requestedAccountId = String(accountIdHint || context.config.accountId || accountsPayload?.selectedAccount || "")
     .trim();
   const accountId = requestedAccountId || availableAccounts[0] || "";
 
@@ -613,7 +691,7 @@ export async function ensureIbkrPaperSession(accountIdHint = "") {
   const selectedAccount = String(accountsPayload?.selectedAccount ?? "").trim();
   if (selectedAccount && selectedAccount !== accountId) {
     if (availableAccounts.includes(accountId)) {
-      await selectAccount(accountId);
+      await selectAccount(context, accountId);
     } else {
       throw new Error(`Requested IBKR account ${accountId} is not available in the current session`);
     }
@@ -641,9 +719,79 @@ function findOptionSearchMatches(results, symbol) {
     : [];
 }
 
-async function searchUnderlyingContract(symbol) {
+function findStockSearchMatches(results, symbol) {
   const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
-  const primaryResults = await ibkrRequest("GET", "/iserver/secdef/search", {
+
+  return Array.isArray(results)
+    ? results.filter((candidate) => String(candidate?.symbol ?? "").trim().toUpperCase() === normalizedSymbol)
+    : [];
+}
+
+async function resolveIbkrStockContract(context, symbol) {
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
+
+  if (!normalizedSymbol) {
+    throw new Error("Stock symbol is required for IBKR routing");
+  }
+
+  if (STOCK_CONTRACT_CACHE.has(normalizedSymbol)) {
+    return STOCK_CONTRACT_CACHE.get(normalizedSymbol);
+  }
+
+  const primaryResults = await ibkrRequest(context, "GET", "/iserver/secdef/search", {
+    query: {
+      symbol: normalizedSymbol,
+      secType: "STK",
+      name: true
+    }
+  });
+
+  let matches = findStockSearchMatches(primaryResults, normalizedSymbol);
+
+  if (!matches.length) {
+    const fallbackResults = await ibkrRequest(context, "GET", "/iserver/secdef/search", {
+      query: {
+        symbol: normalizedSymbol,
+        secType: "STK"
+      }
+    });
+    matches = findStockSearchMatches(fallbackResults, normalizedSymbol);
+  }
+
+  const selectedMatch =
+    matches.find((candidate) =>
+      Array.isArray(candidate?.sections) &&
+      candidate.sections.some(
+        (section) =>
+          String(section?.secType ?? "").trim().toUpperCase() === "STK" &&
+          String(section?.exchange ?? "").trim().toUpperCase() === "SMART"
+      )
+    ) ??
+    matches.find((candidate) =>
+      Array.isArray(candidate?.sections) &&
+      candidate.sections.some((section) => String(section?.secType ?? "").trim().toUpperCase() === "STK")
+    ) ??
+    matches[0] ??
+    null;
+
+  const rawConid = String(selectedMatch?.conid ?? "").trim();
+  if (!selectedMatch || !rawConid || !/^\d+$/.test(rawConid)) {
+    throw new Error(`IBKR could not resolve stock contract for ${normalizedSymbol}`);
+  }
+
+  const resolved = {
+    conid: rawConid,
+    symbol: normalizedSymbol,
+    description: String(selectedMatch?.name ?? selectedMatch?.companyName ?? selectedMatch?.description ?? "").trim()
+  };
+
+  STOCK_CONTRACT_CACHE.set(normalizedSymbol, resolved);
+  return resolved;
+}
+
+async function searchUnderlyingContract(context, symbol) {
+  const normalizedSymbol = String(symbol ?? "").trim().toUpperCase();
+  const primaryResults = await ibkrRequest(context, "GET", "/iserver/secdef/search", {
     query: {
       symbol: normalizedSymbol,
       secType: "OPT",
@@ -654,7 +802,7 @@ async function searchUnderlyingContract(symbol) {
   let matches = findOptionSearchMatches(primaryResults, normalizedSymbol);
   if (!matches.length) {
     // Newer Client Portal Gateway builds can return empty `sections` when `name=true`.
-    const fallbackResults = await ibkrRequest("GET", "/iserver/secdef/search", {
+    const fallbackResults = await ibkrRequest(context, "GET", "/iserver/secdef/search", {
       query: {
         symbol: normalizedSymbol,
         secType: "OPT"
@@ -677,7 +825,8 @@ async function searchUnderlyingContract(symbol) {
   return selectedMatch;
 }
 
-export async function resolveIbkrOptionContract(leg) {
+export async function resolveIbkrOptionContract(leg, contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
   const cacheKey = [
     String(leg?.rootSymbol ?? "").trim().toUpperCase(),
     String(leg?.expiry ?? "").trim(),
@@ -695,14 +844,14 @@ export async function resolveIbkrOptionContract(leg) {
     throw new Error("Option root symbol is required for IBKR routing");
   }
 
-  const searchMatch = await searchUnderlyingContract(rootSymbol);
+  const searchMatch = await searchUnderlyingContract(context, rootSymbol);
   const monthCandidates = buildMonthCandidates(leg?.expiry);
   const matchingContracts = [];
 
   for (const monthCandidate of monthCandidates) {
     let contracts = null;
     try {
-      contracts = await ibkrRequest("GET", "/iserver/secdef/info", {
+      contracts = await ibkrRequest(context, "GET", "/iserver/secdef/info", {
         query: {
           conid: searchMatch.conid,
           sectype: "OPT",
@@ -825,7 +974,7 @@ export function calculateIbkrLimitPrice(order) {
   }, 0);
 }
 
-async function resolveRequestedLegConids(legs) {
+async function resolveRequestedLegConids(_context, legs, contextOptions = {}) {
   const resolvedLegs = [];
 
   for (const leg of legs) {
@@ -839,7 +988,7 @@ async function resolveRequestedLegConids(legs) {
             rootSymbol: String(leg.rootSymbol ?? "").trim().toUpperCase(),
             localSymbol: String(leg.contractSymbol ?? "").trim()
           }
-        : await resolveIbkrOptionContract(leg);
+        : await resolveIbkrOptionContract(leg, contextOptions);
 
     resolvedLegs.push({
       ...leg,
@@ -926,12 +1075,13 @@ function parseIbkrOrderSubmission(replyPayload, warningMessages = []) {
   };
 }
 
-export async function respondToIbkrOrderReply({ replyId, confirmed = true, warningMessages = [] }) {
+export async function respondToIbkrOrderReply({ replyId, confirmed = true, warningMessages = [] }, contextOptions = {}) {
   if (!replyId) {
     throw new Error("IBKR reply id is required");
   }
 
-  const replyPayload = await ibkrRequest("POST", `/iserver/reply/${encodeURIComponent(replyId)}`, {
+  const context = resolveIbkrContext(contextOptions);
+  const replyPayload = await ibkrRequest(context, "POST", `/iserver/reply/${encodeURIComponent(replyId)}`, {
     body: {
       confirmed: confirmed === true
     }
@@ -943,7 +1093,7 @@ export async function respondToIbkrOrderReply({ replyId, confirmed = true, warni
   return parseIbkrOrderSubmission(replyPayload, warningMessages);
 }
 
-export async function continueIbkrOrderConfirmation({ execution, confirmed = true }) {
+export async function continueIbkrOrderConfirmation({ execution, confirmed = true }, contextOptions = {}) {
   const existingExecution = execution && typeof execution === "object" ? execution : null;
   if (!existingExecution?.pendingReplyId) {
     throw new Error("IBKR confirmation is not pending for this execution");
@@ -961,7 +1111,7 @@ export async function continueIbkrOrderConfirmation({ execution, confirmed = tru
     replyId: existingExecution.pendingReplyId,
     confirmed,
     warningMessages: combinedWarnings
-  });
+  }, contextOptions);
 
   if (confirmed !== true) {
     return {
@@ -1008,7 +1158,7 @@ export async function continueIbkrOrderConfirmation({ execution, confirmed = tru
       brokerStatusPayload = await fetchIbkrOrderStatus({
         accountId: existingExecution.accountId,
         orderId: brokerOrderId
-      });
+      }, contextOptions);
     } catch (_error) {
       brokerStatusPayload = orderReply;
     }
@@ -1032,17 +1182,21 @@ export async function continueIbkrOrderConfirmation({ execution, confirmed = tru
   const replyId = String(existingExecution.pendingReplyId ?? "").trim();
 
   if (["inactive", "rejected", "error"].includes(brokerStatus)) {
-    console.warn(
-      `[IBKR] Confirmation reply ${replyId || "n/a"} resolved to ${brokerStatus} for order ${brokerOrderId || "n/a"}: ${
-        statusDescription || statusText || "No broker description"
-      }`
-    );
+    logWarn("IBKR confirmation reply resolved", {
+      subsystem: "ibkr",
+      replyId: replyId || "n/a",
+      brokerStatus,
+      brokerOrderId: brokerOrderId || "n/a",
+      statusDescription: statusDescription || statusText || "No broker description"
+    });
   } else {
-    console.info(
-      `[IBKR] Confirmation reply ${replyId || "n/a"} resolved to ${brokerStatus} for order ${brokerOrderId || "n/a"}: ${
-        statusDescription || statusText || "No broker description"
-      }`
-    );
+    logInfo("IBKR confirmation reply resolved", {
+      subsystem: "ibkr",
+      replyId: replyId || "n/a",
+      brokerStatus,
+      brokerOrderId: brokerOrderId || "n/a",
+      statusDescription: statusDescription || statusText || "No broker description"
+    });
   }
 
   return {
@@ -1103,8 +1257,148 @@ export async function continueIbkrOrderConfirmation({ execution, confirmed = tru
   };
 }
 
-export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
-  const session = await ensureIbkrPaperSession(order?.execution?.accountId);
+export async function submitIbkrStockOrder({ order, purpose = "entry" }, contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
+  const normalizedPurpose = String(purpose ?? "entry").trim().toLowerCase() === "exit" ? "exit" : "entry";
+  const requestedLeg = (order?.legs ?? []).find((leg) => leg?.kind === "stock") ?? null;
+  const requestedQuantity = Math.max(Math.round(Number(requestedLeg?.quantity ?? 0) || 0), 0);
+
+  if (!(requestedQuantity > 0)) {
+    throw new Error(`No stock hedge leg is available to ${normalizedPurpose === "exit" ? "close" : "route"} through IBKR`);
+  }
+
+  const session = await ensureIbkrPaperSession(order?.execution?.accountId ?? order?.stockExecution?.accountId, contextOptions);
+  const symbol = String(
+    requestedLeg?.rootSymbol ?? order?.marketContext?.underlyingSymbol ?? order?.marketContext?.proxySymbol ?? ""
+  )
+    .trim()
+    .toUpperCase();
+
+  const contract = await resolveIbkrStockContract(context, symbol);
+  const orderType = "MKT";
+  const tif = normalizeTif(order?.execution?.tif);
+  const outsideRth = order?.execution?.outsideRth === true;
+  const orderRef = `hedgehub-${order.id}-${normalizedPurpose}-stock-${Date.now()}`;
+  const rawAction = String(requestedLeg?.action ?? "LONG").trim().toUpperCase();
+  const isShort = rawAction === "SHORT";
+  const side =
+    normalizedPurpose === "exit"
+      ? isShort
+        ? "BUY"
+        : "SELL"
+      : isShort
+        ? "SELL"
+        : "BUY";
+
+  const orderPayload = {
+    acctId: session.accountId,
+    cOID: orderRef,
+    orderType,
+    tif,
+    outsideRTH: outsideRth,
+    outsideRth: outsideRth,
+    ticker: symbol,
+    conid: Number(contract.conid),
+    quantity: requestedQuantity,
+    side,
+    referrer: "HedgeHub",
+    ...(context.config.extOperator ? { extOperator: context.config.extOperator } : {}),
+    ...(context.config.manualIndicator ? { manualIndicator: true } : {})
+  };
+
+  const placeOrderResponse = await ibkrRequest(
+    context,
+    "POST",
+    `/iserver/account/${encodeURIComponent(session.accountId)}/orders`,
+    {
+      body: {
+        orders: [orderPayload]
+      }
+    }
+  );
+  const submittedAt = new Date().toISOString();
+  const submission = parseIbkrOrderSubmission(placeOrderResponse);
+
+  if (submission.pendingReply) {
+    console.info(
+      `[IBKR] Stock order ${orderRef} requires confirmation ${submission.pendingReply.id}: ${submission.pendingReply.messages.join(" | ")}`
+    );
+    return {
+      route: "ibkr-paper",
+      accountId: session.accountId,
+      accountAlias: session.accountAlias,
+      isPaper: session.isPaper === true,
+      status: "pending_confirmation",
+      statusText: "Broker confirmation required",
+      statusDescription: submission.pendingReply.messages.join(" | "),
+      brokerOrderId: "",
+      orderRef,
+      orderType,
+      tif,
+      outsideRth,
+      limitPrice: null,
+      avgFillPrice: null,
+      combo: false,
+      purpose: normalizedPurpose,
+      totalQuantity: requestedQuantity,
+      filledQuantity: 0,
+      remainingQuantity: requestedQuantity,
+      submittedAt,
+      lastSyncAt: submittedAt,
+      filledAt: "",
+      cancelledAt: "",
+      lastError: "",
+      lastWarning: submission.warningMessages.join(" | "),
+      warningMessages: submission.warningMessages,
+      pendingReplyId: submission.pendingReply.id,
+      pendingReplyMessages: submission.pendingReply.messages,
+      requestedLegs: []
+    };
+  }
+
+  const orderReply = Array.isArray(submission.response) ? submission.response[0] ?? null : submission.response;
+  const brokerOrderId = extractOrderId(orderReply);
+  const brokerStatus = normalizeIbkrOrderStatus(orderReply?.order_status ?? orderReply?.status ?? "submitted");
+  console.info(
+    `[IBKR] Stock order ${orderRef} accepted as ${brokerStatus || "submitted"} with broker order ${brokerOrderId || "n/a"}`
+  );
+
+  return {
+    route: "ibkr-paper",
+    accountId: session.accountId,
+    accountAlias: session.accountAlias,
+    isPaper: session.isPaper === true,
+    status: brokerStatus || "submitted",
+    statusText: String(orderReply?.order_status ?? orderReply?.status ?? "Submitted"),
+    statusDescription: String(orderReply?.text ?? orderReply?.message ?? ""),
+    brokerOrderId,
+    orderRef,
+    orderType,
+    tif,
+    outsideRth,
+    limitPrice: null,
+    avgFillPrice: null,
+    combo: false,
+    purpose: normalizedPurpose,
+    totalQuantity: requestedQuantity,
+    filledQuantity: 0,
+    remainingQuantity: requestedQuantity,
+    submittedAt,
+    lastSyncAt: submittedAt,
+    filledAt: "",
+    cancelledAt: "",
+    lastError: "",
+    lastWarning: submission.warningMessages.join(" | "),
+    warningMessages: submission.warningMessages,
+    pendingReplyId: "",
+    pendingReplyMessages: [],
+    requestedLegs: []
+  };
+}
+
+export async function submitIbkrOptionOrder({ order, purpose = "entry" }, contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
+  const session = await ensureIbkrPaperSession(order?.execution?.accountId, contextOptions);
   const requestedLegs = buildRequestedOptionLegs(order, purpose).filter(
     (leg) => Number(leg.requestedQuantity ?? 0) > 0
   );
@@ -1113,7 +1407,7 @@ export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
     throw new Error(`No option legs are available to ${purpose === "exit" ? "close" : "route"} through IBKR`);
   }
 
-  const resolvedLegs = await resolveRequestedLegConids(requestedLegs);
+  const resolvedLegs = await resolveRequestedLegConids(context, requestedLegs, contextOptions);
   const isComboOrder = resolvedLegs.length > 1;
   const orderQuantity = isComboOrder
     ? greatestCommonDivisor(
@@ -1149,8 +1443,8 @@ export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
     quantity: orderQuantity,
     referrer: "HedgeHub",
     ...(orderType === "LMT" ? { price: limitPrice } : {}),
-    ...(IBKR_CP_EXT_OPERATOR ? { extOperator: IBKR_CP_EXT_OPERATOR } : {}),
-    ...(IBKR_CP_MANUAL_INDICATOR ? { manualIndicator: true } : {})
+    ...(context.config.extOperator ? { extOperator: context.config.extOperator } : {}),
+    ...(context.config.manualIndicator ? { manualIndicator: true } : {})
   };
 
   const orderPayload =
@@ -1174,6 +1468,7 @@ export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
         };
 
   const placeOrderResponse = await ibkrRequest(
+    context,
     "POST",
     `/iserver/account/${encodeURIComponent(session.accountId)}/orders`,
     {
@@ -1286,32 +1581,35 @@ export async function submitIbkrOptionOrder({ order, purpose = "entry" }) {
   };
 }
 
-export async function cancelIbkrOrder({ accountId, orderId }) {
+export async function cancelIbkrOrder({ accountId, orderId }, contextOptions = {}) {
   if (!accountId || !orderId) {
     throw new Error("IBKR accountId and orderId are required to cancel an order");
   }
 
-  await ensureIbkrPaperSession(accountId);
+  const context = resolveIbkrContext(contextOptions);
+  await ensureIbkrPaperSession(accountId, contextOptions);
 
   return ibkrRequest(
+    context,
     "DELETE",
     `/iserver/account/${encodeURIComponent(accountId)}/order/${encodeURIComponent(orderId)}`,
     {
       query: {
-        ...(IBKR_CP_MANUAL_INDICATOR ? { manualIndicator: true } : {}),
-        ...(IBKR_CP_EXT_OPERATOR ? { extOperator: IBKR_CP_EXT_OPERATOR } : {})
+        ...(context.config.manualIndicator ? { manualIndicator: true } : {}),
+        ...(context.config.extOperator ? { extOperator: context.config.extOperator } : {})
       }
     }
   );
 }
 
-export async function fetchIbkrOrderBook({ accountId, tradeDays = 7 } = {}) {
-  const session = await ensureIbkrPaperSession(accountId);
-  await tickleIbkrSession();
+export async function fetchIbkrOrderBook({ accountId, tradeDays = 7 } = {}, contextOptions = {}) {
+  const context = resolveIbkrContext(contextOptions);
+  const session = await ensureIbkrPaperSession(accountId, contextOptions);
+  await tickleIbkrSession(contextOptions);
 
   const [ordersPayload, tradesPayload] = await Promise.all([
-    ibkrRequest("GET", "/iserver/account/orders"),
-    ibkrRequest("GET", "/iserver/account/trades", {
+    ibkrRequest(context, "GET", "/iserver/account/orders"),
+    ibkrRequest(context, "GET", "/iserver/account/trades", {
       query: {
         days: Math.max(Math.min(Number(tradeDays) || 7, 7), 1)
       }
@@ -1328,13 +1626,14 @@ export async function fetchIbkrOrderBook({ accountId, tradeDays = 7 } = {}) {
   };
 }
 
-export async function fetchIbkrOrderStatus({ accountId, orderId }) {
+export async function fetchIbkrOrderStatus({ accountId, orderId }, contextOptions = {}) {
   if (!orderId) {
     return null;
   }
 
-  await ensureIbkrPaperSession(accountId);
-  return ibkrRequest("GET", `/iserver/account/order/status/${encodeURIComponent(orderId)}`);
+  const context = resolveIbkrContext(contextOptions);
+  await ensureIbkrPaperSession(accountId, contextOptions);
+  return ibkrRequest(context, "GET", `/iserver/account/order/status/${encodeURIComponent(orderId)}`);
 }
 
 export function normalizeIbkrLiveOrder(order = {}) {

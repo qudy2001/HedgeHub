@@ -15,6 +15,7 @@ COPY src ./src
 COPY server ./server
 COPY shared ./shared
 COPY defaults ./defaults
+COPY db ./db
 
 RUN npm run build \
   && npm prune --omit=dev
@@ -32,7 +33,7 @@ ENV IBKR_GATEWAY_PORT=5001
 ENV IBKR_CP_BASE_URL=https://127.0.0.1:5001/v1/api
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates curl sed \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl sed postgresql-client \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
@@ -43,6 +44,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
 COPY --from=build /app/shared ./shared
 COPY --from=build /app/defaults ./defaults
+COPY --from=build /app/db ./db
 
 COPY deploy/ibkr-gateway/docker-entrypoint.sh /usr/local/bin/ibkr-gateway-entrypoint
 COPY deploy/hedgehub-ibkr/docker-entrypoint.sh /usr/local/bin/hedgehub-ibkr-entrypoint

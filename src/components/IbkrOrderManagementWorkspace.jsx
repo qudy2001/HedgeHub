@@ -473,6 +473,10 @@ function getLegDescriptor(leg) {
     return `${leg.action} ${leg.outcome}`;
   }
 
+  if (leg.kind === "stock") {
+    return `${leg.action} shares`;
+  }
+
   return `${leg.action} ${String(leg.optionType ?? "call").toUpperCase()} ${leg.strike}${leg.optionType === "put" ? "P" : "C"} ${leg.expiry}`;
 }
 
@@ -488,6 +492,10 @@ function getLegLink(order, leg) {
 function getLegTitle(order, leg) {
   if (leg.kind === "binary") {
     return order?.polymarketQuestion || leg.label || "Polymarket";
+  }
+
+  if (leg.kind === "stock") {
+    return leg?.rootSymbol || leg?.label || "Shares";
   }
 
   return leg?.contractSymbol || leg?.label || "Option";
@@ -631,7 +639,7 @@ function ContractTree({ order }) {
                     )}
                   </td>
                   <td>{getLegDescriptor(leg)}</td>
-                  <td>{leg.kind === "binary" ? "Polymarket" : "Option"}</td>
+                  <td>{leg.kind === "binary" ? "Polymarket" : leg.kind === "stock" ? "Shares" : "Option"}</td>
                   <td>{leg.quantity ?? "n/a"}</td>
                   <td>{formatCurrency(leg.entryPrice, leg.kind === "binary" ? 4 : 2)}</td>
                   <td>{formatCurrency(leg.currentPrice, leg.kind === "binary" ? 4 : 2)}</td>

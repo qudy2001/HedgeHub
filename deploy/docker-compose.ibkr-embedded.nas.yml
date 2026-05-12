@@ -1,13 +1,21 @@
 services:
   hedgehub:
     container_name: hedgehub
-    image: ghcr.io/qudy2001/hedgehub-livedata-ibkr:latest
+    image: ghcr.io/qudy2001/hedgehub-postgresql-ibkr:latest
     init: true
     restart: unless-stopped
     network_mode: host
     environment:
       NODE_ENV: production
       PORT: 8787
+      DB_TYPE: postgres
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: optionsdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/optionsdb
+      SQLITE_DB_PATH: /app/data/hedgehub.db
       TZ: Europe/London
       POLYGON_API_KEY: jcpT5BS7ylWxLtDXkbVmuaNcELqkLPD2
       HEDGEHUB_START_IBKR_GATEWAY: "true"

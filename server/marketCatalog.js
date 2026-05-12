@@ -10,7 +10,9 @@ export const quoteWatchlist = [
   { symbol: "EWU", sourceSymbol: "ewu.us", label: "UK Equity ETF", group: "UK Stocks", provider: "stooq" },
   { symbol: "VGK", sourceSymbol: "vgk.us", label: "Europe ETF", group: "EU Stocks", provider: "stooq" },
   { symbol: "GLD", sourceSymbol: "gld.us", label: "Gold ETF", group: "Commodities", provider: "stooq" },
+  { symbol: "XAU-USD", sourceSymbol: "xauusd", label: "Gold Spot (XAU/USD)", group: "Commodities", provider: "stooq" },
   { symbol: "USO", sourceSymbol: "uso.us", label: "Oil ETF", group: "Commodities", provider: "stooq" },
+  { symbol: "WTI-USD", sourceSymbol: "cl.f", label: "WTI Crude Oil (Futures)", group: "Commodities", provider: "stooq" },
   { symbol: "TLT", sourceSymbol: "tlt.us", label: "US Treasury ETF", group: "Bonds", provider: "stooq" },
   { symbol: "BTC-USD", sourceSymbol: "bitcoin", label: "Bitcoin", group: "Crypto", provider: "coingecko" },
   { symbol: "ETH-USD", sourceSymbol: "ethereum", label: "Ethereum", group: "Crypto", provider: "coingecko" },
@@ -368,6 +370,13 @@ export const sidebarStrategies = [
     status: "ready",
     assetLabel: "AMD / NVDA / AAPL + 22",
     description: "Rank screenshot watchlist names by ATM straddle liquidity, gamma response, and hedgeability."
+  },
+  {
+    id: "strategy-5",
+    name: "Covered Income Scanner",
+    status: "ready",
+    assetLabel: "TSLA / AAPL / NVDA / SPY",
+    description: "Scan support and resistance anchored short puts, covered calls, and covered strangles by return and risk."
   },
   {
     id: "strategy-tv-finder",

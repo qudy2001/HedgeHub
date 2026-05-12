@@ -1,6 +1,11 @@
 import { pickOptionReferencePrice } from "./optionPricing.js";
 import { buildPayoffSummary } from "./strategyEngine.js";
 import {
+  buildDynamicHedgePlan,
+  evaluateDynamicHedgeSignal,
+  inferStraddleContractCount
+} from "../shared/hedgeEngine.js";
+import {
   evaluatePolymarketSignalHit,
   parsePolymarketQuestionSignal,
   parseTargetFromQuestion as parsePolymarketTargetFromQuestion,
@@ -74,6 +79,10 @@ function parseTargetFromQuestion(question) {
   return parsePolymarketTargetFromQuestion(question);
 }
 
+function invertBinaryOutcome(outcome) {
+  return outcome === "NO" ? "YES" : "NO";
+}
+
 function parseIsoDate(value) {
   if (!value) {
     return null;
@@ -105,6 +114,10 @@ function normalizeVolatility(value, fallback = 0.24) {
 
 function normalizePaperOrderStatus(value) {
   return String(value ?? "open").toLowerCase() === "closed" ? "closed" : "open";
+}
+
+function normalizePaperLegStatus(value) {
+  return String(value ?? "open").trim().toLowerCase() === "closed" ? "closed" : "open";
 }
 
 function normalizeExecutionRoute(value) {
@@ -379,8 +392,9 @@ function floorToHourTimestamp(timestamp) {
 }
 
 function normalCdf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  const absX = Math.abs(x);
+  const scaledX = x / Math.SQRT2;
+  const sign = scaledX >= 0 ? 1 : -1;
+  const absX = Math.abs(scaledX);
   const a1 = 0.254829592;
   const a2 = -0.284496736;
   const a3 = 1.421413741;
@@ -418,6 +432,28 @@ function blackScholesPrice({ type, spot, strike, timeYears, volatility, riskFree
   return spot * normalCdf(d1) - discountedStrike * normalCdf(d2);
 }
 
+function blackScholesDelta({ type, spot, strike, timeYears, volatility, riskFreeRate }) {
+  if (!(spot > 0) || !(strike > 0)) {
+    return 0;
+  }
+
+  if (timeYears <= 0 || !(volatility > 0)) {
+    if (type === "put") {
+      return spot < strike ? -1 : 0;
+    }
+
+    return spot > strike ? 1 : 0;
+  }
+
+  const sqrtT = Math.sqrt(timeYears);
+  const d1 =
+    (Math.log(spot / strike) + (riskFreeRate + 0.5 * volatility * volatility) * timeYears) /
+    (volatility * sqrtT);
+  const cdfD1 = normalCdf(d1);
+
+  return type === "put" ? cdfD1 - 1 : cdfD1;
+}
+
 function pickOptionMark(contract, fallback = 0) {
   return pickOptionReferencePrice(contract, fallback);
 }
@@ -430,6 +466,51 @@ function resolveQuotePrice(quotesBySymbol, symbol, fallback = 0) {
   return toNumber(quotesBySymbol.get(symbol)?.regularMarketPrice, fallback) ?? fallback;
 }
 
+function normalizeBinaryLegNoShort(leg) {
+  if (!leg || leg.kind !== "binary") {
+    return leg;
+  }
+
+  const action = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  if (action !== "SHORT") {
+    return leg;
+  }
+
+  const outcome = String(leg.outcome ?? "YES").toUpperCase() === "NO" ? "NO" : "YES";
+  const entryPrice = clamp(Math.max(toNumber(leg.entryPrice, 0) ?? 0, 0), 0, 1);
+  const closedPrice =
+    leg.closedPrice == null ? null : clamp(Math.max(toNumber(leg.closedPrice, 0) ?? 0, 0), 0, 1);
+  const nextOutcome = invertBinaryOutcome(outcome);
+
+  return {
+    ...leg,
+    action: "LONG",
+    outcome: nextOutcome,
+    entryPrice: clamp(1 - entryPrice, 0, 1),
+    ...(leg.closedPrice != null ? { closedPrice: closedPrice == null ? null : clamp(1 - closedPrice, 0, 1) } : {}),
+    ...(leg.closedExposure != null ? { closedExposure: null } : {}),
+    ...(leg.closedNetMarkedValue != null ? { closedNetMarkedValue: null } : {}),
+    ...(leg.realizedProfitLossPercent != null ? { realizedProfitLossPercent: null } : {})
+  };
+}
+
+function normalizePaperOrderNoBinaryShort(order) {
+  if (!order || !Array.isArray(order.legs) || !order.legs.length) {
+    return order;
+  }
+
+  let didChange = false;
+  const legs = order.legs.map((leg) => {
+    const normalizedLeg = normalizeBinaryLegNoShort(leg);
+    if (normalizedLeg !== leg) {
+      didChange = true;
+    }
+    return normalizedLeg;
+  });
+
+  return didChange ? { ...order, legs } : order;
+}
+
 function deriveOrderPayoffSummary({
   order,
   currentProxySpot,
@@ -439,7 +520,8 @@ function deriveOrderPayoffSummary({
   impliedVolatility,
   riskFreeRate
 }) {
-  const normalizedLegs = (order.legs ?? []).map((leg) => {
+  const normalizedLegs = (order.legs ?? [])
+    .map((leg) => {
     if (leg.kind === "binary") {
       return {
         kind: "binary",
@@ -448,6 +530,10 @@ function deriveOrderPayoffSummary({
         quantity: Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0),
         entryPrice: toNumber(leg.entryPrice, 0) ?? 0
       };
+    }
+
+    if (leg.kind === "stock") {
+      return null;
     }
 
     return {
@@ -462,7 +548,8 @@ function deriveOrderPayoffSummary({
       impliedVolatility: normalizeVolatility(leg.impliedVolatility, impliedVolatility),
       riskFreeRate: toNumber(leg.riskFreeRate, riskFreeRate) ?? riskFreeRate
     };
-  });
+    })
+    .filter(Boolean);
 
   if (!normalizedLegs.length) {
     return null;
@@ -708,11 +795,47 @@ function resolveBinaryYesPrice({
 }
 
 function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
-  const kind = leg?.kind === "binary" ? "binary" : "option";
-  const action = String(leg?.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  const rawKind = String(leg?.kind ?? "").trim().toLowerCase();
+  const inferredStock =
+    rawKind !== "binary" &&
+    rawKind !== "stock" &&
+    !String(leg?.optionType ?? "").trim() &&
+    !String(leg?.expiry ?? "").trim() &&
+    !(toNumber(leg?.strike, 0) > 0) &&
+    !String(leg?.contractSymbol ?? "").trim() &&
+    (toNumber(leg?.entryPrice, null) == null || (toNumber(leg?.entryPrice, null) ?? 0) > 1) &&
+    String(leg?.rootSymbol ?? proxySymbol ?? "").trim().length > 0;
+  const kind = rawKind === "binary" ? "binary" : rawKind === "stock" || inferredStock ? "stock" : "option";
+  const rawAction = String(leg?.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
   const quantity = Math.max(Math.round(toNumber(leg?.quantity, 0) ?? 0), 0);
+  const rawOutcome =
+    kind === "binary" ? (String(leg?.outcome ?? "YES").toUpperCase() === "NO" ? "NO" : "YES") : null;
+  const invertBinaryLeg = kind === "binary" && rawAction === "SHORT";
+  const action = invertBinaryLeg ? "LONG" : rawAction;
+  const outcome =
+    kind === "binary"
+      ? invertBinaryLeg
+        ? rawOutcome === "NO"
+          ? "YES"
+          : "NO"
+        : rawOutcome
+      : null;
   const rawEntryPrice = Math.max(toNumber(leg?.entryPrice, 0) ?? 0, 0);
-  const entryPrice = kind === "binary" ? clamp(rawEntryPrice, 0, 1) : rawEntryPrice;
+  const entryPriceSource = invertBinaryLeg ? 1 - rawEntryPrice : rawEntryPrice;
+  const entryPrice = kind === "binary" ? clamp(entryPriceSource, 0, 1) : rawEntryPrice;
+  const inferredLegStatus =
+    orderStatus === "closed"
+      ? "closed"
+      : normalizePaperLegStatus(
+          leg?.status ??
+            (leg?.closedAt || leg?.closedDate || leg?.closedPrice != null ? "closed" : "open")
+        );
+  const closedAt = inferredLegStatus === "closed" ? normalizeTimestamp(leg?.closedAt ?? "") : "";
+  const closedDate =
+    inferredLegStatus === "closed"
+      ? String(leg?.closedDate ?? (closedAt ? closedAt.slice(0, 10) : "") ?? "").trim()
+      : "";
+  const isClosed = orderStatus === "closed" || inferredLegStatus === "closed";
   const rawClosedPrice = leg?.closedPrice == null ? null : toNumber(leg?.closedPrice, null);
   const rawClosedExposure = leg?.closedExposure == null ? null : toNumber(leg?.closedExposure, null);
   const rawClosedNetMarkedValue =
@@ -722,11 +845,11 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
   const rawRealizedProfitLossPercent =
     leg?.realizedProfitLossPercent == null ? null : toNumber(leg?.realizedProfitLossPercent, null);
   const closedPrice =
-    orderStatus === "closed"
+    isClosed
       ? kind === "binary"
         ? rawClosedPrice == null
           ? null
-          : clamp(rawClosedPrice, 0, 1)
+          : clamp(invertBinaryLeg ? 1 - rawClosedPrice : rawClosedPrice, 0, 1)
         : rawClosedPrice == null
           ? null
           : Math.max(rawClosedPrice, 0)
@@ -734,7 +857,11 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
 
   return {
     id: String(leg?.id ?? `paper-leg-${index + 1}`),
-    label: String(leg?.label ?? `${kind === "binary" ? "Polymarket" : "Option"} ${index + 1}`),
+    label: String(
+      leg?.label ??
+        `${kind === "binary" ? `PM ${outcome ?? "YES"}` : kind === "stock" ? "Stock" : "Option"} ${index + 1}`
+    ),
+    status: inferredLegStatus,
     kind,
     action,
     quantity,
@@ -745,36 +872,45 @@ function sanitizePaperLeg(leg, index, proxySymbol, orderStatus = "open") {
     expiry: kind === "option" ? String(leg?.expiry ?? "") : null,
     strike: kind === "option" ? toNumber(leg?.strike, 0) ?? 0 : null,
     contractSymbol: kind === "option" ? String(leg?.contractSymbol ?? "") : "",
-    rootSymbol: kind === "option" ? String(leg?.rootSymbol ?? proxySymbol ?? "") : "",
-    bid: kind === "option" ? toNumber(leg?.bid, null) : null,
-    ask: kind === "option" ? toNumber(leg?.ask, null) : null,
+    rootSymbol: kind === "option" || kind === "stock" ? String(leg?.rootSymbol ?? proxySymbol ?? "") : "",
+    bid: kind === "option" || kind === "stock" ? toNumber(leg?.bid, null) : null,
+    ask: kind === "option" || kind === "stock" ? toNumber(leg?.ask, null) : null,
     bidSize: kind === "option" ? toNumber(leg?.bidSize, null) : null,
     askSize: kind === "option" ? toNumber(leg?.askSize, null) : null,
     volume: kind === "option" ? toNumber(leg?.volume, null) : null,
     openInterest: kind === "option" ? toNumber(leg?.openInterest, null) : null,
-    brokerConid: kind === "option" ? String(leg?.brokerConid ?? "") : "",
-    localSymbol: kind === "option" ? String(leg?.localSymbol ?? "") : "",
+    brokerConid: kind === "option" || kind === "stock" ? String(leg?.brokerConid ?? "") : "",
+    localSymbol: kind === "option" || kind === "stock" ? String(leg?.localSymbol ?? "") : "",
     impliedVolatility: kind === "option" ? normalizeVolatility(leg?.impliedVolatility, 0.24) : null,
     riskFreeRate: kind === "option" ? toNumber(leg?.riskFreeRate, 0.0425) ?? 0.0425 : null,
-    quoteSource: kind === "option" ? String(leg?.quoteSource ?? "seed") : String(leg?.quoteSource ?? "Polymarket"),
+    quoteSource:
+      kind === "option"
+        ? String(leg?.quoteSource ?? "seed")
+        : kind === "stock"
+          ? String(leg?.quoteSource ?? "Stock")
+          : String(leg?.quoteSource ?? "Polymarket"),
     isLive: leg?.isLive === true,
     polymarketMarketId: kind === "binary" ? String(leg?.polymarketMarketId ?? "") : "",
-    outcome: kind === "binary" ? (String(leg?.outcome ?? "YES").toUpperCase() === "NO" ? "NO" : "YES") : null,
+    outcome,
     marketVolume: kind === "binary" ? toNumber(leg?.marketVolume, null) : null,
     marketLiquidity: kind === "binary" ? toNumber(leg?.marketLiquidity, null) : null,
+    closedAt,
+    closedDate,
     closedPrice,
     closedExposure:
-      orderStatus === "closed"
-        ? rawClosedExposure == null
+      isClosed
+        ? invertBinaryLeg
+          ? null
+          : rawClosedExposure == null
           ? null
           : Math.max(rawClosedExposure, 0)
         : null,
     closedNetMarkedValue:
-      orderStatus === "closed" ? rawClosedNetMarkedValue : null,
+      isClosed ? (invertBinaryLeg ? null : rawClosedNetMarkedValue) : null,
     realizedProfitLossValue:
-      orderStatus === "closed" ? rawRealizedProfitLossValue : null,
+      isClosed ? rawRealizedProfitLossValue : null,
     realizedProfitLossPercent:
-      orderStatus === "closed" ? rawRealizedProfitLossPercent : null
+      isClosed ? (invertBinaryLeg ? null : rawRealizedProfitLossPercent) : null
   };
 }
 
@@ -872,10 +1008,39 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     allowNull: true,
     purpose: "exit"
   });
+  const stockExecution = sanitizeExecutionPayload(source.stockExecution, defaults.stockExecution, {
+    allowNull: true,
+    purpose: "entry"
+  });
+  const closeStockExecution = sanitizeExecutionPayload(source.closeStockExecution, defaults.closeStockExecution, {
+    allowNull: true,
+    purpose: "exit"
+  });
+  const strategyId = String(source.strategyId ?? defaults.strategyId ?? "strategy-1");
+  const strategyName = String(source.strategyName ?? defaults.strategyName ?? "Strategy");
+  const hasMonitoringOverride =
+    payload && typeof payload === "object" && Object.prototype.hasOwnProperty.call(payload, "monitoringEnabled");
+  const hasDefaultMonitoringOverride =
+    defaults && typeof defaults === "object" && Object.prototype.hasOwnProperty.call(defaults, "monitoringEnabled");
+  const inferredMonitoringEnabled =
+    strategyId === "strategy-4" || normalizeText(strategyName).includes("delta hedge");
+  const monitoringEnabledSource = hasMonitoringOverride
+    ? payload.monitoringEnabled
+    : hasDefaultMonitoringOverride
+      ? defaults.monitoringEnabled
+      : inferredMonitoringEnabled;
+  const monitoringEnabled = monitoringEnabledSource === true;
+  const hedgePlanSource = source.hedgePlan ?? defaults.hedgePlan ?? null;
+  const hedgePlan =
+    hedgePlanSource && typeof hedgePlanSource === "object"
+      ? buildDynamicHedgePlan(hedgePlanSource)
+      : monitoringEnabled
+        ? buildDynamicHedgePlan()
+        : null;
 
   return {
-    strategyId: String(source.strategyId ?? defaults.strategyId ?? "strategy-1"),
-    strategyName: String(source.strategyName ?? defaults.strategyName ?? "Strategy"),
+    strategyId,
+    strategyName,
     combinationId: String(source.combinationId ?? defaults.combinationId ?? `paper-${Date.now()}`),
     combinationLabel: String(source.combinationLabel ?? defaults.combinationLabel ?? "Paper trade"),
     assetLabel: String(source.assetLabel ?? defaults.assetLabel ?? ""),
@@ -903,7 +1068,11 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
     closeSummary,
     execution,
     closeExecution,
+    stockExecution,
+    closeStockExecution,
     marketReferenceYesPrice: referenceYesPrice,
+    monitoringEnabled,
+    hedgePlan,
     marketContext,
     legs
   };
@@ -926,21 +1095,31 @@ export function applyPaperOrderPatch(order, patch) {
     }
 
     const patchLeg = patchLegs.get(String(leg.id));
+    const nextLegStatus = isClosed ? "closed" : patchLeg?.status ?? leg.status;
+    const isLegClosed =
+      isClosed ||
+      normalizePaperLegStatus(nextLegStatus ?? (leg?.closedAt || leg?.closedDate || leg?.closedPrice != null ? "closed" : "open")) ===
+        "closed";
     const resetsClosedMetrics =
-      isClosed &&
+      isLegClosed &&
       (Object.prototype.hasOwnProperty.call(patchLeg ?? {}, "entryPrice") ||
         Object.prototype.hasOwnProperty.call(patchLeg ?? {}, "quantity") ||
         Object.prototype.hasOwnProperty.call(patchLeg ?? {}, "closedPrice"));
 
     if (resetsClosedMetrics) {
-      hasClosedLegOverrides = true;
+      if (isClosed) {
+        hasClosedLegOverrides = true;
+      }
     }
 
     return {
       ...leg,
+      status: nextLegStatus,
+      closedAt: patchLeg?.closedAt ?? leg.closedAt,
+      closedDate: patchLeg?.closedDate ?? leg.closedDate,
       entryPrice: patchLeg?.entryPrice ?? leg.entryPrice,
       quantity: patchLeg?.quantity ?? leg.quantity,
-      ...(isClosed
+      ...(isLegClosed
         ? {
             closedPrice: patchLeg?.closedPrice ?? leg.closedPrice
           }
@@ -981,6 +1160,21 @@ export function applyPaperOrderPatch(order, patch) {
 export function closePaperOrderPayload(order, valuedOrder, closedAt = new Date().toISOString()) {
   const closedTimestamp = normalizeTimestamp(closedAt) || new Date().toISOString();
   const closedDate = closedTimestamp.slice(0, 10);
+  const closeHoldingValue = (valuedOrder?.legs ?? []).reduce(
+    (sum, leg) => sum + Math.max(toNumber(leg?.currentExposure, 0) ?? 0, 0),
+    0
+  );
+  const closeNetMarkedValue =
+    valuedOrder?.netMarkedValue != null
+      ? toNumber(valuedOrder.netMarkedValue, 0) ?? 0
+      : (valuedOrder?.legs ?? []).reduce((sum, leg) => sum + (toNumber(leg?.netMarkedValue, 0) ?? 0), 0);
+  const closeProfitLossValue =
+    valuedOrder?.profitLossValue != null
+      ? toNumber(valuedOrder.profitLossValue, 0) ?? 0
+      : (valuedOrder?.legs ?? []).reduce((sum, leg) => sum + (toNumber(leg?.profitLossValue, 0) ?? 0), 0);
+  const initialPurchaseValue = Math.max(toNumber(valuedOrder?.initialPurchaseValue, 0) ?? 0, 0);
+  const closeProfitLossPercent =
+    initialPurchaseValue > 0 ? (closeProfitLossValue / initialPurchaseValue) * 100 : null;
 
   return sanitizePaperOrderPayload(
     {
@@ -989,16 +1183,21 @@ export function closePaperOrderPayload(order, valuedOrder, closedAt = new Date()
       closedAt: closedTimestamp,
       closedDate,
       closeSummary: {
-        currentHoldingValue: valuedOrder.currentHoldingValue,
-        netMarkedValue: valuedOrder.netMarkedValue,
-        profitLossValue: valuedOrder.profitLossValue,
-        profitLossPercent: valuedOrder.profitLossPercent
+        currentHoldingValue: closeHoldingValue,
+        netMarkedValue: closeNetMarkedValue,
+        profitLossValue: closeProfitLossValue,
+        profitLossPercent: closeProfitLossPercent
       },
       legs: order.legs.map((leg) => {
         const valuedLeg = valuedOrder.legs.find((item) => String(item.id) === String(leg.id));
+        const legClosedAt = normalizeTimestamp(leg.closedAt ?? "") || closedTimestamp;
+        const legClosedDate = String(leg.closedDate ?? legClosedAt.slice(0, 10)).trim() || legClosedAt.slice(0, 10);
 
         return {
           ...leg,
+          status: "closed",
+          closedAt: legClosedAt,
+          closedDate: legClosedDate,
           closedPrice: valuedLeg?.currentPrice ?? null,
           closedExposure: valuedLeg?.currentExposure ?? 0,
           closedNetMarkedValue: valuedLeg?.netMarkedValue ?? 0,
@@ -1169,15 +1368,79 @@ export function attachPaperOrderHistory(paperPortfolio, historySnapshots, asOf =
   };
 }
 
+function computeOrderNetDeltaShares({
+  legs,
+  currentSpot,
+  impliedVolatility,
+  riskFreeRate,
+  asOfDate = new Date().toISOString().slice(0, 10)
+}) {
+  const spot = Math.max(toNumber(currentSpot, 0) ?? 0, 0.01);
+  const optionLegs = Array.isArray(legs) ? legs.filter((leg) => leg?.kind === "option") : [];
+  const stockLegs = Array.isArray(legs) ? legs.filter((leg) => leg?.kind === "stock") : [];
+
+  let optionDeltaShares = 0;
+  let stockDeltaShares = 0;
+  let minDaysToExpiry = null;
+
+  optionLegs.forEach((leg) => {
+    const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
+    const contractMultiplier = Math.max(toNumber(leg.contractMultiplier, 100) ?? 100, 1);
+    const contractUnits = quantity * contractMultiplier;
+    if (!(contractUnits > 0) || !leg.expiry) {
+      return;
+    }
+
+    const strike = toNumber(leg.strike, 0) ?? 0;
+    if (!(strike > 0)) {
+      return;
+    }
+
+    const daysToExpiry = Math.max(differenceInDays(asOfDate, leg.expiry), 0);
+    minDaysToExpiry = minDaysToExpiry == null ? daysToExpiry : Math.min(minDaysToExpiry, daysToExpiry);
+    const timeYears = Math.max(daysToExpiry / 365, 1 / 365);
+    const volatility = normalizeVolatility(leg.impliedVolatility, impliedVolatility);
+    const resolvedRate = toNumber(leg.riskFreeRate, riskFreeRate) ?? riskFreeRate;
+    const delta = blackScholesDelta({
+      type: String(leg.optionType ?? "call") === "put" ? "put" : "call",
+      spot,
+      strike,
+      timeYears,
+      volatility,
+      riskFreeRate: resolvedRate
+    });
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    optionDeltaShares += direction * delta * contractUnits;
+  });
+
+  stockLegs.forEach((leg) => {
+    const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
+    if (!(quantity > 0)) {
+      return;
+    }
+
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    stockDeltaShares += direction * quantity;
+  });
+
+  return {
+    optionDeltaShares,
+    stockDeltaShares,
+    netDeltaShares: optionDeltaShares + stockDeltaShares,
+    minDaysToExpiry
+  };
+}
+
 export function buildPaperPortfolio({
   orders,
   quotes,
   polymarketMarkets,
   optionMatches
 }) {
+  const asOfDate = new Date().toISOString().slice(0, 10);
   const quotesBySymbol = quoteLookup(quotes);
   const valuedOrders = (orders ?? []).map((record) => {
-    const order = record.position ?? record;
+    const order = normalizePaperOrderNoBinaryShort(record.position ?? record);
     const status = normalizePaperOrderStatus(order.status ?? "open");
     const isClosed = status === "closed";
     const proxySymbol = String(order.marketContext?.proxySymbol ?? "");
@@ -1193,8 +1456,17 @@ export function buildPaperPortfolio({
     const targetUnderlyingValue = toNumber(order.marketContext?.targetUnderlyingValue, 0) ?? 0;
     const impliedVolatility = normalizeVolatility(order.marketContext?.impliedVolatility, 0.24);
     const riskFreeRate = toNumber(order.marketContext?.riskFreeRate, 0.0425) ?? 0.0425;
+    const inferLegStatus = (leg) =>
+      isClosed
+        ? "closed"
+        : normalizePaperLegStatus(
+            leg?.status ??
+              (leg?.closedAt || leg?.closedDate || leg?.closedPrice != null ? "closed" : "open")
+          );
+    const isLegOpen = (leg) => inferLegStatus(leg) !== "closed";
+    const openPositionLegs = isClosed ? order.legs : order.legs.filter(isLegOpen);
     const payoffSummary = deriveOrderPayoffSummary({
-      order,
+      order: isClosed ? order : { ...order, legs: openPositionLegs },
       currentProxySpot,
       currentUnderlyingSpot,
       conversionRatio,
@@ -1218,12 +1490,15 @@ export function buildPaperPortfolio({
     const valuedLegs = order.legs.map((leg) => {
       const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
       const direction = leg.action === "SHORT" ? -1 : 1;
+      const legStatus = inferLegStatus(leg);
 
       if (isClosed) {
         const units =
           leg.kind === "binary"
             ? quantity
-            : quantity * Math.max(toNumber(leg.contractMultiplier, 100) ?? 100, 1);
+            : leg.kind === "stock"
+              ? quantity
+              : quantity * Math.max(toNumber(leg.contractMultiplier, 100) ?? 100, 1);
         const entryPrice = toNumber(leg.entryPrice, 0) ?? 0;
         const entryExposure = Math.abs(entryPrice * units);
         const closedPrice =
@@ -1255,6 +1530,7 @@ export function buildPaperPortfolio({
 
         return {
           ...leg,
+          status: legStatus,
           quantity,
           contractUnits: leg.kind === "option" ? units : undefined,
           currentPrice: closedPrice,
@@ -1264,6 +1540,59 @@ export function buildPaperPortfolio({
           netMarkedValue,
           profitLossValue,
           profitLossPercent,
+          priceSource: "closed"
+        };
+      }
+
+      if (legStatus === "closed") {
+        const units =
+          leg.kind === "binary"
+            ? quantity
+            : leg.kind === "stock"
+              ? quantity
+              : quantity * Math.max(toNumber(leg.contractMultiplier, 100) ?? 100, 1);
+        const entryPrice = toNumber(leg.entryPrice, 0) ?? 0;
+        const entryExposure = Math.abs(entryPrice * units);
+        const closedPrice =
+          leg.closedPrice != null
+            ? toNumber(leg.closedPrice, 0) ?? 0
+            : entryPrice;
+        const derivedClosedExposure = Math.abs(closedPrice * units);
+        const closeExposure =
+          leg.closedExposure != null
+            ? Math.max(toNumber(leg.closedExposure, derivedClosedExposure) ?? derivedClosedExposure, 0)
+            : derivedClosedExposure;
+        const netMarkedValue =
+          leg.closedNetMarkedValue != null
+            ? toNumber(leg.closedNetMarkedValue, direction * closedPrice * units) ??
+              direction * closedPrice * units
+            : direction * closedPrice * units;
+        const derivedProfitLossValue =
+          (leg.action === "SHORT" ? entryPrice - closedPrice : closedPrice - entryPrice) * units;
+        const profitLossValue =
+          leg.realizedProfitLossValue != null
+            ? toNumber(leg.realizedProfitLossValue, derivedProfitLossValue) ?? 0
+            : derivedProfitLossValue;
+        const derivedProfitLossPercent =
+          entryExposure > 0 ? (profitLossValue / entryExposure) * 100 : null;
+        const profitLossPercent =
+          leg.realizedProfitLossPercent != null
+            ? toNumber(leg.realizedProfitLossPercent, derivedProfitLossPercent)
+            : derivedProfitLossPercent;
+
+        return {
+          ...leg,
+          status: legStatus,
+          quantity,
+          contractUnits: leg.kind === "option" ? units : undefined,
+          currentPrice: closedPrice,
+          entryExposure,
+          currentExposure: closeExposure,
+          netEntryValue: direction * entryPrice * units,
+          netMarkedValue,
+          profitLossValue,
+          profitLossPercent,
+          closedExposure: closeExposure,
           priceSource: "closed"
         };
       }
@@ -1279,6 +1608,7 @@ export function buildPaperPortfolio({
 
         return {
           ...leg,
+          status: legStatus,
           quantity,
           currentPrice: markPrice,
           marketVolume:
@@ -1298,7 +1628,35 @@ export function buildPaperPortfolio({
                 : "reference"
               : liveMarket?.yesPrice != null
                 ? "live-market"
-                : "reference"
+              : "reference"
+        };
+      }
+
+      if (leg.kind === "stock") {
+        const stockSymbol = String(leg.rootSymbol ?? underlyingSymbol ?? proxySymbol ?? "").trim();
+        const fallbackSpot =
+          stockSymbol && stockSymbol.toUpperCase() === String(underlyingSymbol ?? "").trim().toUpperCase()
+            ? currentUnderlyingSpot
+            : currentProxySpot;
+        const markPrice = resolveQuotePrice(quotesBySymbol, stockSymbol, fallbackSpot);
+        const entryPrice = toNumber(leg.entryPrice, 0) ?? 0;
+        const entryExposure = Math.abs(entryPrice * quantity);
+        const currentExposure = Math.abs(markPrice * quantity);
+        const profitLossValue =
+          (leg.action === "SHORT" ? entryPrice - markPrice : markPrice - entryPrice) * quantity;
+
+        return {
+          ...leg,
+          status: legStatus,
+          quantity,
+          currentPrice: markPrice,
+          entryExposure,
+          currentExposure,
+          netEntryValue: direction * entryPrice * quantity,
+          netMarkedValue: direction * markPrice * quantity,
+          profitLossValue,
+          profitLossPercent: entryExposure > 0 ? (profitLossValue / entryExposure) * 100 : null,
+          priceSource: quotesBySymbol.get(stockSymbol) ? "live-quote" : "reference"
         };
       }
 
@@ -1328,6 +1686,7 @@ export function buildPaperPortfolio({
 
       return {
         ...leg,
+        status: legStatus,
         quantity,
         contractUnits,
         bid: toNumber(liveOption?.bid, toNumber(leg.bid, null)),
@@ -1348,7 +1707,12 @@ export function buildPaperPortfolio({
     });
 
     const initialPurchaseValue = valuedLegs.reduce((sum, leg) => sum + leg.entryExposure, 0);
-    const derivedCurrentHoldingValue = valuedLegs.reduce((sum, leg) => sum + leg.currentExposure, 0);
+    const derivedCurrentHoldingValue = isClosed
+      ? valuedLegs.reduce((sum, leg) => sum + leg.currentExposure, 0)
+      : valuedLegs.reduce(
+          (sum, leg) => sum + (normalizePaperLegStatus(leg.status) === "closed" ? 0 : leg.currentExposure),
+          0
+        );
     const derivedProfitLossValue = valuedLegs.reduce((sum, leg) => sum + leg.profitLossValue, 0);
     const netEntryValue = valuedLegs.reduce((sum, leg) => sum + leg.netEntryValue, 0);
     const derivedNetMarkedValue = valuedLegs.reduce((sum, leg) => sum + leg.netMarkedValue, 0);
@@ -1366,6 +1730,157 @@ export function buildPaperPortfolio({
       : initialPurchaseValue > 0
         ? (profitLossValue / initialPurchaseValue) * 100
         : null;
+    const monitoringEnabled = order.monitoringEnabled === true;
+    const hedgePlan = order.hedgePlan && typeof order.hedgePlan === "object" ? buildDynamicHedgePlan(order.hedgePlan) : null;
+    const hedgeContracts =
+      monitoringEnabled && hedgePlan && !isClosed
+        ? Math.max(inferStraddleContractCount(openPositionLegs), 1)
+        : null;
+    const referenceSpot =
+      monitoringEnabled && hedgePlan
+        ? toNumber(order.marketContext?.currentProxySpot, currentProxySpot) ?? currentProxySpot
+        : null;
+    const hedgeDelta =
+      monitoringEnabled && hedgePlan && !isClosed
+        ? computeOrderNetDeltaShares({
+            legs: openPositionLegs,
+            currentSpot: currentProxySpot,
+            impliedVolatility,
+            riskFreeRate
+          })
+        : null;
+    const hedgeSignal =
+      monitoringEnabled && hedgePlan && !isClosed && hedgeDelta
+        ? evaluateDynamicHedgeSignal({
+            netDeltaShares: hedgeDelta.netDeltaShares,
+            currentSpot: currentProxySpot,
+            referenceSpot,
+            optionContracts: hedgeContracts,
+            hedgePlan,
+            daysToExpiry: hedgeDelta.minDaysToExpiry
+          })
+        : null;
+    const hedgeState =
+      hedgeSignal && hedgeDelta
+        ? {
+            ...hedgeSignal,
+            optionDeltaShares: hedgeDelta.optionDeltaShares,
+            stockDeltaShares: hedgeDelta.stockDeltaShares,
+            optionContracts: hedgeContracts,
+            minDaysToExpiry: hedgeDelta.minDaysToExpiry,
+            referenceSpot
+          }
+        : null;
+
+    const computeOptionComboPrice = (priceKey) => {
+      const optionLegs = valuedLegs.filter(
+        (leg) =>
+          leg?.kind === "option" &&
+          Number(leg.quantity ?? 0) > 0 &&
+          (isClosed || normalizePaperLegStatus(leg.status) !== "closed")
+      );
+      if (!optionLegs.length) {
+        return null;
+      }
+
+      const gcd = (left, right) => {
+        let a = Math.abs(Math.round(Number(left) || 0));
+        let b = Math.abs(Math.round(Number(right) || 0));
+
+        while (b) {
+          const next = a % b;
+          a = b;
+          b = next;
+        }
+
+        return a;
+      };
+
+      const lotCount = optionLegs.reduce((current, leg) => {
+        const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
+        if (!(quantity > 0)) {
+          return current;
+        }
+        if (current == null) {
+          return quantity;
+        }
+        return gcd(current, quantity);
+      }, null);
+
+      if (!(lotCount > 0)) {
+        return null;
+      }
+
+      const comboPrice = optionLegs.reduce((sum, leg) => {
+        const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
+        if (!(quantity > 0)) {
+          return sum;
+        }
+
+        const ratio = quantity / lotCount;
+        const price = toNumber(leg?.[priceKey], 0) ?? 0;
+        const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+        return sum + direction * price * ratio;
+      }, 0);
+
+      return Number(comboPrice.toFixed(2));
+    };
+
+    const computeOptionTheoValue = ({ spot, date }) => {
+      const normalizedSpot = toNumber(spot, 0) ?? 0;
+      const optionLegs = valuedLegs.filter(
+        (leg) =>
+          leg?.kind === "option" &&
+          (isClosed || normalizePaperLegStatus(leg.status) !== "closed")
+      );
+
+      if (!optionLegs.length) {
+        return null;
+      }
+
+      if (!(normalizedSpot > 0)) {
+        return null;
+      }
+
+      const valuationDate = date || asOfDate;
+
+      return optionLegs.reduce((sum, leg) => {
+        const quantity = Math.max(Math.round(toNumber(leg.quantity, 0) ?? 0), 0);
+        const contractMultiplier = Math.max(toNumber(leg.contractMultiplier, 100) ?? 100, 1);
+        const contractUnits = quantity * contractMultiplier;
+        if (!(contractUnits > 0) || !leg.expiry) {
+          return sum;
+        }
+
+        const strike = toNumber(leg.strike, 0) ?? 0;
+        if (!(strike > 0)) {
+          return sum;
+        }
+
+        const daysToExpiry = Math.max(differenceInDays(valuationDate, leg.expiry), 0);
+        const timeYears = Math.max(daysToExpiry / 365, 0);
+        const volatility = normalizeVolatility(leg.impliedVolatility, impliedVolatility);
+        const resolvedRate = toNumber(leg.riskFreeRate, riskFreeRate) ?? riskFreeRate;
+        const modelPrice = blackScholesPrice({
+          type: String(leg.optionType ?? "call") === "put" ? "put" : "call",
+          spot: Math.max(normalizedSpot, 0.01),
+          strike,
+          timeYears,
+          volatility,
+          riskFreeRate: resolvedRate
+        });
+        const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+        return sum + direction * modelPrice * contractUnits;
+      }, 0);
+    };
+
+    const entryTheoPrice = computeOptionTheoValue({
+      spot: fallbackProxySpot > 0 ? fallbackProxySpot : currentProxySpot,
+      date: order.purchaseDate || asOfDate
+    });
+    const currentTheoPrice = computeOptionTheoValue({ spot: currentProxySpot, date: asOfDate });
+    const entryMarkPrice = computeOptionComboPrice("entryPrice");
+    const currentMarkPrice = computeOptionComboPrice("currentPrice");
 
     return {
       id: record.id ?? null,
@@ -1413,14 +1928,23 @@ export function buildPaperPortfolio({
         targetUnderlyingValue,
         currentYesPrice
       },
+      monitoringEnabled,
+      hedgePlan,
+      hedgeState,
       execution: order.execution ?? sanitizeExecutionPayload(null, null, { purpose: "entry" }),
       closeExecution: order.closeExecution ?? null,
+      stockExecution: order.stockExecution ?? null,
+      closeStockExecution: order.closeStockExecution ?? null,
       initialPurchaseValue,
       currentHoldingValue,
       profitLossValue,
       profitLossPercent,
       netEntryValue,
       netMarkedValue,
+      entryMarkPrice,
+      currentMarkPrice,
+      entryTheoPrice,
+      currentTheoPrice,
       closeSummary: isClosed
         ? {
             currentHoldingValue,

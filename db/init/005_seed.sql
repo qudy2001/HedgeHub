@@ -1,0 +1,3 @@
+-- Intentionally light-touch.
+-- Application-managed strategy profile seeding still happens in server/db*.js
+-- so SQL bootstrap remains environment-agnostic and idempotent.

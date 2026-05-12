@@ -1,14 +1,45 @@
 services:
+  postgres:
+    container_name: ${POSTGRES_CONTAINER_NAME:-hedgehub-postgres}
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-optionsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-optionsdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   hedgehub:
     container_name: ${HEDGEHUB_CONTAINER_NAME:-hedgehub}
-    image: ${HEDGEHUB_IMAGE:-ghcr.io/qudy2001/hedgehub-livedata:latest}
+    image: ${HEDGEHUB_IMAGE:-ghcr.io/qudy2001/hedgehub-postgresql:latest}
     init: true
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${HEDGEHUB_PORT:-8787}:8787"
+      - "${HEDGEHUB_GPT_PORT:-8788}:8787"
     environment:
       NODE_ENV: production
       PORT: 8787
+      DB_TYPE: ${DB_TYPE:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/optionsdb}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-optionsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/app/data/hedgehub.db}
       TZ: ${HEDGEHUB_TZ:-Europe/London}
       POLYGON_API_KEY: ${POLYGON_API_KEY:-}
       POLYGON_WS_URL: ${POLYGON_WS_URL:-}
@@ -58,3 +89,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 45s
+
+volumes:
+  postgres_data:

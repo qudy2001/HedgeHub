@@ -1,6 +1,6 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import PaperTradeHistoryChart from "./PaperTradeHistoryChart.jsx";
-import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import PaperTradeScenarioPanel, { buildPaperTradeHeatmapBenchmark } from "./PaperTradeScenarioPanel.jsx";
 import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
 import { countTradingDaysBetween } from "../tradingCalendar.js";
 
@@ -26,6 +26,10 @@ function formatPercent(value) {
 }
 
 function formatWholeNumber(value) {
+  if (value == null) {
+    return "n/a";
+  }
+
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue) || numericValue < 0) {
     return "n/a";
@@ -37,6 +41,10 @@ function formatWholeNumber(value) {
 }
 
 function formatWholeUsd(value) {
+  if (value == null) {
+    return "n/a";
+  }
+
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue) || numericValue < 0) {
     return "n/a";
@@ -50,6 +58,10 @@ function formatWholeUsd(value) {
 }
 
 function formatQuoteSizePair(bidSize, askSize) {
+  if (bidSize == null || askSize == null) {
+    return "n/a";
+  }
+
   const numericBidSize = Number(bidSize);
   const numericAskSize = Number(askSize);
 
@@ -66,9 +78,15 @@ function formatQuoteSizePair(bidSize, askSize) {
 }
 
 function getCloseSideQuoteSize(leg) {
-  return String(leg?.action ?? "LONG").trim().toUpperCase() === "SHORT"
-    ? Number(leg?.askSize)
-    : Number(leg?.bidSize);
+  const rawSize =
+    String(leg?.action ?? "LONG").trim().toUpperCase() === "SHORT" ? leg?.askSize : leg?.bidSize;
+
+  if (rawSize == null) {
+    return null;
+  }
+
+  const numericSize = Number(rawSize);
+  return Number.isFinite(numericSize) ? numericSize : null;
 }
 
 function buildPaperLegLiquidityMeta(leg) {
@@ -85,6 +103,14 @@ function buildPaperLegLiquidityMeta(leg) {
     parts.push(`Close size ${formatWholeNumber(closeSideQuoteSize)}`);
   }
 
+  if (leg?.bid != null && Number.isFinite(Number(leg.bid))) {
+    parts.push(`Bid ${formatCurrency(leg.bid)}`);
+  }
+
+  if (leg?.ask != null && Number.isFinite(Number(leg.ask))) {
+    parts.push(`Ask ${formatCurrency(leg.ask)}`);
+  }
+
   const quoteSizePair = formatQuoteSizePair(leg?.bidSize, leg?.askSize);
   if (quoteSizePair !== "n/a") {
     parts.push(`B/A size ${quoteSizePair}`);
@@ -99,6 +125,38 @@ function buildPaperLegLiquidityMeta(leg) {
   }
 
   return parts.join(" · ");
+}
+
+function formatLegLiquidityLabel(leg) {
+  if (leg?.kind === "binary") {
+    return leg?.outcome ? `PM ${leg.outcome}` : "Polymarket";
+  }
+
+  const strike = Number(leg?.strike ?? NaN);
+  const strikeLabel = Number.isFinite(strike) && strike > 0 ? strike.toFixed(1) : "n/a";
+  const typeLabel = leg?.optionType === "put" ? "P" : "C";
+
+  return `${strikeLabel}${typeLabel}`;
+}
+
+function buildPaperOrderLiquidityMeta(order) {
+  const legs = Array.isArray(order?.legs) ? order.legs : [];
+  const summaries = legs
+    .map((leg) => {
+      const meta = buildPaperLegLiquidityMeta(leg);
+      if (!meta) {
+        return null;
+      }
+
+      if (leg?.kind === "option") {
+        return `${formatLegLiquidityLabel(leg)} ${meta}`;
+      }
+
+      return meta;
+    })
+    .filter(Boolean);
+
+  return summaries.join(" · ");
 }
 
 function parseIsoDate(value) {
@@ -200,9 +258,13 @@ function buildDrafts(orders) {
               entryPrice: String(leg.entryPrice ?? ""),
               quantity: String(leg.quantity ?? ""),
               closedPrice:
-                leg.closedPrice != null
-                  ? String(leg.closedPrice)
-                  : String(leg.currentPrice ?? "")
+                String(order?.status ?? "").toLowerCase() === "closed" ||
+                String(leg?.status ?? "").toLowerCase() === "closed" ||
+                leg?.closedAt ||
+                leg?.closedDate ||
+                leg?.closedPrice != null
+                  ? String(leg.closedPrice ?? leg.currentPrice ?? "")
+                  : ""
             }
           ])
         )
@@ -228,9 +290,13 @@ function buildDefaultDraft(order) {
           entryPrice: String(leg.entryPrice ?? ""),
           quantity: String(leg.quantity ?? ""),
           closedPrice:
-            leg.closedPrice != null
-              ? String(leg.closedPrice)
-              : String(leg.currentPrice ?? "")
+            String(order?.status ?? "").toLowerCase() === "closed" ||
+            String(leg?.status ?? "").toLowerCase() === "closed" ||
+            leg?.closedAt ||
+            leg?.closedDate ||
+            leg?.closedPrice != null
+              ? String(leg.closedPrice ?? leg.currentPrice ?? "")
+              : ""
         }
       ])
     )
@@ -246,17 +312,29 @@ function hasOrderDraftChanged(order, draft) {
     return true;
   }
 
+  const orderStatus = String(order?.status ?? "").toLowerCase();
+  const orderClosed = orderStatus === "closed";
+
   return (order.legs ?? []).some((leg) => {
     const legDraft = draft.legs?.[String(leg.id)];
     if (!legDraft) {
       return false;
     }
 
+    const legStatus = String(leg?.status ?? "").toLowerCase();
+    const legClosed =
+      orderClosed ||
+      legStatus === "closed" ||
+      leg?.closedAt ||
+      leg?.closedDate ||
+      leg?.closedPrice != null;
+
     return (
       String(legDraft.entryPrice ?? "") !== String(leg.entryPrice ?? "") ||
       String(legDraft.quantity ?? "") !== String(leg.quantity ?? "") ||
-      (String(order.status ?? "").toLowerCase() === "closed" &&
-        String(legDraft.closedPrice ?? "") !== String(leg.closedPrice ?? leg.currentPrice ?? ""))
+      (legClosed
+        ? String(legDraft.closedPrice ?? "") !== String(leg.closedPrice ?? leg.currentPrice ?? "")
+        : String(legDraft.closedPrice ?? "").trim() !== "")
     );
   });
 }
@@ -288,7 +366,11 @@ function buildPatchFromDraft(order, draft) {
       id: leg.id,
       entryPrice: draft.legs?.[String(leg.id)]?.entryPrice ?? leg.entryPrice,
       quantity: draft.legs?.[String(leg.id)]?.quantity ?? leg.quantity,
-      ...(isClosed
+      ...(isClosed ||
+      String(leg?.status ?? "").toLowerCase() === "closed" ||
+      leg?.closedAt ||
+      leg?.closedDate ||
+      leg?.closedPrice != null
         ? {
             closedPrice:
               draft.legs?.[String(leg.id)]?.closedPrice ??
@@ -450,6 +532,10 @@ function renderLegDescriptor(leg) {
     return `${leg.action} ${leg.outcome}`;
   }
 
+  if (leg.kind === "stock") {
+    return `${leg.action} shares`;
+  }
+
   return `${leg.action} ${String(leg.optionType ?? "call").toUpperCase()} ${leg.strike}${leg.optionType === "put" ? "P" : "C"} ${leg.expiry}`;
 }
 
@@ -574,17 +660,85 @@ function buildPurchaseDateSummaryItem(order) {
   };
 }
 
+function buildActionSignalSummaryItem(order) {
+  const actionSignal = String(order?.hedgeState?.actionSignal ?? "").trim().toUpperCase();
+  const recommendedShares = Number(order?.hedgeState?.recommendedSharesDeltaNeutral ?? 0);
+  const hasRecommendation = Number.isFinite(recommendedShares) && recommendedShares !== 0;
+
+  if (!actionSignal) {
+    return {
+      label: "Action signal",
+      value: "n/a",
+      kind: "signal",
+      pillClass: "pill--ghost",
+      note: ""
+    };
+  }
+
+  if (actionSignal === "HEDGE_SHORT") {
+    return {
+      label: "Action signal",
+      value: "HEDGE_SHORT",
+      kind: "signal",
+      pillClass: "pill--short",
+      note: hasRecommendation ? `Short ${formatWholeNumber(Math.abs(recommendedShares))} sh` : ""
+    };
+  }
+
+  if (actionSignal === "HEDGE_LONG") {
+    return {
+      label: "Action signal",
+      value: "HEDGE_LONG",
+      kind: "signal",
+      pillClass: "pill--long",
+      note: hasRecommendation ? `Buy ${formatWholeNumber(Math.abs(recommendedShares))} sh` : ""
+    };
+  }
+
+  if (actionSignal === "RECHECK") {
+    return {
+      label: "Action signal",
+      value: "RECHECK",
+      kind: "signal",
+      pillClass: "pill--warning",
+      note: ""
+    };
+  }
+
+  if (actionSignal === "EXIT_SIGNAL") {
+    return {
+      label: "Action signal",
+      value: "EXIT_SIGNAL",
+      kind: "signal",
+      pillClass: "pill--purple",
+      note: ""
+    };
+  }
+
+  return {
+    label: "Action signal",
+    value: "NO_ACTION",
+    kind: "signal",
+    pillClass: "pill--ghost",
+    note: ""
+  };
+}
+
 const OPEN_ORDER_TABLE_COLUMNS = [
   { key: "holding", label: "Holding", sortable: true },
   { key: "initialCost", label: "Initial cost", sortable: true },
+  { key: "entryMarkPrice", label: "Entry mark", sortable: true },
+  { key: "currentMarkPrice", label: "Current mark", sortable: true },
   { key: "dateIn", label: "Date in", sortable: true },
   { key: "expiration", label: "Expiration", sortable: true },
   { key: "asset", label: "Asset", sortable: true },
   { key: "strategyType", label: "Strategy type", sortable: true },
+  { key: "actionSignal", label: "Action signal", sortable: true },
   { key: "tag", label: "Tag", sortable: true },
   { key: "maxProfit", label: "Max profit", sortable: true },
   { key: "maxLoss", label: "Max loss", sortable: true },
   { key: "unrealisedPnL", label: "Unrealised P&L", sortable: true },
+  { key: "heatmapPnlPercent", label: "1x Sigma P&L", sortable: true },
   { key: "viewDetail", label: "View detail", sortable: false },
   { key: "orderTree", label: "Order tree", sortable: false },
   { key: "closeOrder", label: "Close order", sortable: false }
@@ -642,12 +796,16 @@ function getExpirationSortValue(order) {
   return expirationDate ? getTimestampValue(`${expirationDate}T00:00:00Z`) : Number.POSITIVE_INFINITY;
 }
 
-function getOpenOrderSortValue(order, key) {
+function getOpenOrderSortValue(order, key, heatmapBenchmarkByOrder = {}) {
   switch (key) {
     case "holding":
       return order.combinationLabel || "";
     case "initialCost":
       return Number(order.initialPurchaseValue ?? 0);
+    case "entryMarkPrice":
+      return Number(order.entryMarkPrice ?? 0);
+    case "currentMarkPrice":
+      return Number(order.currentMarkPrice ?? 0);
     case "dateIn":
       return getPurchaseDateTimeSortValue(order);
     case "expiration":
@@ -656,6 +814,8 @@ function getOpenOrderSortValue(order, key) {
       return order.assetLabel || "";
     case "strategyType":
       return order.strategyType || "";
+    case "actionSignal":
+      return String(order.hedgeState?.actionSignal ?? "");
     case "tag":
       return getOrderTagLabel(order);
     case "maxProfit":
@@ -664,6 +824,8 @@ function getOpenOrderSortValue(order, key) {
       return Number(order.maxLoss ?? Number.POSITIVE_INFINITY);
     case "unrealisedPnL":
       return Number(order.profitLossValue ?? 0);
+    case "heatmapPnlPercent":
+      return Number(heatmapBenchmarkByOrder[String(order.id)]?.percentValue ?? Number.NEGATIVE_INFINITY);
     default:
       return "";
   }
@@ -770,6 +932,8 @@ function renderOpenOrderMetricCell(item) {
     <div className="paper-open-table__metric">
       {item.kind === "tag" ? (
         <span className={`bias-pill bias-pill--${item.tone ?? "neutral"}`}>{item.value}</span>
+      ) : item.kind === "signal" ? (
+        <span className={`pill ${item.pillClass ?? "pill--ghost"}`}>{item.value}</span>
       ) : (
         <strong className={item.tone ?? ""}>{item.value}</strong>
       )}
@@ -803,6 +967,12 @@ function buildActiveLegRow(order, leg) {
       quantity: String(leg.quantity ?? "n/a"),
       entryPrice: formatCurrency(leg.entryPrice, 4),
       currentMark: formatCurrency(leg.currentPrice, 4),
+      bid: "n/a",
+      ask: "n/a",
+      bidSize: "n/a",
+      askSize: "n/a",
+      volume: "n/a",
+      openInterest: "n/a",
       currentValue: formatCurrency(leg.currentExposure),
       profitLossPercent: formatSignedPercentValue(profitLossPercent),
       profitLossValue: formatCurrency(profitLossValue),
@@ -816,7 +986,7 @@ function buildActiveLegRow(order, leg) {
     id: leg.id,
     contractLabel: leg.contractSymbol || leg.label || "n/a",
     contractHref: "",
-    type: "Option",
+    type: leg.kind === "binary" ? "Polymarket" : leg.kind === "stock" ? "Stock" : "Option",
     side: leg.action === "SHORT" ? "Short" : "Long",
     sideTone: leg.action === "SHORT" ? "short" : "long",
     asset: leg.rootSymbol || order.assetLabel || proxySymbol,
@@ -826,6 +996,12 @@ function buildActiveLegRow(order, leg) {
     quantity: String(leg.quantity ?? "n/a"),
     entryPrice: formatCurrency(leg.entryPrice),
     currentMark: formatCurrency(leg.currentPrice),
+    bid: formatCurrency(leg.bid),
+    ask: formatCurrency(leg.ask),
+    bidSize: formatWholeNumber(leg.bidSize),
+    askSize: formatWholeNumber(leg.askSize),
+    volume: formatWholeNumber(leg.volume),
+    openInterest: formatWholeNumber(leg.openInterest),
     currentValue: formatCurrency(leg.currentExposure),
     profitLossPercent: formatSignedPercentValue(profitLossPercent),
     profitLossValue: formatCurrency(profitLossValue),
@@ -856,6 +1032,12 @@ function ActiveContractsTree({ order, compact = false }) {
               <th scope="col">Quantity</th>
               <th scope="col">Entry price</th>
               <th scope="col">Current mark</th>
+              <th scope="col">Bid</th>
+              <th scope="col">Ask</th>
+              <th scope="col">Bid size</th>
+              <th scope="col">Ask size</th>
+              <th scope="col">Vol</th>
+              <th scope="col">OI</th>
               <th scope="col">Current value</th>
               <th scope="col">P/L%</th>
               <th scope="col">P/L</th>
@@ -890,6 +1072,12 @@ function ActiveContractsTree({ order, compact = false }) {
                 <td>{row.quantity}</td>
                 <td>{row.entryPrice}</td>
                 <td>{row.currentMark}</td>
+                <td>{row.bid}</td>
+                <td>{row.ask}</td>
+                <td>{row.bidSize}</td>
+                <td>{row.askSize}</td>
+                <td>{row.volume}</td>
+                <td>{row.openInterest}</td>
                 <td>{row.currentValue}</td>
                 <td className={row.profitLossTone}>{row.profitLossPercent}</td>
                 <td className={row.profitLossTone}>{row.profitLossValue}</td>
@@ -926,6 +1114,7 @@ function BrokerExecutionPanel({
   const smartStatusTone = getSmartStatusTone(smartExecution);
   const statusTone = getExecutionTone(execution);
   const confirmationPending = isIbkr && isExecutionConfirmationPending(execution);
+  const stockConfirmationPending = isIbkrPaperExecution(order?.stockExecution) && isExecutionConfirmationPending(order?.stockExecution);
   const normalizedStatus = String(execution?.status ?? "").trim().toLowerCase();
   const canRetryEntry = isIbkr &&
     !confirmationPending &&
@@ -992,6 +1181,26 @@ function BrokerExecutionPanel({
             Decline
           </button>
         ) : null}
+        {stockConfirmationPending && onRespondExecutionConfirmation ? (
+          <button
+            type="button"
+            className="chart-toggle"
+            onClick={() => onRespondExecutionConfirmation(true)}
+            disabled={orderBusy}
+          >
+            {orderBusy ? "Working..." : "Submit stock hedge anyway"}
+          </button>
+        ) : null}
+        {stockConfirmationPending && onRespondExecutionConfirmation ? (
+          <button
+            type="button"
+            className="chart-toggle"
+            onClick={() => onRespondExecutionConfirmation(false)}
+            disabled={orderBusy}
+          >
+            Decline stock hedge
+          </button>
+        ) : null}
         {isIbkr ? (
           <button
             type="button"
@@ -1041,12 +1250,100 @@ function OpenOrderDetails({
   onRespondExecutionConfirmation,
   onSave,
   onDelete,
+  onAddHedge,
+  onCloseLeg,
   onUpdateDraft,
   onSaveCalculatorSnapshot,
   theme
 }) {
+  const hedgeState = order?.hedgeState ?? null;
+  const actionSignal = String(hedgeState?.actionSignal ?? "").trim().toUpperCase();
+  const actionPillClass =
+    actionSignal === "HEDGE_SHORT"
+      ? "pill--short"
+      : actionSignal === "HEDGE_LONG"
+        ? "pill--long"
+        : actionSignal === "RECHECK"
+          ? "pill--warning"
+          : actionSignal === "EXIT_SIGNAL"
+            ? "pill--purple"
+            : "pill--ghost";
+  const netDeltaShares = Number(hedgeState?.netDeltaShares ?? NaN);
+  const deltaThresholdShares = Number(hedgeState?.deltaThresholdShares ?? NaN);
+  const priceMovePct = Number(hedgeState?.priceMovePct ?? NaN);
+  const priceMoveThresholdPct = Number(hedgeState?.priceMoveThresholdPct ?? NaN);
+  const recommendedShares = Number(hedgeState?.recommendedSharesDeltaNeutral ?? 0);
+  const recommendationLabel =
+    Number.isFinite(recommendedShares) && recommendedShares !== 0
+      ? `${recommendedShares > 0 ? "Buy" : "Short"} ${formatWholeNumber(Math.abs(recommendedShares))} shares`
+      : "—";
+  const canAddHedge =
+    typeof onAddHedge === "function" &&
+    (actionSignal === "HEDGE_SHORT" || actionSignal === "HEDGE_LONG") &&
+    Number.isFinite(recommendedShares) &&
+    Math.round(recommendedShares) !== 0;
+
   return (
     <div className="paper-order-card__body paper-open-table__expanded-body">
+      {hedgeState ? (
+        <section className="paper-order-metrics">
+          <article className="paper-order-metric">
+            <span>Action signal</span>
+            <strong>
+              <span className={`pill ${actionPillClass}`}>{actionSignal || "n/a"}</span>
+            </strong>
+            <small>{recommendationLabel}</small>
+          </article>
+          <article className="paper-order-metric">
+            <span>Net delta</span>
+            <strong>
+              {Number.isFinite(netDeltaShares)
+                ? `${netDeltaShares >= 0 ? "+" : ""}${netDeltaShares.toFixed(2)} shares`
+                : "n/a"}
+            </strong>
+            <small>
+              Threshold{" "}
+              {Number.isFinite(deltaThresholdShares) ? `${deltaThresholdShares.toFixed(0)} shares` : "n/a"}
+            </small>
+          </article>
+          <article className="paper-order-metric">
+            <span>Price move</span>
+            <strong>{Number.isFinite(priceMovePct) ? formatPercent(priceMovePct * 100) : "n/a"}</strong>
+            <small>
+              Threshold{" "}
+              {Number.isFinite(priceMoveThresholdPct) ? formatPercent(priceMoveThresholdPct * 100) : "n/a"}
+            </small>
+          </article>
+          <article className="paper-order-metric">
+            <span>Contracts</span>
+            <strong>{formatWholeNumber(order?.hedgeState?.optionContracts ?? null)}</strong>
+            <small>
+              DTE{" "}
+              {Number.isFinite(Number(order?.hedgeState?.minDaysToExpiry))
+                ? formatWholeNumber(order.hedgeState.minDaysToExpiry)
+                : "n/a"}
+            </small>
+          </article>
+        </section>
+      ) : null}
+      {hedgeState && canAddHedge ? (
+        <div className="paper-order-editbar paper-order-editbar--hedge">
+          <div className="paper-order-editbar__copy">
+            <span className="brand__eyebrow">Hedge action</span>
+            <p>{recommendationLabel} to bring delta back inside the configured threshold.</p>
+          </div>
+          <div className="paper-order-editbar__actions">
+            <button
+              type="button"
+              className="chart-toggle chart-toggle--active"
+              onClick={() => onAddHedge(Math.round(recommendedShares))}
+              disabled={orderBusy}
+            >
+              {orderBusy ? "Working..." : "Add hedge order"}
+            </button>
+          </div>
+        </div>
+      ) : null}
       <PaperTradeHistoryChart history={order.history} theme={theme} />
       <PaperTradeScenarioPanel
         order={order}
@@ -1102,24 +1399,44 @@ function OpenOrderDetails({
           <span>Sub item</span>
           <span>Type</span>
           <span>Purchase price</span>
-          <span>Contracts</span>
+          <span>Qty</span>
           <span>Current mark</span>
           <span>Current value</span>
           <span>P&amp;L</span>
+          <span>Close price</span>
+          <span>Action</span>
         </div>
         {order.legs.map((leg) => {
           const legDraft = draft.legs?.[String(leg.id)] ?? {
             entryPrice: String(leg.entryPrice ?? ""),
-            quantity: String(leg.quantity ?? "")
+            quantity: String(leg.quantity ?? ""),
+            closedPrice:
+              String(order?.status ?? "").toLowerCase() === "closed" ||
+              String(leg?.status ?? "").toLowerCase() === "closed" ||
+              leg?.closedAt ||
+              leg?.closedDate ||
+              leg?.closedPrice != null
+                ? String(leg.closedPrice ?? leg.currentPrice ?? "")
+                : ""
           };
           const legUrl = getLegUrl(order, leg);
           const polymarketReferenceLine = getPolymarketReferenceLine(order, leg);
+          const legStatus = String(leg.status ?? "open").trim().toLowerCase();
+          const legClosed = legStatus === "closed";
+          const closePriceDigits = leg.kind === "binary" ? 4 : 2;
+          const suggestedClosePriceNumber = Number(leg.currentPrice ?? NaN);
+          const suggestedClosePrice = Number.isFinite(suggestedClosePriceNumber)
+            ? String(Number(suggestedClosePriceNumber.toFixed(closePriceDigits)))
+            : "";
 
           return (
             <div key={leg.id} className="paper-legs-table__row">
               <span className="paper-legs-table__label">
                 <strong>{getLegTitle(order, leg)}</strong>
                 <small>{renderLegDescriptor(leg)}</small>
+                {legClosed ? (
+                  <small>Closed {formatDateTimeLabel(leg.closedAt, { includeSeconds: true })}</small>
+                ) : null}
                 {buildPaperLegLiquidityMeta(leg) ? <small>{buildPaperLegLiquidityMeta(leg)}</small> : null}
                 {legUrl ? (
                   <a href={legUrl} target="_blank" rel="noreferrer">
@@ -1128,7 +1445,7 @@ function OpenOrderDetails({
                 ) : null}
                 {polymarketReferenceLine ? <small>{polymarketReferenceLine}</small> : null}
               </span>
-              <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
+              <span>{leg.kind === "binary" ? "Polymarket" : leg.kind === "stock" ? "Shares" : "Option"}</span>
               <span>
                 <input
                   type="number"
@@ -1136,7 +1453,6 @@ function OpenOrderDetails({
                   max={leg.kind === "binary" ? "1" : undefined}
                   step="0.01"
                   value={legDraft.entryPrice}
-                  disabled={isIbkrPaperOrder(order) && leg.kind === "option"}
                   onChange={(event) =>
                     onUpdateDraft(order.id, (current) => ({
                       ...current,
@@ -1157,7 +1473,6 @@ function OpenOrderDetails({
                   min="0"
                   step="1"
                   value={legDraft.quantity}
-                  disabled={isIbkrPaperOrder(order) && leg.kind === "option"}
                   onChange={(event) =>
                     onUpdateDraft(order.id, (current) => ({
                       ...current,
@@ -1177,6 +1492,59 @@ function OpenOrderDetails({
               <span className={Number(leg.profitLossValue) >= 0 ? "positive" : "negative"}>
                 {formatCurrency(leg.profitLossValue)}
               </span>
+              <span>
+                <input
+                  type="number"
+                  min="0"
+                  max={leg.kind === "binary" ? "1" : undefined}
+                  step={leg.kind === "binary" ? "0.0001" : "0.01"}
+                  value={legDraft.closedPrice ?? ""}
+                  placeholder={suggestedClosePrice}
+                  onFocus={() => {
+                    if (orderBusy || String(legDraft.closedPrice ?? "").trim()) {
+                      return;
+                    }
+
+                    if (!suggestedClosePrice) {
+                      return;
+                    }
+
+                    onUpdateDraft(order.id, (current) => ({
+                      ...current,
+                      legs: {
+                        ...current.legs,
+                        [String(leg.id)]: {
+                          ...(current.legs?.[String(leg.id)] ?? {}),
+                          closedPrice: suggestedClosePrice
+                        }
+                      }
+                    }));
+                  }}
+                  onChange={(event) =>
+                    onUpdateDraft(order.id, (current) => ({
+                      ...current,
+                      legs: {
+                        ...current.legs,
+                        [String(leg.id)]: {
+                          ...(current.legs?.[String(leg.id)] ?? {}),
+                          closedPrice: event.target.value
+                        }
+                      }
+                    }))
+                  }
+                  disabled={orderBusy}
+                />
+              </span>
+              <span>
+                <button
+                  type="button"
+                  className="chart-toggle"
+                  onClick={() => onCloseLeg?.(order, leg, legDraft.closedPrice)}
+                  disabled={orderBusy || typeof onCloseLeg !== "function"}
+                >
+                  {legClosed ? "Closed | Revive" : "Close leg"}
+                </button>
+              </span>
             </div>
           );
         })}
@@ -1195,6 +1563,7 @@ function OpenOrderDetails({
 
 function OpenOrderTableRows({
   order,
+  heatmapBenchmark,
   draft,
   isDirty,
   feedback,
@@ -1213,14 +1582,19 @@ function OpenOrderTableRows({
   onSave,
   onClose,
   onDelete,
+  onAddHedge,
+  onCloseLeg,
   onUpdateDraft,
   onSaveCalculatorSnapshot,
   theme
 }) {
   const expirationDate = getOrderExpirationDate(order);
   const expirationCountdown = getExpirationCountdown(order);
+  const holdingLiquidityMeta = buildPaperOrderLiquidityMeta(order);
   const summaryItems = [
     { label: "Initial cost", value: formatCurrency(order.initialPurchaseValue) },
+    { label: "Entry mark", value: formatCurrency(order.entryMarkPrice) },
+    { label: "Current mark", value: formatCurrency(order.currentMarkPrice) },
     buildPurchaseDateSummaryItem(order),
     {
       label: "Expiration",
@@ -1230,6 +1604,7 @@ function OpenOrderTableRows({
     },
     { label: "Asset", value: order.assetLabel || "n/a" },
     { label: "Strategy type", value: order.strategyType || "Custom" },
+    buildActionSignalSummaryItem(order),
     { label: "Tag", value: getOrderTagLabel(order), kind: "tag", tone: order.marketBiasTone ?? "neutral" },
     { label: "Max profit", value: formatBoundedCurrency(order.maxProfit, order.maxProfitUnbounded) },
     { label: "Max loss", value: formatBoundedCurrency(order.maxLoss, order.maxLossUnbounded) },
@@ -1237,6 +1612,16 @@ function OpenOrderTableRows({
       label: "Unrealised P&L",
       value: formatCurrency(order.profitLossValue),
       tone: Number(order.profitLossValue) >= 0 ? "positive" : "negative"
+    },
+    {
+      label: "1x heat map %",
+      value: formatPercent(heatmapBenchmark?.percentValue),
+      tone:
+        Number(heatmapBenchmark?.percentValue) > 0
+          ? "positive"
+          : Number(heatmapBenchmark?.percentValue) < 0
+            ? "negative"
+            : ""
     }
   ];
 
@@ -1255,6 +1640,9 @@ function OpenOrderTableRows({
           <div className="paper-open-table__holding">
             <strong>{order.combinationLabel}</strong>
             <small>Purchased {formatPurchaseDateTimeLabel(order)}</small>
+            {holdingLiquidityMeta ? (
+              <small className="paper-open-table__holding-meta">{holdingLiquidityMeta}</small>
+            ) : null}
           </div>
         </td>
         {summaryItems.map((item) => (
@@ -1287,7 +1675,7 @@ function OpenOrderTableRows({
             type="button"
             className="chart-toggle paper-order-card__close-button"
             onClick={onClose}
-            disabled={orderBusy || (isTwsPaperOrder(order) && !isTwsEntryFilled(order))}
+            disabled={orderBusy}
           >
             {orderBusy
               ? "Working..."
@@ -1298,7 +1686,7 @@ function OpenOrderTableRows({
                 : isTwsPaperOrder(order)
                   ? isTwsEntryFilled(order)
                     ? "Move to closed"
-                    : "Waiting fill"
+                    : "Close anyway"
                 : "Close order"}
           </button>
         </td>
@@ -1337,6 +1725,8 @@ function OpenOrderTableRows({
                 onRespondExecutionConfirmation={onRespondExecutionConfirmation}
                 onSave={onSave}
                 onDelete={onDelete}
+                onAddHedge={onAddHedge}
+                onCloseLeg={onCloseLeg}
                 onUpdateDraft={onUpdateDraft}
                 onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
                 theme={theme}
@@ -1407,7 +1797,7 @@ function ClosedOrderDetails({
           <span>Type</span>
           <span>Entry price</span>
           <span>Exit price</span>
-          <span>Contracts</span>
+          <span>Qty</span>
           <span>Realized P&amp;L</span>
         </div>
         {order.legs.map((leg) => {
@@ -1432,7 +1822,7 @@ function ClosedOrderDetails({
                   </a>
                 ) : null}
               </span>
-              <span>{leg.kind === "binary" ? "Polymarket" : "Option"}</span>
+              <span>{leg.kind === "binary" ? "Polymarket" : leg.kind === "stock" ? "Shares" : "Option"}</span>
               <span>
                 <input
                   type="number"
@@ -1612,6 +2002,9 @@ export default function PaperTradingWorkspace({
   lastUpdated,
   onUpdatePaperOrder,
   onClosePaperOrder,
+  onClosePaperOrderLeg = null,
+  onRevivePaperOrderLeg = null,
+  onAddPaperHedge = null,
   onDeletePaperOrder,
   onSaveCalculatorSnapshot,
   onExecutePaperOrder,
@@ -1635,9 +2028,29 @@ export default function PaperTradingWorkspace({
   const [expandedTreeOrderIds, setExpandedTreeOrderIds] = useState([]);
   const [openSortConfig, setOpenSortConfig] = useState({ key: null, direction: "asc" });
   const [closedSortConfig, setClosedSortConfig] = useState({ key: null, direction: "asc" });
+  const openOrderHeatmapBenchmarks = useMemo(
+    () =>
+      Object.fromEntries(
+        openOrders.map((order) => [String(order.id), buildPaperTradeHeatmapBenchmark(order, lastUpdated)])
+      ),
+    [openOrders, lastUpdated]
+  );
 
   useEffect(() => {
-    setDrafts(buildDrafts(allOrders));
+    setDrafts((current) =>
+      Object.fromEntries(
+        allOrders.map((order) => {
+          const orderId = String(order.id);
+          const existingDraft = current?.[orderId] ?? null;
+
+          if (!existingDraft) {
+            return [orderId, buildDefaultDraft(order)];
+          }
+
+          return [orderId, hasOrderDraftChanged(order, existingDraft) ? existingDraft : buildDefaultDraft(order)];
+        })
+      )
+    );
   }, [openOrders, closedOrders]);
 
   useEffect(() => {
@@ -1705,8 +2118,10 @@ export default function PaperTradingWorkspace({
         isIbkrPaperOrder(order)
           ? `Send an IBKR paper exit order for "${order.combinationLabel}"? The order will move to history after the broker exit fills.`
           : isTwsPaperOrder(order)
-            ? `Move filled TWS order "${order.combinationLabel}" to closed history? Close/cancel orders manually inside TWS. HedgeHub will capture close fills from TWS executions when you move it to history.`
-          : `Close open order "${order.combinationLabel}" and move it to history?`
+            ? isTwsEntryFilled(order)
+              ? `Move filled TWS order "${order.combinationLabel}" to closed history? Close/cancel orders manually inside TWS. HedgeHub will capture close fills from TWS executions when you move it to history.`
+              : `Move TWS order "${order.combinationLabel}" to closed history anyway? The entry order is not filled yet. This will not cancel anything in TWS. You can edit entry/exit prices in the closed history after moving it.`
+            : `Close open order "${order.combinationLabel}" and move it to history?`
       )
     ) {
       return;
@@ -1719,7 +2134,11 @@ export default function PaperTradingWorkspace({
     }));
 
     try {
-      const payload = await onClosePaperOrder(order.id, buildPatchFromDraft(order, draft));
+      const patch = buildPatchFromDraft(order, draft);
+      const payload = await onClosePaperOrder(order.id, {
+        ...patch,
+        ...(isTwsPaperOrder(order) && !isTwsEntryFilled(order) ? { forceClose: true } : {})
+      });
 
       if ((isIbkrPaperOrder(order) || isTwsPaperOrder(order)) && payload?.message) {
         setFeedbackByOrder((current) => ({
@@ -1730,6 +2149,170 @@ export default function PaperTradingWorkspace({
           }
         }));
       }
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleReviveLeg(order, leg) {
+    if (typeof onRevivePaperOrderLeg !== "function") {
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Revive "${getLegTitle(order, leg)}" (${renderLegDescriptor(leg)}) from "${order.combinationLabel}"? This reopens the leg and removes its close price (record only).`
+      )
+    ) {
+      return;
+    }
+
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onRevivePaperOrderLeg(order.id, leg.id, {});
+      updateDraft(order.id, (current) => ({
+        ...current,
+        legs: {
+          ...current.legs,
+          [String(leg.id)]: {
+            ...(current.legs?.[String(leg.id)] ?? {}),
+            closedPrice: ""
+          }
+        }
+      }));
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: payload?.message || "Leg revived."
+        }
+      }));
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleCloseLeg(order, leg, closePriceInput = null) {
+    const legStatus = String(leg?.status ?? "open").trim().toLowerCase();
+    if (legStatus === "closed") {
+      await handleReviveLeg(order, leg);
+      return;
+    }
+
+    if (typeof onClosePaperOrderLeg !== "function") {
+      return;
+    }
+
+    const closePriceDigits = leg.kind === "binary" ? 4 : 2;
+    const normalizedInput = String(closePriceInput ?? "").trim();
+    const requestedPrice = normalizedInput ? Number(normalizedInput) : null;
+    const fallbackPrice = Number(leg.currentPrice ?? NaN);
+    const closePrice = Number.isFinite(requestedPrice) ? requestedPrice : fallbackPrice;
+    const closePriceLabel = Number.isFinite(closePrice) ? formatCurrency(closePrice, closePriceDigits) : "n/a";
+
+    if (
+      !window.confirm(
+        `Close "${getLegTitle(order, leg)}" (${renderLegDescriptor(leg)}) from "${order.combinationLabel}" at ${closePriceLabel}? This is record only.`
+      )
+    ) {
+      return;
+    }
+
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onClosePaperOrderLeg(
+        order.id,
+        leg.id,
+        Number.isFinite(closePrice) ? { closedPrice: closePrice } : {}
+      );
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: payload?.message || "Leg closed."
+        }
+      }));
+    } catch (error) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "error",
+          message: error.message
+        }
+      }));
+    } finally {
+      setBusyOrderId(null);
+    }
+  }
+
+  async function handleAddHedge(order, shares) {
+    if (typeof onAddPaperHedge !== "function") {
+      return;
+    }
+
+    const normalizedShares = Math.round(Number(shares ?? 0) || 0);
+    if (!normalizedShares) {
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "warning",
+          message: "No hedge shares were suggested for this order."
+        }
+      }));
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Add a hedge leg to "${order.combinationLabel}" by ${normalizedShares > 0 ? "buying" : "shorting"} ${formatWholeNumber(Math.abs(normalizedShares))} shares?`
+      )
+    ) {
+      return;
+    }
+
+    setBusyOrderId(String(order.id));
+    setFeedbackByOrder((current) => ({
+      ...current,
+      [String(order.id)]: null
+    }));
+
+    try {
+      const payload = await onAddPaperHedge(order.id, {
+        shares: normalizedShares
+      });
+      setFeedbackByOrder((current) => ({
+        ...current,
+        [String(order.id)]: {
+          tone: "success",
+          message: payload?.message ?? "Hedge order added."
+        }
+      }));
     } catch (error) {
       setFeedbackByOrder((current) => ({
         ...current,
@@ -1784,6 +2367,19 @@ export default function PaperTradingWorkspace({
 
     try {
       const payload = await onSyncPaperExecution(order.id);
+      const nextPortfolio = payload?.paperPortfolio ?? null;
+      const syncedOrder =
+        (nextPortfolio?.openOrders ?? nextPortfolio?.orders ?? [])
+          .concat(nextPortfolio?.closedOrders ?? [])
+          .find((candidate) => String(candidate?.id) === String(order.id)) ?? null;
+
+      if (syncedOrder) {
+        setDrafts((current) => ({
+          ...current,
+          [String(order.id)]: buildDefaultDraft(syncedOrder)
+        }));
+      }
+
       setFeedbackByOrder((current) => ({
         ...current,
         [String(order.id)]: {
@@ -2057,7 +2653,9 @@ export default function PaperTradingWorkspace({
                         </tr>
                       </thead>
                       <tbody>
-                        {sortOrders(group.orders, openSortConfig, getOpenOrderSortValue).map((order) => {
+                        {sortOrders(group.orders, openSortConfig, (order, key) =>
+                          getOpenOrderSortValue(order, key, openOrderHeatmapBenchmarks)
+                        ).map((order) => {
                           const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
                           const isDirty = hasOrderDraftChanged(order, draft);
                           const feedback = feedbackByOrder[String(order.id)];
@@ -2070,6 +2668,7 @@ export default function PaperTradingWorkspace({
                             <OpenOrderTableRows
                               key={order.id}
                               order={order}
+                              heatmapBenchmark={openOrderHeatmapBenchmarks[String(order.id)]}
                               draft={draft}
                               isDirty={isDirty}
                               feedback={feedback}
@@ -2104,7 +2703,9 @@ export default function PaperTradingWorkspace({
                               }
                               onSave={() => handleSave(order)}
                               onClose={() => handleClose(order)}
+                              onCloseLeg={handleCloseLeg}
                               onDelete={() => handleDelete(order, "open order")}
+                              onAddHedge={(shares) => handleAddHedge(order, shares)}
                               onUpdateDraft={updateDraft}
                               onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
                               theme={theme}
