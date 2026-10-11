@@ -102,9 +102,17 @@ async function api(path, body, method) {
       ? { method: method || "POST", body: JSON.stringify(body) }
       : { method: method || "GET" }),
   });
-  const data = await response.json();
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(
+      `Request failed (${response.status}): server returned a non-JSON response for ${path}`,
+    );
+  }
   if (!response.ok)
-    throw new Error(data.error || `Request failed (${response.status})`);
+    throw new Error(data?.error || `Request failed (${response.status})`);
   return data;
 }
 function Icon({ name = "chart", size = 18 }) {
