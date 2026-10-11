@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS strategy_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS paper_orders (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT 'legacy',
+    strategy_id TEXT NOT NULL,
+    combination_id TEXT NOT NULL,
+    position_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS scanner_presets (
     id BIGSERIAL PRIMARY KEY,
     user_id TEXT NOT NULL DEFAULT 'legacy',
@@ -163,16 +173,6 @@ CREATE TABLE IF NOT EXISTS candidate_rank_history (
     score NUMERIC(10, 4),
     rank_position INT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS paper_orders (
-    id BIGSERIAL PRIMARY KEY,
-    user_id TEXT NOT NULL DEFAULT 'legacy',
-    strategy_id TEXT NOT NULL,
-    combination_id TEXT NOT NULL,
-    position_json JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS paper_order_snapshots (
