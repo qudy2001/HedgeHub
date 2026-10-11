@@ -9,6 +9,7 @@ dist
 .env
 .env.app
 .env.local
+docker-compose.override.yml
 .DS_Store
 /vendor/clientportal.gw/
 .venv-tiger/
