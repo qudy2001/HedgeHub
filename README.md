@@ -63,6 +63,26 @@ The default compose stack now includes:
 - logs: use `docker compose logs -f web` or `docker compose logs -f scanner`
 - default dashboard layouts are seeded automatically on first boot if the dashboards volume starts empty
 
+Optional integrations (both off by default, enabled with Docker Compose profiles):
+
+```bash
+# Tiger market-data bridge — routes stock/option quotes through Tiger
+# instead of Yahoo/Polymarket. Set MARKET_DATA_PROVIDER=tiger,
+# TIGER_BRIDGE_TOKEN, and TIGER_CONFIG_FILE in .env first.
+docker compose --profile tiger up -d
+
+# TradingAgents AI research — powers the "Research with TradingAgents"
+# feature in Strategy Studio. After it's up, open http://localhost:8000,
+# log in with TRADINGAGENTS_WEB_ADMIN_PASSWORD, and issue an API token from
+# its UI; set that token as TRADINGAGENTS_TOKEN in .env, then restart web/scanner.
+docker compose --profile tradingagents up -d
+
+# Both together:
+docker compose --profile tiger --profile tradingagents up -d
+```
+
+Without `MARKET_DATA_PROVIDER=tiger` set, quotes/option chains fall back to Yahoo/Polymarket automatically — the Tiger bridge container never needs to run. Without `TRADINGAGENTS_TOKEN` set, the TradingAgents research panel reports itself as unconfigured rather than erroring.
+
 If you want to keep your current local data when moving to the NAS, copy these folders with the project:
 
 - `data/`

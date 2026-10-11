@@ -46,7 +46,7 @@ services:
       MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
       TIGER_BRIDGE_URL: ${TIGER_BRIDGE_URL:-http://tiger-bridge:8788}
       TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:-}
-      TRADINGAGENTS_URL: ${TRADINGAGENTS_URL:-}
+      TRADINGAGENTS_URL: ${TRADINGAGENTS_URL:-http://tradingagents:8000}
       TRADINGAGENTS_TOKEN: ${TRADINGAGENTS_TOKEN:-}
     volumes:
       - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
@@ -94,22 +94,45 @@ services:
       - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
       - ${HEDGEHUB_DASHBOARDS_DIR:-./dashboards}:/app/dashboards
 
+  # Optional: only starts with `docker compose --profile tiger up -d`.
+  # Requires TIGER_BRIDGE_TOKEN and TIGER_CONFIG_FILE to be set in .env.
   tiger-bridge:
     container_name: ${TIGER_BRIDGE_CONTAINER_NAME:-tiger-bridge}
     image: ${TIGER_BRIDGE_IMAGE:-ghcr.io/qudy2001/hedgehub-tiger-bridge:latest}
+    profiles:
+      - tiger
     init: true
     restart: unless-stopped
     environment:
       TIGER_BRIDGE_HOST: 0.0.0.0
       TIGER_CONFIG_DIR: /config
-      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:?Set a private shared bridge token}
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:-}
       TIGER_CLAIM_DEVICE: ${TIGER_CLAIM_DEVICE:-false}
     volumes:
       # Host file must be the account's .properties file (not a folder); it lands
       # inside the container under the SDK's default filename so props_path=/config resolves it.
-      - ${TIGER_CONFIG_FILE:?Set the path to your Tiger SDK .properties file}:/config/tiger_openapi_config.properties:ro
+      - ${TIGER_CONFIG_FILE:-/dev/null}:/config/tiger_openapi_config.properties:ro
     expose:
       - "8788"
+
+  # Optional: only starts with `docker compose --profile tradingagents up -d`.
+  # After it's running, open http://localhost:8000, log in with
+  # TRADINGAGENTS_WEB_ADMIN_PASSWORD, and issue an API token from its UI —
+  # that token (not the admin password) is what goes in TRADINGAGENTS_TOKEN
+  # below for the web/scanner services to use.
+  tradingagents:
+    container_name: ${TRADINGAGENTS_CONTAINER_NAME:-tradingagents-web}
+    image: ${TRADINGAGENTS_IMAGE:-ghcr.io/qudy2001/tradingagents:latest}
+    profiles:
+      - tradingagents
+    restart: unless-stopped
+    environment:
+      TRADINGAGENTS_MODE: web
+      TRADINGAGENTS_WEB_REQUIRE_AUTH: ${TRADINGAGENTS_WEB_REQUIRE_AUTH:-true}
+      TRADINGAGENTS_WEB_ADMIN_PASSWORD: ${TRADINGAGENTS_WEB_ADMIN_PASSWORD:-}
+      TRADINGAGENTS_WEB_COOKIE_SECURE: ${TRADINGAGENTS_WEB_COOKIE_SECURE:-false}
+    ports:
+      - "${TRADINGAGENTS_PORT:-8000}:8000"
 
 volumes:
   postgres_data:
