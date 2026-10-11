@@ -1,1 +1,5 @@
 tigeropen==3.8.0
+# Pinned: cryptography>=45 ships a native extension that triggers SIGILL
+# (exit 132) under some ARM64 Docker Desktop VM configurations when signing
+# requests. 43.0.3 is the newest version confirmed not to hit this.
+cryptography==43.0.3
