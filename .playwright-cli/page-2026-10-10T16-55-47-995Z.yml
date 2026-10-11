@@ -1,0 +1,308 @@
+- generic [ref=f1e735]:
+  - banner [ref=f1e736]:
+    - link "HedgeHub" [ref=f1e737] [cursor=pointer]:
+      - /url: /builder?demo=1
+    - navigation [ref=f1e740]:
+      - button "Workspace" [ref=f1e741] [cursor=pointer]
+      - button "Scanner" [ref=f1e742] [cursor=pointer]
+      - button "Backtests" [ref=f1e743] [cursor=pointer]
+    - generic [ref=f1e744]: Interactive demo · Sample data
+    - link "Classic UI ↗" [ref=f1e745] [cursor=pointer]:
+      - /url: /
+    - button "Toggle theme" [ref=f1e746] [cursor=pointer]
+    - button "DE" [ref=f1e749] [cursor=pointer]
+  - generic [ref=f1e750]:
+    - complementary [ref=f1e751]:
+      - generic [ref=f1e752]: YOUR WORKSPACE
+      - button "Profit & loss" [ref=f1e753] [cursor=pointer]
+      - button "Hedge choices" [ref=f1e756] [cursor=pointer]
+      - button "Stock technicals" [ref=f1e759] [cursor=pointer]
+      - button "Options analytics" [ref=f1e762] [cursor=pointer]
+      - button "Agent valuation" [ref=f1e765] [cursor=pointer]
+      - button "Past events" [ref=f1e768] [cursor=pointer]
+      - button "Upcoming events" [ref=f1e771] [cursor=pointer]
+      - button "AI tracking" [ref=f1e774] [cursor=pointer]
+      - button "Scan results" [ref=f1e777] [cursor=pointer]
+      - generic [ref=f1e780]:
+        - button "Add panel" [ref=f1e781] [cursor=pointer]
+        - button "Reset layout" [ref=f1e784] [cursor=pointer]
+        - paragraph [ref=f1e785]: Make it yours.Add metrics, rearrange panels, save your workspace.
+    - main [ref=f1e786]:
+      - generic [ref=f1e787]:
+        - combobox "Selected stock" [ref=f1e788]:
+          - option "AAPL"
+          - option "MSFT" [selected]
+          - option "SPY"
+        - strong [ref=f1e789]: $420.00
+        - generic [ref=f1e790]: Strategy
+        - button "My protected portfolio ⌄" [ref=f1e791] [cursor=pointer]:
+          - text: My protected portfolio
+          - generic [ref=f1e792]: ⌄
+        - button "Customize" [ref=f1e793] [cursor=pointer]
+        - button "Save layout" [ref=f1e796] [cursor=pointer]
+        - button "Scan stocks" [ref=f1e797] [cursor=pointer]
+      - generic [ref=f1e800]:
+        - text: Illustrative data only. Changes are local to this demo.
+        - link "Use live data →" [ref=f1e801] [cursor=pointer]:
+          - /url: /builder
+      - generic [ref=f1e1765]:
+        - generic [ref=f1e1767]:
+          - text: STRATEGY LAB
+          - heading "Test past performance" [level=1] [ref=f1e1768]
+          - paragraph [ref=f1e1769]: Repeated daily rules, historical stock prices, and explicitly modeled options.
+        - generic [ref=f1e1770]:
+          - generic [ref=f1e1771]:
+            - generic [ref=f1e1772]:
+              - generic [ref=f1e1773]: Start date
+              - textbox "Start date" [ref=f1e1774]: 2026-04-13
+            - generic [ref=f1e1775]:
+              - generic [ref=f1e1776]: End date
+              - textbox "End date" [ref=f1e1777]: 2026-10-10
+            - generic [ref=f1e1778]:
+              - generic [ref=f1e1779]: Capital per stock
+              - spinbutton "Capital per stock" [ref=f1e1780]: "100000"
+            - generic [ref=f1e1781]:
+              - generic [ref=f1e1782]: Roll before expiry (days)
+              - spinbutton "Roll before expiry (days)" [ref=f1e1783]: "5"
+            - generic [ref=f1e1784]:
+              - generic [ref=f1e1785]: Stop loss (% capital)
+              - spinbutton "Stop loss (% capital)" [ref=f1e1786]: "20"
+            - generic [ref=f1e1787]:
+              - generic [ref=f1e1788]: Take profit (% capital)
+              - spinbutton "Take profit (% capital)" [ref=f1e1789]: "25"
+            - generic [ref=f1e1790]:
+              - generic [ref=f1e1791]: Option slippage (%)
+              - spinbutton "Option slippage (%)" [ref=f1e1792]: "2"
+            - generic [ref=f1e1793]:
+              - generic [ref=f1e1794]: Stock slippage (bps)
+              - spinbutton "Stock slippage (bps)" [ref=f1e1795]: "5"
+            - generic [ref=f1e1796]:
+              - generic [ref=f1e1797]: Constant rate (%)
+              - spinbutton "Constant rate (%)" [ref=f1e1798]: "4.25"
+          - generic [ref=f1e1799]:
+            - generic [ref=f1e1800]: Collar · AAPL, MSFT, SPY
+            - button "Edit rules & stocks" [ref=f1e1801] [cursor=pointer]
+            - button "Run backtest" [active] [ref=f1e1802] [cursor=pointer]
+          - paragraph [ref=f1e1803]: Each stock is a separate account. Synthetic strikes/expiries; 20-session historical volatility. Close signals fill next session open. No dividends, early exercise or historical news. Provider-adjusted prices; these are simulations, not historical option fills.
+        - generic [ref=f1e1804]:
+          - generic [ref=f1e1805]:
+            - heading "AAPL · 6 trades" [level=2] [ref=f1e1806]
+            - generic [ref=f1e1807]: 1.2%
+          - generic [ref=f1e1808]:
+            - generic [ref=f1e1809]:
+              - generic [ref=f1e1810]: Final equity
+              - strong [ref=f1e1811]: $101,218
+            - generic [ref=f1e1812]:
+              - generic [ref=f1e1813]: Max drawdown
+              - strong [ref=f1e1814]: 1%
+            - generic [ref=f1e1815]:
+              - generic [ref=f1e1816]: Win rate
+              - strong [ref=f1e1817]: 66.7%
+            - generic [ref=f1e1818]:
+              - generic [ref=f1e1819]: Sharpe
+              - strong [ref=f1e1820]: "-1.07"
+          - generic [ref=f1e1821]:
+            - img "Strategy equity and Buy & hold" [ref=f1e1822]
+            - generic [ref=f1e1825]:
+              - generic [ref=f1e1826]: — Strategy equity
+              - generic [ref=f1e1827]: — Buy & hold
+          - table [ref=f1e1829]:
+            - rowgroup [ref=f1e1830]:
+              - row [ref=f1e1831] [cursor=pointer]:
+                - columnheader "Entry" [ref=f1e1832]
+                - columnheader "Exit" [ref=f1e1833]
+                - columnheader "Entry price" [ref=f1e1834]
+                - columnheader "Exit price" [ref=f1e1835]
+                - columnheader "Reason" [ref=f1e1836]
+                - columnheader "P&L" [ref=f1e1837]
+            - rowgroup [ref=f1e1838]:
+              - row [ref=f1e1839] [cursor=pointer]:
+                - cell "2026-04-13" [ref=f1e1840]
+                - cell "2026-05-12" [ref=f1e1841]
+                - cell "$209.91" [ref=f1e1842]
+                - cell "$208.09" [ref=f1e1843]
+                - cell "roll" [ref=f1e1844]
+                - cell "-$163.57" [ref=f1e1845]
+              - row [ref=f1e1846] [cursor=pointer]:
+                - cell "2026-05-12" [ref=f1e1847]
+                - cell "2026-06-11" [ref=f1e1848]
+                - cell "$208.09" [ref=f1e1849]
+                - cell "$209.21" [ref=f1e1850]
+                - cell "roll" [ref=f1e1851]
+                - cell "$122.89" [ref=f1e1852]
+              - row [ref=f1e1853] [cursor=pointer]:
+                - cell "2026-06-11" [ref=f1e1854]
+                - cell "2026-07-13" [ref=f1e1855]
+                - cell "$209.21" [ref=f1e1856]
+                - cell "$207.77" [ref=f1e1857]
+                - cell "roll" [ref=f1e1858]
+                - cell "-$137.93" [ref=f1e1859]
+              - row [ref=f1e1860] [cursor=pointer]:
+                - cell "2026-07-13" [ref=f1e1861]
+                - cell "2026-08-11" [ref=f1e1862]
+                - cell "$207.77" [ref=f1e1863]
+                - cell "$208.65" [ref=f1e1864]
+                - cell "roll" [ref=f1e1865]
+                - cell "$38.84" [ref=f1e1866]
+              - row [ref=f1e1867] [cursor=pointer]:
+                - cell "2026-08-11" [ref=f1e1868]
+                - cell "2026-09-10" [ref=f1e1869]
+                - cell "$208.65" [ref=f1e1870]
+                - cell "$214.38" [ref=f1e1871]
+                - cell "roll" [ref=f1e1872]
+                - cell "$553.15" [ref=f1e1873]
+              - row [ref=f1e1874] [cursor=pointer]:
+                - cell "2026-09-10" [ref=f1e1875]
+                - cell "2026-10-09" [ref=f1e1876]
+                - cell "$214.38" [ref=f1e1877]
+                - cell "$222.68" [ref=f1e1878]
+                - cell "end of test" [ref=f1e1879]
+                - cell "$804.28" [ref=f1e1880]
+        - generic [ref=f1e1881]:
+          - generic [ref=f1e1882]:
+            - heading "MSFT · 6 trades" [level=2] [ref=f1e1883]
+            - generic [ref=f1e1884]: 2.3%
+          - generic [ref=f1e1885]:
+            - generic [ref=f1e1886]:
+              - generic [ref=f1e1887]: Final equity
+              - strong [ref=f1e1888]: $102,295
+            - generic [ref=f1e1889]:
+              - generic [ref=f1e1890]: Max drawdown
+              - strong [ref=f1e1891]: 2%
+            - generic [ref=f1e1892]:
+              - generic [ref=f1e1893]: Win rate
+              - strong [ref=f1e1894]: 66.7%
+            - generic [ref=f1e1895]:
+              - generic [ref=f1e1896]: Sharpe
+              - strong [ref=f1e1897]: "0.04"
+          - generic [ref=f1e1898]:
+            - img "Strategy equity and Buy & hold" [ref=f1e1899]
+            - generic [ref=f1e1902]:
+              - generic [ref=f1e1903]: — Strategy equity
+              - generic [ref=f1e1904]: — Buy & hold
+          - table [ref=f1e1906]:
+            - rowgroup [ref=f1e1907]:
+              - row [ref=f1e1908] [cursor=pointer]:
+                - columnheader "Entry" [ref=f1e1909]
+                - columnheader "Exit" [ref=f1e1910]
+                - columnheader "Entry price" [ref=f1e1911]
+                - columnheader "Exit price" [ref=f1e1912]
+                - columnheader "Reason" [ref=f1e1913]
+                - columnheader "P&L" [ref=f1e1914]
+            - rowgroup [ref=f1e1915]:
+              - row [ref=f1e1916] [cursor=pointer]:
+                - cell "2026-04-13" [ref=f1e1917]
+                - cell "2026-05-12" [ref=f1e1918]
+                - cell "$400.73" [ref=f1e1919]
+                - cell "$397.26" [ref=f1e1920]
+                - cell "roll" [ref=f1e1921]
+                - cell "-$317.98" [ref=f1e1922]
+              - row [ref=f1e1923] [cursor=pointer]:
+                - cell "2026-05-12" [ref=f1e1924]
+                - cell "2026-06-11" [ref=f1e1925]
+                - cell "$397.26" [ref=f1e1926]
+                - cell "$399.39" [ref=f1e1927]
+                - cell "roll" [ref=f1e1928]
+                - cell "$232.74" [ref=f1e1929]
+              - row [ref=f1e1930] [cursor=pointer]:
+                - cell "2026-06-11" [ref=f1e1931]
+                - cell "2026-07-13" [ref=f1e1932]
+                - cell "$399.39" [ref=f1e1933]
+                - cell "$396.65" [ref=f1e1934]
+                - cell "roll" [ref=f1e1935]
+                - cell "-$276.45" [ref=f1e1936]
+              - row [ref=f1e1937] [cursor=pointer]:
+                - cell "2026-07-13" [ref=f1e1938]
+                - cell "2026-08-11" [ref=f1e1939]
+                - cell "$396.65" [ref=f1e1940]
+                - cell "$398.34" [ref=f1e1941]
+                - cell "roll" [ref=f1e1942]
+                - cell "$90.44" [ref=f1e1943]
+              - row [ref=f1e1944] [cursor=pointer]:
+                - cell "2026-08-11" [ref=f1e1945]
+                - cell "2026-09-10" [ref=f1e1946]
+                - cell "$398.34" [ref=f1e1947]
+                - cell "$409.27" [ref=f1e1948]
+                - cell "roll" [ref=f1e1949]
+                - cell "$1,033.28" [ref=f1e1950]
+              - row [ref=f1e1951] [cursor=pointer]:
+                - cell "2026-09-10" [ref=f1e1952]
+                - cell "2026-10-09" [ref=f1e1953]
+                - cell "$409.27" [ref=f1e1954]
+                - cell "$425.11" [ref=f1e1955]
+                - cell "end of test" [ref=f1e1956]
+                - cell "$1,533.04" [ref=f1e1957]
+        - generic [ref=f1e1958]:
+          - generic [ref=f1e1959]:
+            - heading "SPY · 6 trades" [level=2] [ref=f1e1960]
+            - generic [ref=f1e1961]: 3.2%
+          - generic [ref=f1e1962]:
+            - generic [ref=f1e1963]:
+              - generic [ref=f1e1964]: Final equity
+              - strong [ref=f1e1965]: $103,229
+            - generic [ref=f1e1966]:
+              - generic [ref=f1e1967]: Max drawdown
+              - strong [ref=f1e1968]: 2.8%
+            - generic [ref=f1e1969]:
+              - generic [ref=f1e1970]: Win rate
+              - strong [ref=f1e1971]: 66.7%
+            - generic [ref=f1e1972]:
+              - generic [ref=f1e1973]: Sharpe
+              - strong [ref=f1e1974]: "0.4"
+          - generic [ref=f1e1975]:
+            - img "Strategy equity and Buy & hold" [ref=f1e1976]
+            - generic [ref=f1e1979]:
+              - generic [ref=f1e1980]: — Strategy equity
+              - generic [ref=f1e1981]: — Buy & hold
+          - table [ref=f1e1983]:
+            - rowgroup [ref=f1e1984]:
+              - row [ref=f1e1985] [cursor=pointer]:
+                - columnheader "Entry" [ref=f1e1986]
+                - columnheader "Exit" [ref=f1e1987]
+                - columnheader "Entry price" [ref=f1e1988]
+                - columnheader "Exit price" [ref=f1e1989]
+                - columnheader "Reason" [ref=f1e1990]
+                - columnheader "P&L" [ref=f1e1991]
+            - rowgroup [ref=f1e1992]:
+              - row [ref=f1e1993] [cursor=pointer]:
+                - cell "2026-04-13" [ref=f1e1994]
+                - cell "2026-05-12" [ref=f1e1995]
+                - cell "$562.93" [ref=f1e1996]
+                - cell "$558.05" [ref=f1e1997]
+                - cell "roll" [ref=f1e1998]
+                - cell "-$449.15" [ref=f1e1999]
+              - row [ref=f1e2000] [cursor=pointer]:
+                - cell "2026-05-12" [ref=f1e2001]
+                - cell "2026-06-11" [ref=f1e2002]
+                - cell "$558.05" [ref=f1e2003]
+                - cell "$561.05" [ref=f1e2004]
+                - cell "roll" [ref=f1e2005]
+                - cell "$326.93" [ref=f1e2006]
+              - row [ref=f1e2007] [cursor=pointer]:
+                - cell "2026-06-11" [ref=f1e2008]
+                - cell "2026-07-13" [ref=f1e2009]
+                - cell "$561.05" [ref=f1e2010]
+                - cell "$557.19" [ref=f1e2011]
+                - cell "roll" [ref=f1e2012]
+                - cell "-$378.61" [ref=f1e2013]
+              - row [ref=f1e2014] [cursor=pointer]:
+                - cell "2026-07-13" [ref=f1e2015]
+                - cell "2026-08-11" [ref=f1e2016]
+                - cell "$557.19" [ref=f1e2017]
+                - cell "$559.57" [ref=f1e2018]
+                - cell "roll" [ref=f1e2019]
+                - cell "$116.14" [ref=f1e2020]
+              - row [ref=f1e2021] [cursor=pointer]:
+                - cell "2026-08-11" [ref=f1e2022]
+                - cell "2026-09-10" [ref=f1e2023]
+                - cell "$559.57" [ref=f1e2024]
+                - cell "$574.92" [ref=f1e2025]
+                - cell "roll" [ref=f1e2026]
+                - cell "$1,459.72" [ref=f1e2027]
+              - row [ref=f1e2028] [cursor=pointer]:
+                - cell "2026-09-10" [ref=f1e2029]
+                - cell "2026-10-09" [ref=f1e2030]
+                - cell "$574.92" [ref=f1e2031]
+                - cell "$597.18" [ref=f1e2032]
+                - cell "end of test" [ref=f1e2033]
+                - cell "$2,153.92" [ref=f1e2034]

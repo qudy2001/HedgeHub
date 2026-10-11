@@ -1,0 +1,84 @@
+- generic [ref=f2e731]:
+  - banner [ref=f2e732]:
+    - link "HedgeHub" [ref=f2e733] [cursor=pointer]:
+      - /url: /builder?demo=1
+    - navigation [ref=f2e736]:
+      - button "Workspace" [ref=f2e737] [cursor=pointer]
+      - button "Scanner" [ref=f2e738] [cursor=pointer]
+      - button "Backtests" [ref=f2e739] [cursor=pointer]
+    - generic [ref=f2e740]: Interactive demo · Sample data
+    - link "Classic UI ↗" [ref=f2e741] [cursor=pointer]:
+      - /url: /
+    - button "Toggle theme" [ref=f2e742] [cursor=pointer]
+    - button "DE" [ref=f2e745] [cursor=pointer]
+  - generic [ref=f2e746]:
+    - complementary [ref=f2e747]:
+      - generic [ref=f2e748]: YOUR WORKSPACE
+      - button "Profit & loss" [ref=f2e749] [cursor=pointer]
+      - button "Hedge choices" [ref=f2e752] [cursor=pointer]
+      - button "Stock technicals" [ref=f2e755] [cursor=pointer]
+      - button "Options analytics" [ref=f2e758] [cursor=pointer]
+      - button "Agent valuation" [ref=f2e761] [cursor=pointer]
+      - button "Past events" [ref=f2e764] [cursor=pointer]
+      - button "Upcoming events" [ref=f2e767] [cursor=pointer]
+      - button "AI tracking" [ref=f2e770] [cursor=pointer]
+      - button "Scan results" [ref=f2e773] [cursor=pointer]
+      - generic [ref=f2e776]:
+        - button "Add panel" [ref=f2e777] [cursor=pointer]
+        - button "Reset layout" [ref=f2e780] [cursor=pointer]
+        - paragraph [ref=f2e781]: Make it yours.Add metrics, rearrange panels, save your workspace.
+    - main [ref=f2e782]:
+      - generic [ref=f2e783]:
+        - combobox "Selected stock" [ref=f2e784]:
+          - option "AAPL" [selected]
+          - option "MSFT"
+          - option "SPY"
+        - strong [ref=f2e785]: $220.00
+        - generic [ref=f2e786]: Strategy
+        - button "My protected portfolio ⌄" [ref=f2e787] [cursor=pointer]:
+          - text: My protected portfolio
+          - generic [ref=f2e788]: ⌄
+        - button "Customize" [ref=f2e789] [cursor=pointer]
+        - button "Save layout" [ref=f2e792] [cursor=pointer]
+        - button "Scan stocks" [ref=f2e793] [cursor=pointer]
+      - generic [ref=f2e796]:
+        - text: Illustrative data only. Changes are local to this demo.
+        - link "Use live data →" [ref=f2e797] [cursor=pointer]:
+          - /url: /builder
+      - generic [ref=f2e1567]:
+        - generic [ref=f2e1568]:
+          - generic [ref=f2e1569]:
+            - text: RESEARCH WORKSPACE
+            - heading "AI catalyst tracker" [level=1] [ref=f2e1570]
+            - paragraph [ref=f2e1571]: Discover market catalysts. Keep the ones that matter to your strategy.
+          - button "+ Add tracking item" [ref=f2e1572] [cursor=pointer]
+        - generic [ref=f2e1573]:
+          - generic [ref=f2e1574]:
+            - heading "Daily discovery" [level=2] [ref=f2e1575]
+            - button "Refresh suggestions" [ref=f2e1576] [cursor=pointer]
+          - paragraph [ref=f2e1577]: Set TRADINGAGENTS_URL and TRADINGAGENTS_TOKEN on the server to enable daily AI research. Sources and completion claims require review.
+          - generic [ref=f2e1578]: No AI suggestions yet. Add a manual topic or request research.
+        - generic [ref=f2e1580]:
+          - button "All" [ref=f2e1581] [cursor=pointer]
+          - button "Strong bullish" [ref=f2e1582] [cursor=pointer]
+          - button "Bullish" [ref=f2e1583] [cursor=pointer]
+          - button "Neutral" [ref=f2e1584] [cursor=pointer]
+          - button "Bearish" [ref=f2e1585] [cursor=pointer]
+          - button "Strong bearish" [active] [ref=f2e1586] [cursor=pointer]
+          - generic [ref=f2e1587]:
+            - checkbox "Show resolved" [checked] [ref=f2e1588]
+            - text: Show resolved
+        - generic [ref=f2e1589]:
+          - heading "Bullish" [level=2] [ref=f2e1591]
+          - heading "Neutral" [level=2] [ref=f2e1601]
+          - generic [ref=f2e1618]:
+            - heading "Bearish" [level=2] [ref=f2e1619]
+            - button "○ US 10Y yield above 6% monitoring · Evidence reviewed Official daily US 10Y yield closes above 6%. 10 Oct 2026, 17:58 -5" [ref=f2e1620] [cursor=pointer]:
+              - generic [ref=f2e1621]: ○
+              - generic [ref=f2e1622]:
+                - strong [ref=f2e1623]: US 10Y yield above 6%
+                - generic [ref=f2e1624]: monitoring · Evidence reviewed
+                - generic [ref=f2e1625]: Official daily US 10Y yield closes above 6%.
+                - generic [ref=f2e1626]: 10 Oct 2026, 17:58
+              - generic [ref=f2e1627]: "-5"
+        - paragraph [ref=f2e1644]: Resolved items stay until removed. Resolution and directional impact are separate. Removing an item never disables discovery.

@@ -1,7 +1,12 @@
+import { createResearchStore } from "./researchStore.js";
+import { registerBuilderRoutes } from "./builder/service.js";
+import { createResearchService, registerResearchRoutes } from "./researchService.js";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import express from "express";
 import cors from "cors";
+import { hashPlaintextPassword, registerAuthRoutes, requireAdmin, requireAuth } from "./auth.js";
 import {
   calendarWidgets,
   defaultStrategyConfig,
@@ -10,24 +15,32 @@ import {
 } from "./marketCatalog.js";
 import { buildMacroDashboardPayload, buildMacroHeroStats } from "./macroDashboard.js";
 import {
+  addStrategyToWatchlist,
+  createUser,
   createPaperCalculatorSnapshot,
   createPaperOrder,
+  deleteSetupWatchlistItem,
   deletePaperCalculatorSnapshots,
   deletePaperOrderSnapshots,
   deletePaperOrder,
   getLatestMacroDashboardSnapshot,
   listPaperCalculatorSnapshots,
   listDeltaHedgeScannerSymbols,
+  listUsers,
   getLatestSnapshots,
+  listSetupWatchlist,
+  listStrategyWatchlist,
   listPaperOrderSnapshots,
   listPaperOrders,
   listStrategyAssetMappings,
   getRecentRuns,
   getStrategies,
+  removeStrategyFromWatchlist,
   recordMarketSnapshots,
   recordPaperOrderSnapshots,
   saveMacroDashboardSnapshot,
   saveStrategyRun,
+  upsertSetupWatchlistItem,
   upsertDeltaHedgeScannerSymbol,
   upsertStrategyAssetMapping,
   deleteDeltaHedgeScannerSymbol,
@@ -50,12 +63,10 @@ import {
   fetchEconomicCalendar
 } from "./providers/tradingViewCalendars.js";
 import { scanTradingViewStrategyFinder } from "./providers/tradingViewStrategyFinder.js";
+import { fetchOptionChain, fetchQuotes } from "./providers/marketData.js";
 import {
-  fetchPolygonMarketStatusNow,
-  fetchPolygonUpcomingMarketClosures
-} from "./providers/polygonMarketStatus.js";
-import { fetchOptionChain, fetchQuotes } from "./providers/yahooFinance.js";
-import {
+  blackScholesCall,
+  blackScholesPut,
   buildStrategySummary,
   getResolvedStrategyMarketsForAsset,
   parseTargetFromQuestion
@@ -67,7 +78,11 @@ import {
   normalizeDeltaHedgeStock,
   normalizeDeltaHedgeTicker
 } from "./deltaHedgeScanner.js";
+import { buildVolatilityOpportunityScan } from "./volatilityOpportunityScreener.js";
+import { fetchStockFundamentals } from "./stockFundamentals.js";
+import { fetchStockTechnicals } from "./stockTechnicals.js";
 import { buildVolCrushEarningsScan } from "./earningsVolCrush.js";
+import { buildCoveredIncomeScan } from "./coveredIncomeScanner.js";
 import {
   buildEffectiveStrategyAssets,
   buildStrategyQuoteWatchlist,
@@ -78,22 +93,6 @@ import {
   STRATEGY_COMPARE_MODES,
   strategyAssetMatchesMarket
 } from "./strategyAssets.js";
-import {
-  calculateIbkrLimitPrice,
-  cancelIbkrOrder,
-  continueIbkrOrderConfirmation,
-  fetchIbkrOrderBook,
-  fetchIbkrOrderStatus,
-  getIbkrStatus,
-  groupTradesByOrderRef,
-  isIbkrFilledStatus,
-  isIbkrTerminalStatus,
-  isIbkrWorkingStatus,
-  normalizeIbkrLiveOrder,
-  submitIbkrOptionOrder,
-  tickleIbkrSession
-} from "./ibkrClientPortal.js";
-import { parseTwsPaperOrderRef, twsPaperApi } from "./ibkrTwsApi.js";
 import {
   applyPaperOrderPatch,
   attachPaperOrderHistory,
@@ -149,29 +148,99 @@ const CALENDAR_REFRESH_MS = 60 * 60 * 1000;
 const CALENDAR_WINDOW_DAYS = 30;
 const REFERENCE_REFRESH_MS = 5 * 60 * 1000;
 const ALWAYS_TRACKED_OPTION_CONTRACTS_PER_SIDE = 6;
-const PAPER_STREAM_HEARTBEAT_MS = 20 * 1000;
+const PAPER_STREAM_HEARTBEAT_MS = Math.max(
+  Number(process.env.PAPER_STREAM_HEARTBEAT_MS ?? 10000) || 10000,
+  5000
+);
 const PAPER_STREAM_BROADCAST_DEBOUNCE_MS = 750;
 const PAPER_ORDER_SNAPSHOT_INTERVAL_MS = 60 * 1000;
-const IBKR_SYNC_INTERVAL_MS = Math.max(Number(process.env.IBKR_SYNC_INTERVAL_MS ?? 15000) || 15000, 10000);
-const TWS_SYNC_INTERVAL_MS = Math.max(Number(process.env.TWS_SYNC_INTERVAL_MS ?? 15000) || 15000, 5000);
-const MASSIVE_OPTIONS_WS_URL = process.env.POLYGON_WS_URL || "wss://socket.massive.com/options";
-const POLYGON_MARKET_STATUS_REFRESH_MS = 60 * 1000;
-const POLYGON_MARKET_UPCOMING_REFRESH_MS = 6 * 60 * 60 * 1000;
-const SMART_ORDER_QUOTE_MAX_AGE_MS = 90 * 1000;
-const SMART_ORDER_MIN_TICK = 0.05;
-const SMART_ORDER_MAX_REPLACES = 3;
-const SMART_ORDER_COOLDOWN_MS = 30 * 1000;
-const SMART_ORDER_EPSILON = 0.000001;
 
 app.use(cors());
 app.use(express.json());
+app.set("trust proxy", 1);
 initializeDashboardLayoutsDirectory();
 
-app.get("/api/health", (_request, response) => {
-  response.json({
-    ok: true
-  });
+registerAuthRoutes(app);
+
+app.use((request, response, next) => {
+  if (!request.path.startsWith("/api/")) {
+    next();
+    return;
+  }
+
+  if (request.path === "/api/health" || request.path.startsWith("/api/auth/")) {
+    next();
+    return;
+  }
+
+  requireAuth(request, response, next);
 });
+
+app.get("/api/admin/users", requireAdmin, (_request, response) => {
+  const users = listUsers().map((user) => ({
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    disabled: Boolean(user.disabled),
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+  }));
+
+  response.json({ users });
+});
+
+app.post("/api/admin/users", requireAdmin, (request, response) => {
+  const username = String(request.body?.username ?? "").trim();
+  const password = String(request.body?.password ?? "");
+  const roleInput = String(request.body?.role ?? "user").trim().toLowerCase();
+  const role = roleInput === "admin" ? "admin" : "user";
+
+  if (!username) {
+    response.status(400).json({ error: "username is required" });
+    return;
+  }
+
+  if (!password) {
+    response.status(400).json({ error: "password is required" });
+    return;
+  }
+
+  try {
+    const created = createUser({
+      id: crypto.randomUUID(),
+      username,
+      passwordHash: hashPlaintextPassword(password),
+      role,
+      disabled: false
+    });
+
+    response.status(201).json({
+      ok: true,
+      user: {
+        id: created.id,
+        username: created.username,
+        role: created.role,
+        disabled: Boolean(created.disabled),
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt
+      }
+    });
+  } catch (error) {
+    if (String(error?.code ?? "") === "SQLITE_CONSTRAINT_UNIQUE") {
+      response.status(409).json({ error: "Username already exists" });
+      return;
+    }
+
+    response.status(400).json({ error: error.message });
+  }
+});
+
+const researchStore = createResearchStore();
+const researchService = createResearchService(researchStore);
+registerResearchRoutes(app, researchStore, researchService);
+registerBuilderRoutes(app, { researchService });
+const researchTimer = setInterval(() => { researchService.tick().catch(() => {}); }, 15 * 60_000);
+researchTimer.unref();
 
 const liveState = {
   quotes: [],
@@ -193,65 +262,12 @@ const strategyResponseCache = {
   version: 0
 };
 let initialLiveStateReadyPromise = null;
-const paperStreamClients = new Set();
+const paperStreamClientsByUserId = new Map();
 const paperLiveState = {
-  socket: null,
-  authenticated: false,
-  desiredSymbols: new Set(),
-  subscribedSymbols: new Set(),
-  reconnectTimer: null,
   broadcastTimer: null,
-  lastSnapshotAt: 0,
-  lastAuthAt: null,
-  lastMessageAt: null,
-  lastQuoteAt: null,
-  lastDisconnectAt: null,
-  lastError: null
-};
-const paperBrokerState = {
-  ibkr: {
-    configured: false,
-    connected: false,
-    authenticated: false,
-    isPaper: false,
-    selectedAccount: "",
-    accounts: [],
-    aliases: {},
-    allowedAssetTypes: "",
-    error: "",
-    updatedAt: null
-  },
-  tws: {
-    configured: false,
-    host: "",
-    port: null,
-    clientId: 107,
-    connected: false,
-    authenticated: false,
-    ready: false,
-    isPaper: false,
-    selectedAccount: "",
-    accounts: [],
-    error: "",
-    updatedAt: null,
-    lastSyncAt: null,
-    lastSyncError: null
-  },
-  syncTimer: null,
-  syncing: false,
-  lastSyncAt: null,
-  lastSyncError: null
+  lastSnapshotAt: 0
 };
 const livePaperOptionQuotes = new Map();
-const polygonMarketStatusCache = {
-  now: null,
-  upcoming: [],
-  nowFetchedAt: 0,
-  upcomingFetchedAt: 0,
-  lastSuccessAt: null,
-  error: "",
-  promise: null
-};
 
 function normalizeTimestamp(value) {
   if (!value) {
@@ -264,78 +280,6 @@ function normalizeTimestamp(value) {
       : value;
   const date = new Date(normalizedValue);
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
-}
-
-function buildPolygonMarketStatusResponse() {
-  return {
-    configured: Boolean(process.env.POLYGON_API_KEY),
-    provider: "polygon",
-    fetchedAt: new Date().toISOString(),
-    lastSuccessAt: polygonMarketStatusCache.lastSuccessAt,
-    error: polygonMarketStatusCache.error,
-    statusNow: polygonMarketStatusCache.now,
-    upcoming: polygonMarketStatusCache.upcoming
-  };
-}
-
-async function getPolygonMarketStatusPayload({ force = false } = {}) {
-  if (!process.env.POLYGON_API_KEY) {
-    return buildPolygonMarketStatusResponse();
-  }
-
-  const now = Date.now();
-  const shouldRefreshNow =
-    force ||
-    !polygonMarketStatusCache.now ||
-    now - polygonMarketStatusCache.nowFetchedAt >= POLYGON_MARKET_STATUS_REFRESH_MS;
-  const shouldRefreshUpcoming =
-    force ||
-    !polygonMarketStatusCache.upcomingFetchedAt ||
-    now - polygonMarketStatusCache.upcomingFetchedAt >= POLYGON_MARKET_UPCOMING_REFRESH_MS;
-
-  if (!shouldRefreshNow && !shouldRefreshUpcoming) {
-    return buildPolygonMarketStatusResponse();
-  }
-
-  if (polygonMarketStatusCache.promise) {
-    return polygonMarketStatusCache.promise;
-  }
-
-  polygonMarketStatusCache.promise = (async () => {
-    const errors = [];
-
-    if (shouldRefreshNow) {
-      try {
-        polygonMarketStatusCache.now = await fetchPolygonMarketStatusNow();
-        polygonMarketStatusCache.nowFetchedAt = Date.now();
-      } catch (error) {
-        errors.push(`Live status unavailable: ${error.message}`);
-      }
-    }
-
-    if (shouldRefreshUpcoming) {
-      try {
-        polygonMarketStatusCache.upcoming = await fetchPolygonUpcomingMarketClosures();
-        polygonMarketStatusCache.upcomingFetchedAt = Date.now();
-      } catch (error) {
-        errors.push(`Holiday calendar unavailable: ${error.message}`);
-      }
-    }
-
-    polygonMarketStatusCache.error = errors.join(" | ");
-
-    if (!polygonMarketStatusCache.error) {
-      polygonMarketStatusCache.lastSuccessAt = new Date().toISOString();
-    }
-
-    return buildPolygonMarketStatusResponse();
-  })();
-
-  try {
-    return await polygonMarketStatusCache.promise;
-  } finally {
-    polygonMarketStatusCache.promise = null;
-  }
 }
 
 function getPaperValuationPolymarketMarkets() {
@@ -354,622 +298,6 @@ function toNumber(value, fallback = null) {
   return Number.isFinite(numericValue) ? numericValue : fallback;
 }
 
-function isIbkrPaperRoute(order) {
-  return String(order?.execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
-}
-
-function isTwsPaperRoute(order) {
-  return String(order?.execution?.route ?? "").trim().toLowerCase() === "tws-paper";
-}
-
-function isTwsPaperExecution(execution) {
-  return String(execution?.route ?? "").trim().toLowerCase() === "tws-paper";
-}
-
-function hasOptionLegs(order) {
-  return (order?.legs ?? []).some((leg) => leg?.kind === "option");
-}
-
-function buildRequestedExecutionLegs(order) {
-  const existingRequestedLegs = Array.isArray(order?.execution?.requestedLegs)
-    ? order.execution.requestedLegs
-    : [];
-
-  if (existingRequestedLegs.length) {
-    return existingRequestedLegs.map((leg) => ({
-      legId: String(leg.legId ?? leg.id ?? ""),
-      label: String(leg.label ?? leg.legId ?? "Option"),
-      rootSymbol: String(leg.rootSymbol ?? order?.marketContext?.proxySymbol ?? ""),
-      contractSymbol: String(leg.contractSymbol ?? ""),
-      optionType: String(leg.optionType ?? "call").toLowerCase() === "put" ? "put" : "call",
-      action: String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG",
-      expiry: String(leg.expiry ?? ""),
-      strike: Number(leg.strike ?? 0) || 0,
-      requestedQuantity: Math.max(Number(leg.requestedQuantity ?? 0) || 0, 0),
-      ratio: Math.max(Number(leg.ratio ?? 1) || 1, 1),
-      entryPrice: Number(leg.entryPrice ?? 0) || 0,
-      contractMultiplier: Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1),
-      brokerConid: String(leg.brokerConid ?? ""),
-      localSymbol: String(leg.localSymbol ?? "")
-    }));
-  }
-
-  return (order?.legs ?? [])
-    .filter((leg) => leg?.kind === "option")
-    .map((leg) => ({
-      legId: String(leg.id ?? ""),
-      label: String(leg.label ?? leg.id ?? "Option"),
-      rootSymbol: String(leg.rootSymbol ?? order?.marketContext?.proxySymbol ?? ""),
-      contractSymbol: String(leg.contractSymbol ?? ""),
-      optionType: String(leg.optionType ?? "call").toLowerCase() === "put" ? "put" : "call",
-      action: String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG",
-      expiry: String(leg.expiry ?? ""),
-      strike: Number(leg.strike ?? 0) || 0,
-      requestedQuantity: Math.max(Number(leg.quantity ?? 0) || 0, 0),
-      ratio: 1,
-      entryPrice: Number(leg.entryPrice ?? 0) || 0,
-      contractMultiplier: Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1),
-      brokerConid: String(leg.brokerConid ?? ""),
-      localSymbol: String(leg.localSymbol ?? "")
-    }));
-}
-
-function getSmartExecutionState(execution) {
-  return execution?.smart && typeof execution.smart === "object" ? execution.smart : {};
-}
-
-function isSmartEntryEnabled(execution) {
-  return getSmartExecutionState(execution).enabled === true;
-}
-
-function roundPriceTowardsFill(value, minTick = SMART_ORDER_MIN_TICK) {
-  const numericValue = toNumber(value, null);
-  const tick = Math.max(toNumber(minTick, SMART_ORDER_MIN_TICK) ?? SMART_ORDER_MIN_TICK, 0.01);
-  if (numericValue == null) {
-    return null;
-  }
-
-  return Number((Math.ceil((numericValue + SMART_ORDER_EPSILON) / tick) * tick).toFixed(2));
-}
-
-function getNormalizedOptionContractSymbol(value) {
-  return String(value ?? "").trim().replace(/\s+/g, "").toUpperCase();
-}
-
-function findSmartQuoteForExecutionLeg(leg, optionMatches = []) {
-  const requestedContractSymbol = getNormalizedOptionContractSymbol(leg?.contractSymbol ?? leg?.localSymbol ?? "");
-  if (requestedContractSymbol) {
-    const exactMatch = (optionMatches ?? []).find((contract) => {
-      const candidateContractSymbol = getNormalizedOptionContractSymbol(
-        contract?.contractSymbol ?? contract?.localSymbol ?? ""
-      );
-      return candidateContractSymbol === requestedContractSymbol;
-    });
-
-    if (exactMatch) {
-      return exactMatch;
-    }
-  }
-
-  const normalizedStrike = toNumber(leg?.strike, null);
-  const normalizedRootSymbol = String(leg?.rootSymbol ?? "").trim().toUpperCase();
-  const normalizedOptionType = String(leg?.optionType ?? "call").trim().toLowerCase();
-  const normalizedExpiry = String(leg?.expiry ?? "").trim();
-
-  return (
-    (optionMatches ?? []).find((contract) => {
-      if (String(contract?.rootSymbol ?? "").trim().toUpperCase() !== normalizedRootSymbol) {
-        return false;
-      }
-
-      if (String(contract?.optionType ?? "call").trim().toLowerCase() !== normalizedOptionType) {
-        return false;
-      }
-
-      if (String(contract?.expiration ?? contract?.expiry ?? "").trim() !== normalizedExpiry) {
-        return false;
-      }
-
-      const candidateStrike = toNumber(contract?.strike, null);
-      if (normalizedStrike == null || candidateStrike == null) {
-        return false;
-      }
-
-      return Math.abs(candidateStrike - normalizedStrike) < 0.01;
-    }) ?? null
-  );
-}
-
-function buildSmartComboQuote(legs = [], optionMatches = buildPaperValuationOptionMatches()) {
-  if (!Array.isArray(legs) || !legs.length) {
-    return {
-      ready: false,
-      reason: "No option legs are available for smart pricing."
-    };
-  }
-
-  let bestPrice = 0;
-  let midPrice = 0;
-  let worstPrice = 0;
-  let oldestQuoteAt = null;
-
-  for (const leg of legs) {
-    const ratio = Math.max(Math.round(Number(leg?.ratio ?? 1) || 1), 1);
-    const quote = findSmartQuoteForExecutionLeg(leg, optionMatches);
-    const bid = toNonNegativeNumber(quote?.bid, null);
-    const ask = toNonNegativeNumber(quote?.ask, null);
-
-    if (!(bid > 0) || !(ask > 0) || ask < bid || quote?.hasRealBidAsk !== true) {
-      return {
-        ready: false,
-        reason: `Live bid/ask is unavailable for ${leg?.label || leg?.contractSymbol || leg?.legId || "an option leg"}.`
-      };
-    }
-
-    const updatedAt = normalizeTimestamp(quote?.updatedAt ?? "");
-    if (!updatedAt) {
-      return {
-        ready: false,
-        reason: `Live quote timing is unavailable for ${leg?.label || leg?.contractSymbol || leg?.legId || "an option leg"}.`
-      };
-    }
-
-    const quoteAgeMs = Date.now() - new Date(updatedAt).getTime();
-    if (!Number.isFinite(quoteAgeMs) || quoteAgeMs > SMART_ORDER_QUOTE_MAX_AGE_MS) {
-      return {
-        ready: false,
-        reason: `Live bid/ask is stale for ${leg?.label || leg?.contractSymbol || leg?.legId || "an option leg"}.`
-      };
-    }
-
-    oldestQuoteAt =
-      !oldestQuoteAt || new Date(updatedAt).getTime() < new Date(oldestQuoteAt).getTime() ? updatedAt : oldestQuoteAt;
-
-    const midpoint = (bid + ask) / 2;
-    if (String(leg?.action ?? "LONG").trim().toUpperCase() === "SHORT") {
-      bestPrice += (-ask * ratio);
-      midPrice += (-midpoint * ratio);
-      worstPrice += (-bid * ratio);
-    } else {
-      bestPrice += (bid * ratio);
-      midPrice += (midpoint * ratio);
-      worstPrice += (ask * ratio);
-    }
-  }
-
-  return {
-    ready: true,
-    bestPrice: Number(bestPrice.toFixed(2)),
-    midPrice: Number(midPrice.toFixed(2)),
-    worstPrice: Number(worstPrice.toFixed(2)),
-    width: Number(Math.max(worstPrice - bestPrice, 0).toFixed(2)),
-    oldestQuoteAt
-  };
-}
-
-function deriveSmartThresholdPrice(anchorWidthPrice, anchorLimitPrice, minTick = SMART_ORDER_MIN_TICK) {
-  const width = Math.max(toNumber(anchorWidthPrice, 0) ?? 0, 0);
-  const referenceLimit = Math.abs(toNumber(anchorLimitPrice, 0) ?? 0);
-  return Number(
-    Math.max(
-      Math.max(toNumber(minTick, SMART_ORDER_MIN_TICK) ?? SMART_ORDER_MIN_TICK, 0.01) * 2,
-      width * 0.35,
-      referenceLimit * 0.02
-    ).toFixed(2)
-  );
-}
-
-function deriveSmartGuardrailLimit(anchorLimitPrice, anchorWidthPrice, minTick = SMART_ORDER_MIN_TICK) {
-  const limitPrice = toNumber(anchorLimitPrice, null);
-  if (limitPrice == null) {
-    return null;
-  }
-
-  const width = Math.max(toNumber(anchorWidthPrice, 0) ?? 0, 0);
-  return roundPriceTowardsFill(
-    limitPrice + Math.max(
-      Math.max(toNumber(minTick, SMART_ORDER_MIN_TICK) ?? SMART_ORDER_MIN_TICK, 0.01) * 2,
-      width * 0.75
-    ),
-    minTick
-  );
-}
-
-function getSmartExecutionPatch(order, execution = order?.execution) {
-  const currentExecution = execution && typeof execution === "object" ? execution : order?.execution ?? null;
-  if (!currentExecution || !isIbkrPaperRoute(order)) {
-    return null;
-  }
-
-  const existingSmart = getSmartExecutionState(currentExecution);
-  const smartEnabled = existingSmart.enabled === true;
-  const orderType = String(currentExecution.orderType ?? "LMT").trim().toUpperCase();
-  const minTick = Math.max(toNumber(existingSmart.minTick, SMART_ORDER_MIN_TICK) ?? SMART_ORDER_MIN_TICK, 0.01);
-  const replaceCount = Math.max(Math.round(toNumber(existingSmart.replaceCount, 0) ?? 0), 0);
-  const maxReplaceCount = Math.max(
-    Math.round(toNumber(existingSmart.maxReplaceCount, SMART_ORDER_MAX_REPLACES) ?? SMART_ORDER_MAX_REPLACES),
-    0
-  );
-  const cooldownMs = Math.max(
-    Math.round(toNumber(existingSmart.cooldownMs, SMART_ORDER_COOLDOWN_MS) ?? SMART_ORDER_COOLDOWN_MS),
-    5000
-    );
-
-  if (!smartEnabled) {
-    return {
-      ...existingSmart,
-      enabled: false,
-      status: "disabled",
-      mode: "balanced",
-      minTick,
-      replaceCount,
-      maxReplaceCount,
-      cooldownMs,
-      pendingLimitPrice: null
-    };
-  }
-
-  if (orderType !== "LMT") {
-    return {
-      ...existingSmart,
-      enabled: false,
-      status: "disabled",
-      mode: "balanced",
-      minTick,
-      replaceCount,
-      maxReplaceCount,
-      cooldownMs,
-      pendingLimitPrice: null,
-      lastDecision: "unsupported_order_type",
-      lastDecisionReason: "Smart pricing only runs on IBKR limit entry orders."
-    };
-  }
-
-  const limitPrice = toNumber(currentExecution.limitPrice, null);
-  const quote = buildSmartComboQuote(
-    Array.isArray(currentExecution.requestedLegs) && currentExecution.requestedLegs.length
-      ? currentExecution.requestedLegs
-      : buildRequestedExecutionLegs(order)
-  );
-  const anchorLimitPrice = toNumber(existingSmart.anchorLimitPrice, limitPrice);
-  const anchorWidthPrice =
-    existingSmart.anchorWidthPrice == null
-      ? Math.max(toNumber(quote?.width, 0) ?? 0, minTick * 2)
-      : Math.max(toNumber(existingSmart.anchorWidthPrice, 0) ?? 0, minTick * 2);
-  const thresholdPrice =
-    existingSmart.thresholdPrice == null
-      ? deriveSmartThresholdPrice(anchorWidthPrice, anchorLimitPrice, minTick)
-      : Math.max(toNumber(existingSmart.thresholdPrice, 0) ?? 0, minTick);
-  const guardrailLimitPrice =
-    existingSmart.guardrailLimitPrice == null
-      ? deriveSmartGuardrailLimit(anchorLimitPrice, anchorWidthPrice, minTick)
-      : toNumber(existingSmart.guardrailLimitPrice, null);
-  const currentStatus =
-    existingSmart.pendingLimitPrice != null
-      ? "pending_replace"
-      : String(existingSmart.status ?? "").trim().toLowerCase() === "disabled"
-        ? quote.ready
-          ? "watching"
-          : "paused"
-        : existingSmart.status || (quote.ready ? "watching" : "paused");
-
-  return {
-    ...existingSmart,
-    enabled: true,
-    status: currentStatus,
-    mode: "balanced",
-    anchorLimitPrice,
-    anchorWidthPrice,
-    guardrailLimitPrice,
-    thresholdPrice,
-    minTick,
-    replaceCount,
-    maxReplaceCount,
-    cooldownMs,
-    pendingLimitPrice:
-      existingSmart.pendingLimitPrice == null ? null : toNumber(existingSmart.pendingLimitPrice, null),
-    lastDecision: String(existingSmart.lastDecision ?? (quote.ready ? "armed" : "paused_quotes")),
-    lastDecisionReason: String(
-      existingSmart.lastDecisionReason ??
-        (quote.ready
-          ? "Smart pricing armed. HedgeHub will reprice stale entry limits conservatively."
-          : quote.reason || "Smart pricing is waiting for live option bid/ask quotes.")
-    ),
-    lastMarketPrice:
-      existingSmart.lastMarketPrice == null || !quote.ready
-        ? existingSmart.lastMarketPrice ?? null
-        : toNumber(existingSmart.lastMarketPrice, quote.midPrice),
-    lastSuggestedLimitPrice:
-      existingSmart.lastSuggestedLimitPrice == null ? null : toNumber(existingSmart.lastSuggestedLimitPrice, null)
-  };
-}
-
-function reconcileSmartEntryExecution(order) {
-  if (!isIbkrPaperRoute(order) || !order?.execution) {
-    return order;
-  }
-
-  const nextSmart = getSmartExecutionPatch(order, order.execution);
-  if (!nextSmart) {
-    return order;
-  }
-
-  const currentSmart = getSmartExecutionState(order.execution);
-  if (JSON.stringify(nextSmart) === JSON.stringify(currentSmart)) {
-    return order;
-  }
-
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      execution: {
-        ...order.execution,
-        smart: nextSmart
-      }
-    },
-    order
-  );
-}
-
-function buildPendingIbkrExecution(order, overrides = {}) {
-  const orderType =
-    String(overrides.orderType ?? order?.execution?.orderType ?? "LMT").trim().toUpperCase() === "MKT"
-      ? "MKT"
-      : "LMT";
-  const limitPrice =
-    orderType === "LMT"
-      ? Number(
-          overrides.limitPrice ??
-            order?.execution?.limitPrice ??
-            calculateIbkrLimitPrice({
-              ...order,
-              execution: {
-                ...(order?.execution ?? {}),
-                requestedLegs: buildRequestedExecutionLegs(order)
-              }
-            }) ??
-            0
-        )
-      : null;
-
-  const baseExecution = {
-    ...(order?.execution ?? {}),
-    route: "ibkr-paper",
-    purpose: "entry",
-    status: String(overrides.status ?? order?.execution?.status ?? "pending_submit"),
-    statusText: String(
-      overrides.statusText ?? order?.execution?.statusText ?? "Queued for IBKR paper submission"
-    ),
-    orderType,
-    tif:
-      String(overrides.tif ?? order?.execution?.tif ?? "DAY").trim().toUpperCase() === "GTC"
-        ? "GTC"
-        : "DAY",
-    outsideRth: overrides.outsideRth ?? order?.execution?.outsideRth === true,
-    limitPrice,
-    accountId: String(overrides.accountId ?? order?.execution?.accountId ?? ""),
-    requestedLegs: buildRequestedExecutionLegs(order),
-    lastError: String(overrides.lastError ?? ""),
-    lastWarning: String(overrides.lastWarning ?? ""),
-    warningMessages: Array.isArray(overrides.warningMessages) ? overrides.warningMessages : [],
-    pendingReplyId: String(overrides.pendingReplyId ?? ""),
-    pendingReplyMessages: Array.isArray(overrides.pendingReplyMessages) ? overrides.pendingReplyMessages : [],
-    smart: (() => {
-      const mergedSmart =
-        overrides.smart && typeof overrides.smart === "object"
-          ? {
-              ...(order?.execution?.smart ?? {}),
-              ...overrides.smart
-            }
-          : order?.execution?.smart ?? null;
-
-      if (mergedSmart?.enabled !== true) {
-        return mergedSmart ?? null;
-      }
-
-      return {
-        ...mergedSmart,
-        status: "watching",
-        pendingLimitPrice: null,
-        lastDecision: "armed",
-        lastDecisionReason: "Smart pricing armed for this IBKR limit entry."
-      };
-    })()
-  };
-
-  return reconcileSmartEntryExecution({
-    ...(order ?? {}),
-    execution: baseExecution
-  }).execution;
-}
-
-function buildPendingTwsExecution(order, overrides = {}) {
-  const orderType =
-    String(overrides.orderType ?? order?.execution?.orderType ?? "LMT").trim().toUpperCase() === "MKT"
-      ? "MKT"
-      : "LMT";
-  const limitPrice =
-    orderType === "LMT"
-      ? Number(
-          overrides.limitPrice ??
-            order?.execution?.limitPrice ??
-            calculateIbkrLimitPrice({
-              ...order,
-              execution: {
-                ...(order?.execution ?? {}),
-                requestedLegs: buildRequestedExecutionLegs(order)
-              }
-            }) ??
-            0
-        )
-      : null;
-
-  return {
-    ...(order?.execution ?? {}),
-    route: "tws-paper",
-    purpose: "entry",
-    status: String(overrides.status ?? order?.execution?.status ?? "pending_submit"),
-    statusText: String(overrides.statusText ?? order?.execution?.statusText ?? "Queued for TWS submission"),
-    orderType,
-    tif:
-      String(overrides.tif ?? order?.execution?.tif ?? "DAY").trim().toUpperCase() === "GTC"
-        ? "GTC"
-        : "DAY",
-    outsideRth: overrides.outsideRth ?? order?.execution?.outsideRth === true,
-    limitPrice,
-    accountId: String(overrides.accountId ?? order?.execution?.accountId ?? paperBrokerState.tws.selectedAccount ?? ""),
-    requestedLegs: buildRequestedExecutionLegs(order),
-    lastError: String(overrides.lastError ?? ""),
-    lastWarning: String(overrides.lastWarning ?? ""),
-    warningMessages: Array.isArray(overrides.warningMessages) ? overrides.warningMessages : [],
-    pendingReplyId: "",
-    pendingReplyMessages: []
-  };
-}
-
-function prepareOrderForIbkrEntry(order) {
-  const requestedExecutionLegs = buildRequestedExecutionLegs(order);
-
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      execution: buildPendingIbkrExecution(order),
-      closeExecution: null,
-      legs: (order?.legs ?? []).map((leg) =>
-        leg?.kind === "option"
-          ? {
-              ...leg,
-              quantity: 0,
-              brokerConid:
-                requestedExecutionLegs.find((requestedLeg) => String(requestedLeg.legId) === String(leg.id))
-                  ?.brokerConid ?? leg?.brokerConid ?? "",
-              localSymbol:
-                requestedExecutionLegs.find((requestedLeg) => String(requestedLeg.legId) === String(leg.id))
-                  ?.localSymbol ?? leg?.localSymbol ?? ""
-            }
-          : leg
-      )
-    },
-    order
-  );
-}
-
-function prepareOrderForTwsEntry(order) {
-  const requestedExecutionLegs = buildRequestedExecutionLegs(order);
-
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      execution: buildPendingTwsExecution(order),
-      closeExecution: null,
-      legs: (order?.legs ?? []).map((leg) =>
-        leg?.kind === "option"
-          ? {
-              ...leg,
-              quantity: 0,
-              brokerConid:
-                requestedExecutionLegs.find((requestedLeg) => String(requestedLeg.legId) === String(leg.id))
-                  ?.brokerConid ?? leg?.brokerConid ?? "",
-              localSymbol:
-                requestedExecutionLegs.find((requestedLeg) => String(requestedLeg.legId) === String(leg.id))
-                  ?.localSymbol ?? leg?.localSymbol ?? ""
-            }
-          : leg
-      )
-    },
-    order
-  );
-}
-
-function mapCloseExecutionToRoute(execution, order) {
-  if (!execution) {
-    return null;
-  }
-
-  return {
-    ...(execution ?? {}),
-    route: "ibkr-paper",
-    purpose: "exit",
-    status: String(execution.status ?? "pending_submit"),
-    statusText: String(execution.statusText ?? "IBKR exit order working"),
-    orderType: String(execution.orderType ?? "MKT"),
-    tif: String(execution.tif ?? "DAY"),
-    accountId: String(execution.accountId ?? order?.execution?.accountId ?? ""),
-    accountAlias: String(execution.accountAlias ?? order?.execution?.accountAlias ?? ""),
-    isPaper: execution.isPaper === true || order?.execution?.isPaper === true
-  };
-}
-
-function sanitizeExecutionMessages(messages = []) {
-  return Array.isArray(messages)
-    ? messages.map((message) => String(message ?? "").trim()).filter(Boolean)
-    : [];
-}
-
-function getExecutionWarningMessages(execution) {
-  const warningMessages = sanitizeExecutionMessages(execution?.warningMessages);
-  if (warningMessages.length) {
-    return warningMessages;
-  }
-
-  const lastWarning = String(execution?.lastWarning ?? "").trim();
-  return lastWarning ? lastWarning.split(" | ").map((message) => message.trim()).filter(Boolean) : [];
-}
-
-function getPendingReplyMessages(execution) {
-  const pendingMessages = sanitizeExecutionMessages(execution?.pendingReplyMessages);
-  if (pendingMessages.length) {
-    return pendingMessages;
-  }
-
-  const statusDescription = String(execution?.statusDescription ?? "").trim();
-  return statusDescription ? [statusDescription] : [];
-}
-
-function isExecutionConfirmationPending(execution) {
-  return (
-    String(execution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
-    String(execution?.pendingReplyId ?? "").trim().length > 0
-  );
-}
-
-function findPendingConfirmationExecution(order) {
-  if (
-    String(order?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper" &&
-    isExecutionConfirmationPending(order?.closeExecution)
-  ) {
-    return {
-      key: "closeExecution",
-      value: order.closeExecution,
-      purpose: "exit"
-    };
-  }
-
-  if (isIbkrPaperRoute(order) && isExecutionConfirmationPending(order?.execution)) {
-    return {
-      key: "execution",
-      value: order.execution,
-      purpose: "entry"
-    };
-  }
-
-  return null;
-}
-
-function buildIbkrSubmissionMessage(submission, purpose = "entry") {
-  if (submission?.pendingReplyId) {
-    const prompt = sanitizeExecutionMessages(submission.pendingReplyMessages).join(" | ");
-    return prompt
-      ? `IBKR confirmation required: ${prompt}`
-      : "IBKR confirmation required before the broker will accept this order.";
-  }
-
-  const orderLabel = purpose === "exit" ? "IBKR paper exit order" : "IBKR paper order";
-  return submission?.lastWarning
-    ? `${orderLabel} submitted with warnings: ${submission.lastWarning}`
-    : `${orderLabel} submitted.`;
-}
-
 function getOpenPaperOrders() {
   return listPaperOrders().filter(
     (order) => String(order.position?.status ?? "open").toLowerCase() !== "closed"
@@ -984,6 +312,10 @@ function getOpenPaperOptionContractSeeds() {
 
     (order.position?.legs ?? []).forEach((leg) => {
       if (leg?.kind !== "option") {
+        return;
+      }
+
+      if (String(leg?.status ?? "open").trim().toLowerCase() === "closed") {
         return;
       }
 
@@ -1189,38 +521,42 @@ function buildPaperValuationOptionMatches() {
   return [...mergedContracts.values()];
 }
 
-function buildValuedPaperPortfolio() {
+function buildValuedPaperPortfolio(userId = null) {
   return buildPaperPortfolio({
-    orders: listPaperOrders(),
+    orders: listPaperOrders(null, userId),
     quotes: liveState.quotes,
     polymarketMarkets: getPaperValuationPolymarketMarkets(),
     optionMatches: buildPaperValuationOptionMatches()
   });
 }
 
-function buildPaperPortfolioPreviewResponse() {
-  const portfolio = buildValuedPaperPortfolio();
+function buildPaperPortfolioPreviewResponse(userId = null) {
+  const portfolio = buildValuedPaperPortfolio(userId);
 
   return {
-    summary: portfolio.summary ?? null,
-    brokerStatus: {
-      ibkr: paperBrokerState.ibkr,
-      tws: paperBrokerState.tws
-    }
+    summary: portfolio.summary ?? null
   };
 }
 
-function buildPaperPortfolioResponse() {
-  const portfolio = buildValuedPaperPortfolio();
-
+function buildPaperPortfolioResponse(userId = null) {
+  const orders = listPaperOrders(null, userId);
+  const portfolio = buildPaperPortfolio({
+    orders,
+    quotes: liveState.quotes,
+    polymarketMarkets: getPaperValuationPolymarketMarkets(),
+    optionMatches: buildPaperValuationOptionMatches()
+  });
+  const orderIds = orders
+    .map((order) => Number(order.id))
+    .filter((orderId) => Number.isInteger(orderId) && orderId > 0);
   const withHistory = attachPaperOrderHistory(
     portfolio,
-    listPaperOrderSnapshots(),
+    orderIds.length ? listPaperOrderSnapshots(orderIds) : [],
     liveState.lastUpdated ?? new Date().toISOString()
   );
   const calculatorSnapshotsByOrderId = new Map();
 
-  for (const snapshot of listPaperCalculatorSnapshots()) {
+  for (const snapshot of orderIds.length ? listPaperCalculatorSnapshots(orderIds) : []) {
     const orderId = Number(snapshot.orderId);
     if (!calculatorSnapshotsByOrderId.has(orderId)) {
       calculatorSnapshotsByOrderId.set(orderId, []);
@@ -1241,17 +577,13 @@ function buildPaperPortfolioResponse() {
     ...withHistory,
     orders: openOrders,
     openOrders,
-    closedOrders,
-    brokerStatus: {
-      ibkr: paperBrokerState.ibkr,
-      tws: paperBrokerState.tws
-    }
+    closedOrders
   };
 }
 
-function buildPaperPortfolioResponseSafe() {
+function buildPaperPortfolioResponseSafe(userId = null) {
   try {
-    return buildPaperPortfolioResponse();
+    return buildPaperPortfolioResponse(userId);
   } catch (error) {
     console.warn(`[paper] Failed to build paper portfolio response: ${error.message}`);
     return null;
@@ -1264,39 +596,8 @@ function invalidateStrategyResponseCache() {
   strategyResponseCache.finderRowDetails = new Map();
 }
 
-function buildComparableIbkrStatus(status) {
-  return {
-    configured: status?.configured === true,
-    connected: status?.connected === true,
-    authenticated: status?.authenticated === true,
-    isPaper: status?.isPaper === true,
-    selectedAccount: String(status?.selectedAccount ?? ""),
-    accounts: Array.isArray(status?.accounts)
-      ? status.accounts.map((account) => String(account ?? ""))
-      : [],
-    aliases:
-      status?.aliases && typeof status.aliases === "object" ? status.aliases : {},
-    allowedAssetTypes: String(status?.allowedAssetTypes ?? ""),
-    error: String(status?.error ?? "")
-  };
-}
-
 function syncStrategyCacheBrokerStatus() {
-  if (!strategyResponseCache.response?.paperPortfolioPreview) {
-    return;
-  }
-
-  strategyResponseCache.response = {
-    ...strategyResponseCache.response,
-    paperPortfolioPreview: {
-      ...strategyResponseCache.response.paperPortfolioPreview,
-      brokerStatus: {
-        ...(strategyResponseCache.response.paperPortfolioPreview.brokerStatus ?? {}),
-        ibkr: paperBrokerState.ibkr,
-        tws: paperBrokerState.tws
-      }
-    }
-  };
+  // Broker status is computed per-user in buildStrategiesResponse().
 }
 
 function buildFinderRowSummary(row) {
@@ -1315,6 +616,12 @@ function buildFinderRowSummary(row) {
       normalizedQuoteSource === "synthetic chain"
     );
   });
+  const currentUnderlyingSpot = Number(row?.marketContext?.currentUnderlyingSpot ?? NaN);
+  const targetUnderlyingValue = Number(row?.marketContext?.targetUnderlyingValue ?? NaN);
+  const expectedMovePercent =
+    currentUnderlyingSpot > 0 && targetUnderlyingValue > 0
+      ? ((targetUnderlyingValue / currentUnderlyingSpot) - 1) * 100
+      : null;
 
   return {
     id: row.id,
@@ -1330,6 +637,7 @@ function buildFinderRowSummary(row) {
     polymarketPriceSide: row.polymarketPriceSide,
     polymarketVolume: row.polymarketVolume,
     polymarketSource: row.polymarketSource,
+    expectedMovePercent,
     maxProfit: row.maxProfit,
     maxLoss: row.maxLoss,
     maxProfitUnbounded: row.maxProfitUnbounded,
@@ -1372,157 +680,6 @@ function getCachedFinderRowDetail(rowId) {
   return strategyResponseCache.finderRowDetails.get(normalizedRowId) ?? null;
 }
 
-async function refreshIbkrStatusCache() {
-  const previousComparableStatus = JSON.stringify(buildComparableIbkrStatus(paperBrokerState.ibkr));
-  const ibkrStatus = await getIbkrStatus();
-  paperBrokerState.ibkr = {
-    ...ibkrStatus,
-    updatedAt: new Date().toISOString()
-  };
-  syncStrategyCacheBrokerStatus();
-  const nextComparableStatus = JSON.stringify(buildComparableIbkrStatus(paperBrokerState.ibkr));
-  if (previousComparableStatus !== nextComparableStatus) {
-    schedulePaperPortfolioBroadcast(0);
-  }
-  return paperBrokerState.ibkr;
-}
-
-async function handleTwsOrderStatusUpdate(event) {
-  if (!event || typeof event !== "object") {
-    return;
-  }
-
-  const orderId = Number(event.orderId ?? 0);
-  if (!Number.isInteger(orderId) || orderId <= 0) {
-    return;
-  }
-
-  const paperOrderIdFromRef = Number(event.parsedRef?.paperOrderId ?? 0) || null;
-  const orderRecord = paperOrderIdFromRef
-    ? listPaperOrders().find((record) => Number(record.id) === paperOrderIdFromRef) ?? null
-    : listPaperOrders().find(
-        (record) => String(record?.position?.execution?.brokerOrderId ?? "").trim() === String(orderId)
-      ) ?? null;
-
-  if (!orderRecord?.position || !isTwsPaperRoute(orderRecord.position)) {
-    return;
-  }
-
-  const existingOrder = orderRecord.position;
-  const existingExecution = existingOrder.execution ?? null;
-  if (!existingExecution) {
-    return;
-  }
-
-  const trades = twsPaperApi
-    .getTradesForOrder(orderId)
-    .map((fill) => ({
-      conid: String(fill?.contract?.conId ?? "").trim(),
-      quantity: Math.abs(Number(fill?.shares ?? 0) || 0),
-      price: Number(fill?.price ?? 0) || 0,
-      execution_time: String(fill?.time ?? "")
-    }))
-    .filter((fill) => fill.conid && fill.quantity > 0);
-  const tradeFillMap = buildTradeFillMap(trades);
-  const latestTradeTimestamp = [...tradeFillMap.values()]
-    .map((fill) => fill.latestAt)
-    .filter(Boolean)
-    .sort()
-    .slice(-1)[0];
-
-  const normalizedStatus = String(event.normalizedStatus ?? existingExecution.status ?? "submitted")
-    .trim()
-    .toLowerCase();
-  const filledQuantity = toNumber(event.filled, existingExecution.filledQuantity);
-  const remainingQuantity = toNumber(event.remaining, existingExecution.remainingQuantity);
-  const totalQuantity =
-    existingExecution.totalQuantity != null
-      ? Number(existingExecution.totalQuantity)
-      : filledQuantity != null && remainingQuantity != null
-        ? filledQuantity + remainingQuantity
-        : null;
-  const nowIso = new Date().toISOString();
-
-  const nextExecution = {
-    ...existingExecution,
-    route: "tws-paper",
-    purpose: "entry",
-    status: normalizedStatus,
-    statusText: String(event.status ?? existingExecution.statusText ?? normalizedStatus).trim() || normalizedStatus,
-    brokerOrderId: String(orderId),
-    orderRef: String(event.orderRef ?? existingExecution.orderRef ?? "").trim(),
-    accountId: String(existingExecution.accountId ?? paperBrokerState.tws.selectedAccount ?? ""),
-    isPaper: paperBrokerState.tws.isPaper === true,
-    avgFillPrice:
-      event.avgFillPrice != null ? toNumber(event.avgFillPrice, null) : existingExecution.avgFillPrice,
-    filledQuantity,
-    remainingQuantity,
-    totalQuantity,
-    filledAt:
-      normalizedStatus === "filled"
-        ? existingExecution.filledAt || latestTradeTimestamp || nowIso
-        : existingExecution.filledAt,
-    cancelledAt:
-      normalizedStatus === "cancelled" || normalizedStatus === "api_cancelled" || normalizedStatus === "apicancelled"
-        ? existingExecution.cancelledAt || latestTradeTimestamp || nowIso
-        : existingExecution.cancelledAt,
-    lastSyncAt: nowIso
-  };
-
-  let nextOrder = sanitizePaperOrderPayload(
-    {
-      ...existingOrder,
-      execution: nextExecution
-    },
-    existingOrder
-  );
-
-  nextOrder = applyEntryExecutionToOrder(nextOrder, nextOrder.execution, trades);
-
-  if (JSON.stringify(nextOrder) === JSON.stringify(existingOrder)) {
-    return;
-  }
-
-  const storedOrder = updatePaperOrder(Number(orderRecord.id), nextOrder);
-  const valuation = buildPaperPortfolio({
-    orders: [storedOrder],
-    quotes: liveState.quotes,
-    polymarketMarkets: getPaperValuationPolymarketMarkets(),
-    optionMatches: buildPaperValuationOptionMatches()
-  });
-  const valuedOrder = valuation.openOrders[0] ?? valuation.closedOrders[0] ?? valuation.orders[0] ?? null;
-  if (valuedOrder) {
-    recordPaperOrderSnapshots([
-      buildPaperOrderSnapshot(
-        valuedOrder,
-        nextOrder.closedAt || nextExecution.filledAt || nextExecution.lastSyncAt || nowIso
-      )
-    ]);
-  }
-
-  paperBrokerState.tws = {
-    ...paperBrokerState.tws,
-    lastSyncAt: nowIso,
-    lastSyncError: null
-  };
-  syncStrategyCacheBrokerStatus();
-  invalidateStrategyResponseCache();
-  syncPaperOptionStreamSubscriptions();
-  schedulePaperPortfolioBroadcast(0);
-}
-
-twsPaperApi.on("status", (status) => {
-  paperBrokerState.tws = {
-    ...paperBrokerState.tws,
-    ...(status ?? {})
-  };
-  syncStrategyCacheBrokerStatus();
-  schedulePaperPortfolioBroadcast(0);
-});
-
-twsPaperApi.on("orderStatus", (event) => {
-  void handleTwsOrderStatusUpdate(event);
-});
 
 async function ensureInitialLiveStateReady() {
   if (!initialLiveStateReadyPromise) {
@@ -1532,913 +689,17 @@ async function ensureInitialLiveStateReady() {
   await initialLiveStateReadyPromise;
 }
 
-function isBrokerTrackedOrder(order) {
-  return (
-    isIbkrPaperRoute(order) ||
-    isTwsPaperRoute(order) ||
-    String(order?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper" ||
-    isTwsPaperExecution(order?.closeExecution)
-  );
-}
-
-function getTradeConid(trade) {
-  return String(trade?.conidEx ?? trade?.conid ?? trade?.contract_conid ?? trade?.contractConid ?? "").trim();
-}
-
-function getTradeQuantity(trade) {
-  return Math.abs(
-    Number(
-      trade?.quantity ??
-        trade?.qty ??
-        trade?.size ??
-        trade?.execution_size ??
-        trade?.cumQty ??
-        trade?.cum_qty ??
-        0
-    ) || 0
-  );
-}
-
-function getTradePrice(trade) {
-  return Number(
-    trade?.price ??
-      trade?.trade_price ??
-      trade?.avgPrice ??
-      trade?.avg_price ??
-      trade?.execution_price ??
-      0
-  ) || 0;
-}
-
-function getTradeTimestamp(trade) {
-  return (
-    normalizeTimestamp(
-      trade?.trade_time_r ??
-        trade?.tradeTimeR ??
-        trade?.trade_time ??
-        trade?.tradeTime ??
-        trade?.execution_time ??
-        trade?.executionTime
-    ) || ""
-  );
-}
-
-function buildTradeFillMap(trades = []) {
-  const fillMap = new Map();
-
-  (trades ?? []).forEach((trade) => {
-    const conid = getTradeConid(trade);
-    if (!conid) {
-      return;
-    }
-
-    const quantity = getTradeQuantity(trade);
-    const price = getTradePrice(trade);
-    const timestamp = getTradeTimestamp(trade);
-    const existing = fillMap.get(conid) ?? {
-      quantity: 0,
-      weightedValue: 0,
-      avgPrice: null,
-      latestAt: "",
-      earliestAt: ""
-    };
-
-    const nextQuantity = existing.quantity + quantity;
-    const nextWeightedValue = existing.weightedValue + (quantity * price);
-    fillMap.set(conid, {
-      quantity: nextQuantity,
-      weightedValue: nextWeightedValue,
-      avgPrice: nextQuantity > 0 ? nextWeightedValue / nextQuantity : null,
-      latestAt:
-        existing.latestAt && timestamp ? [existing.latestAt, timestamp].sort().slice(-1)[0] : existing.latestAt || timestamp,
-      earliestAt:
-        existing.earliestAt && timestamp ? [existing.earliestAt, timestamp].sort()[0] : existing.earliestAt || timestamp
-    });
-  });
-
-  return fillMap;
-}
-
-function deriveExecutionFilledQuantity(execution, tradeFillMap) {
-  const requestedLegs = Array.isArray(execution?.requestedLegs) ? execution.requestedLegs : [];
-  const comboQuantities = requestedLegs
-    .map((leg) => {
-      const fill = tradeFillMap.get(String(leg.brokerConid ?? "").trim());
-      if (!fill || !(fill.quantity > 0)) {
-        return null;
-      }
-
-      const ratio = Math.max(Number(leg.ratio ?? 1) || 1, 1);
-      return fill.quantity / ratio;
-    })
-    .filter((value) => value != null);
-
-  if (!comboQuantities.length) {
-    return null;
-  }
-
-  return Math.max(Math.round(Math.min(...comboQuantities)), 0);
-}
-
-function mergeExecutionState(existingExecution, liveOrder, trades = []) {
-  if (!existingExecution) {
-    return null;
-  }
-
-  const tradeFillMap = buildTradeFillMap(trades);
-  const derivedFilledQuantity = deriveExecutionFilledQuantity(existingExecution, tradeFillMap);
-  const normalizedLiveOrder = liveOrder ? normalizeIbkrLiveOrder(liveOrder) : null;
-  const pendingReplyId = String(existingExecution.pendingReplyId ?? "").trim();
-  const smartState = getSmartExecutionState(existingExecution);
-  const preservePendingConfirmation =
-    String(existingExecution.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
-    pendingReplyId.length > 0;
-  const preservePendingSmartCancel =
-    smartState.enabled === true &&
-    smartState.pendingLimitPrice != null &&
-    ["pending_cancel", "pre_cancelled"].includes(String(existingExecution.status ?? "").trim().toLowerCase()) &&
-    normalizedLiveOrder &&
-    isIbkrWorkingStatus(normalizedLiveOrder.status) &&
-    !isIbkrFilledStatus(normalizedLiveOrder.status);
-  const status = normalizedLiveOrder?.status ?? String(existingExecution.status ?? "submitted");
-  const resolvedBrokerOrderId = String(
-    normalizedLiveOrder?.brokerOrderId ?? existingExecution.brokerOrderId ?? ""
-  ).trim();
-  const hasResolvedBrokerState =
-    !preservePendingConfirmation &&
-    !preservePendingSmartCancel &&
-    (
-      Boolean(String(normalizedLiveOrder?.brokerOrderId ?? "").trim()) ||
-      (status !== "pending_confirmation" && resolvedBrokerOrderId.length > 0)
-    );
-  const nextStatus = preservePendingConfirmation
-    ? "pending_confirmation"
-    : preservePendingSmartCancel
-      ? String(existingExecution.status ?? "pending_cancel")
-      : status;
-  const nextStatusText = preservePendingConfirmation
-    ? String(existingExecution.statusText ?? "Broker confirmation required")
-    : preservePendingSmartCancel
-      ? String(existingExecution.statusText ?? "Smart replace cancel requested")
-    : normalizedLiveOrder?.statusText ?? existingExecution.statusText;
-  const nextStatusDescription = preservePendingConfirmation
-    ? String(existingExecution.statusDescription ?? "")
-    : preservePendingSmartCancel
-      ? String(existingExecution.statusDescription ?? "")
-    : normalizedLiveOrder?.statusDescription ?? existingExecution.statusDescription ?? "";
-  const filledQuantity =
-    normalizedLiveOrder?.filledQuantity ??
-    (derivedFilledQuantity != null ? derivedFilledQuantity : existingExecution.filledQuantity);
-  const totalQuantity =
-    normalizedLiveOrder?.totalQuantity ??
-    (existingExecution.totalQuantity != null ? Number(existingExecution.totalQuantity) : null);
-  const remainingQuantity =
-    normalizedLiveOrder?.remainingQuantity ??
-    (totalQuantity != null && filledQuantity != null ? Math.max(totalQuantity - filledQuantity, 0) : existingExecution.remainingQuantity);
-  const latestTradeTimestamp = [...tradeFillMap.values()]
-    .map((fill) => fill.latestAt)
-    .filter(Boolean)
-    .sort()
-    .slice(-1)[0];
-
-  return {
-    ...existingExecution,
-    status: nextStatus,
-    statusText: nextStatusText,
-    statusDescription: nextStatusDescription,
-    brokerOrderId: normalizedLiveOrder?.brokerOrderId ?? existingExecution.brokerOrderId,
-    avgFillPrice:
-      normalizedLiveOrder?.avgFillPrice != null
-        ? normalizedLiveOrder.avgFillPrice
-        : existingExecution.avgFillPrice,
-    filledQuantity,
-    totalQuantity,
-    remainingQuantity,
-    submittedAt: existingExecution.submittedAt || new Date().toISOString(),
-    filledAt:
-      isIbkrFilledStatus(nextStatus)
-        ? existingExecution.filledAt || normalizedLiveOrder?.lastExecutionAt || latestTradeTimestamp || new Date().toISOString()
-        : existingExecution.filledAt,
-    cancelledAt:
-      nextStatus === "cancelled"
-        ? existingExecution.cancelledAt || normalizedLiveOrder?.lastExecutionAt || latestTradeTimestamp || new Date().toISOString()
-        : existingExecution.cancelledAt,
-    lastSyncAt: new Date().toISOString(),
-    lastError:
-      preservePendingConfirmation
-        ? ""
-        : preservePendingSmartCancel
-        ? ""
-        : nextStatus === "rejected" || nextStatus === "error"
-        ? normalizedLiveOrder?.statusDescription || existingExecution.lastError
-        : existingExecution.lastError,
-    lastWarning: existingExecution.lastWarning || "",
-    pendingReplyId: hasResolvedBrokerState ? "" : pendingReplyId,
-    pendingReplyMessages: hasResolvedBrokerState
-      ? []
-      : Array.isArray(existingExecution.pendingReplyMessages)
-        ? existingExecution.pendingReplyMessages
-        : []
-  };
-}
-
-function applyEntryExecutionToOrder(order, execution, trades = []) {
-  if (!execution) {
-    return order;
-  }
-
-  const fillMap = buildTradeFillMap(trades);
-
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      execution,
-      legs: (order.legs ?? []).map((leg) => {
-        if (leg?.kind !== "option") {
-          return leg;
-        }
-
-        const requestedLeg =
-          execution.requestedLegs?.find((candidate) => String(candidate.legId) === String(leg.id)) ?? null;
-        if (!requestedLeg) {
-          return leg;
-        }
-
-        const fillQuantity =
-          execution.filledQuantity != null
-            ? Math.max(
-                Math.round((Number(requestedLeg.ratio ?? 1) || 1) * Number(execution.filledQuantity ?? 0)),
-                0
-              )
-            : Number(leg.quantity ?? 0) || 0;
-        const fill = fillMap.get(String(requestedLeg.brokerConid ?? leg.brokerConid ?? "").trim()) ?? null;
-
-        return {
-          ...leg,
-          quantity: fillQuantity,
-          entryPrice: fill?.avgPrice != null ? fill.avgPrice : leg.entryPrice,
-          brokerConid: requestedLeg.brokerConid ?? leg.brokerConid ?? "",
-          localSymbol: requestedLeg.localSymbol ?? leg.localSymbol ?? ""
-        };
-      })
-    },
-    order
-  );
-}
-
-function updateEntrySmartExecution(order, smartPatch = {}, executionPatch = {}) {
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      execution: {
-        ...(order?.execution ?? {}),
-        ...executionPatch,
-        smart: {
-          ...getSmartExecutionState(order?.execution),
-          ...smartPatch
-        }
-      }
-    },
-    order
-  );
-}
-
-function buildSmartReplacementLimit(limitPrice, smartState, comboQuote) {
-  const currentLimitPrice = toNumber(limitPrice, null);
-  if (currentLimitPrice == null || !comboQuote?.ready) {
-    return null;
-  }
-
-  const minTick = Math.max(toNumber(smartState?.minTick, SMART_ORDER_MIN_TICK) ?? SMART_ORDER_MIN_TICK, 0.01);
-  const step = Math.max(minTick, Number(comboQuote.width ?? 0) * 0.25);
-  const candidate = Math.max(
-    currentLimitPrice + step,
-    Number(comboQuote.midPrice ?? currentLimitPrice) + Math.min(Number(comboQuote.width ?? 0) * 0.15, step)
-  );
-  const bounded = Math.min(
-    candidate,
-    Number(comboQuote.worstPrice ?? candidate),
-    toNumber(smartState?.guardrailLimitPrice, candidate) ?? candidate
-  );
-  const rounded = roundPriceTowardsFill(bounded, minTick);
-  return rounded == null ? null : Math.min(rounded, Number(comboQuote.worstPrice ?? rounded), Number(smartState?.guardrailLimitPrice ?? rounded));
-}
-
-function getSmartDecisionPausePatch(order, { decision, reason, keepEnabled = true } = {}) {
-  const smartState = getSmartExecutionState(order?.execution);
-
-  return updateEntrySmartExecution(order, {
-    ...smartState,
-    enabled: keepEnabled && smartState.enabled === true,
-    status: keepEnabled && smartState.enabled === true ? "paused" : "disabled",
-    pendingLimitPrice: null,
-    lastDecision: String(decision ?? "paused"),
-    lastDecisionReason: String(reason ?? "Smart pricing paused."),
-    lastSuggestedLimitPrice: null
-  });
-}
-
-async function maybeManageSmartEntryExecution(record, order) {
-  if (!isIbkrPaperRoute(order) || !order?.execution || !isSmartEntryEnabled(order.execution)) {
-    return null;
-  }
-
-  const baseOrder = reconcileSmartEntryExecution(order);
-  const execution = baseOrder.execution ?? null;
-  if (!execution) {
-    return JSON.stringify(baseOrder) !== JSON.stringify(order) ? baseOrder : null;
-  }
-
-  const smartState = getSmartExecutionState(execution);
-  const executionStatus = String(execution.status ?? "").trim().toLowerCase();
-  const limitPrice = toNumber(execution.limitPrice, null);
-  const replaceCount = Math.max(Math.round(toNumber(smartState.replaceCount, 0) ?? 0), 0);
-  const maxReplaceCount = Math.max(
-    Math.round(toNumber(smartState.maxReplaceCount, SMART_ORDER_MAX_REPLACES) ?? SMART_ORDER_MAX_REPLACES),
-    0
-  );
-  const cooldownMs = Math.max(
-    Math.round(toNumber(smartState.cooldownMs, SMART_ORDER_COOLDOWN_MS) ?? SMART_ORDER_COOLDOWN_MS),
-    5000
-  );
-  const requestedLegs =
-    Array.isArray(execution.requestedLegs) && execution.requestedLegs.length
-      ? execution.requestedLegs
-      : buildRequestedExecutionLegs(baseOrder);
-
-  if (String(execution.orderType ?? "").trim().toUpperCase() !== "LMT") {
-    const disabledOrder = updateEntrySmartExecution(baseOrder, {
-      ...smartState,
-      enabled: false,
-      status: "disabled",
-      pendingLimitPrice: null,
-      lastDecision: "unsupported_order_type",
-      lastDecisionReason: "Smart pricing only runs on IBKR limit entry orders."
-    });
-    return JSON.stringify(disabledOrder) !== JSON.stringify(order) ? disabledOrder : null;
-  }
-
-  if (isExecutionConfirmationPending(execution)) {
-    return JSON.stringify(baseOrder) !== JSON.stringify(order) ? baseOrder : null;
-  }
-
-  if (limitPrice == null) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "missing_limit",
-      reason: "Smart pricing paused because this order does not have a valid limit price."
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  if (Number(execution.filledQuantity ?? 0) > 0 && !isIbkrFilledStatus(execution.status)) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "partial_fill",
-      reason: "Smart pricing paused because the order has already filled partially."
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  if (smartState.pendingLimitPrice != null) {
-    if (executionStatus === "cancelled") {
-      const replacementLimitPrice = toNumber(smartState.pendingLimitPrice, null);
-      if (replacementLimitPrice == null) {
-        const clearedOrder = updateEntrySmartExecution(baseOrder, {
-          ...smartState,
-          status: "watching",
-          pendingLimitPrice: null,
-          lastDecision: "replace_cleared",
-          lastDecisionReason: "Smart replacement target cleared before submission."
-        });
-        return JSON.stringify(clearedOrder) !== JSON.stringify(order) ? clearedOrder : null;
-      }
-
-      const replacementOrder = sanitizePaperOrderPayload(
-        {
-          ...baseOrder,
-          execution: {
-            ...execution,
-            status: "pending_submit",
-            statusText: "Submitting smart replacement",
-            statusDescription: "",
-            brokerOrderId: "",
-            orderRef: "",
-            limitPrice: replacementLimitPrice,
-            submittedAt: "",
-            lastSyncAt: "",
-            filledAt: "",
-            cancelledAt: "",
-            avgFillPrice: null,
-            filledQuantity: 0,
-            remainingQuantity: execution.totalQuantity ?? null,
-            lastError: "",
-            lastWarning: "",
-            warningMessages: [],
-            pendingReplyId: "",
-            pendingReplyMessages: [],
-            smart: {
-              ...smartState,
-              status: "watching",
-              replaceCount: replaceCount + 1,
-              pendingLimitPrice: null,
-              lastTriggeredAt: new Date().toISOString(),
-              lastDecision: "replace_submitted",
-              lastDecisionReason: `Smart replacement submitted at ${replacementLimitPrice.toFixed(2)}.`,
-              lastSuggestedLimitPrice: replacementLimitPrice
-            }
-          }
-        },
-        baseOrder
-      );
-
-      try {
-        const submission = await submitIbkrOptionOrder({
-          order: {
-            ...replacementOrder,
-            id: Number(record.id)
-          },
-          purpose: "entry"
-        });
-
-        return sanitizePaperOrderPayload(
-          {
-            ...replacementOrder,
-            execution: submission
-          },
-          replacementOrder
-        );
-      } catch (error) {
-        return getSmartDecisionPausePatch(baseOrder, {
-          decision: "replace_failed",
-          reason: `Smart replacement failed after cancel: ${error.message}`
-        });
-      }
-    }
-
-    if (["pending_cancel", "pre_cancelled", "submitted", "pre_submitted"].includes(executionStatus)) {
-      const pendingReplaceOrder = updateEntrySmartExecution(baseOrder, {
-        ...smartState,
-        status: "pending_replace"
-      });
-      return JSON.stringify(pendingReplaceOrder) !== JSON.stringify(order) ? pendingReplaceOrder : null;
-    }
-  }
-
-  if (!isIbkrWorkingStatus(execution.status) || ["pending_cancel", "pre_cancelled"].includes(executionStatus)) {
-    return JSON.stringify(baseOrder) !== JSON.stringify(order) ? baseOrder : null;
-  }
-
-  const comboQuote = buildSmartComboQuote(requestedLegs);
-  if (!comboQuote.ready) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "quotes_unavailable",
-      reason: comboQuote.reason || "Smart pricing is waiting for fresh option bid/ask quotes."
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  const thresholdPrice = Math.max(toNumber(smartState.thresholdPrice, 0) ?? 0, 0);
-  const guardrailLimitPrice = toNumber(smartState.guardrailLimitPrice, null);
-  const marketDrift = Number(comboQuote.midPrice ?? limitPrice) - limitPrice;
-  const smartDecision = String(smartState.lastDecision ?? "").trim().toLowerCase();
-  const nextWatchingOrder =
-    smartState.pendingLimitPrice == null &&
-    (
-      String(smartState.status ?? "").trim().toLowerCase() !== "watching" &&
-      (
-        String(smartState.status ?? "").trim().toLowerCase() !== "paused" ||
-        smartDecision === "quotes_unavailable"
-      )
-    )
-      ? updateEntrySmartExecution(baseOrder, {
-          ...smartState,
-          status: "watching",
-          lastDecision: smartDecision === "quotes_unavailable" ? "watching" : String(smartState.lastDecision ?? "watching"),
-          lastDecisionReason:
-            smartDecision === "quotes_unavailable"
-              ? "Smart pricing resumed after live option bid/ask quotes returned."
-              : String(smartState.lastDecisionReason ?? "Smart pricing is monitoring the live combo quote.")
-        })
-      : baseOrder;
-
-  if (marketDrift <= thresholdPrice + SMART_ORDER_EPSILON) {
-    return JSON.stringify(nextWatchingOrder) !== JSON.stringify(order) ? nextWatchingOrder : null;
-  }
-
-  if (guardrailLimitPrice != null && Number(comboQuote.midPrice ?? limitPrice) > guardrailLimitPrice + SMART_ORDER_EPSILON) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "guardrail_reached",
-      reason: `Smart pricing paused because the live combo moved beyond the ${guardrailLimitPrice.toFixed(2)} guardrail.`
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  if (replaceCount >= maxReplaceCount) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "replace_limit_reached",
-      reason: `Smart pricing used all ${maxReplaceCount} allowed replacements for this order.`
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  const lastTriggeredAtMs = smartState.lastTriggeredAt ? new Date(smartState.lastTriggeredAt).getTime() : 0;
-  if (lastTriggeredAtMs && Date.now() - lastTriggeredAtMs < cooldownMs) {
-    return JSON.stringify(nextWatchingOrder) !== JSON.stringify(order) ? nextWatchingOrder : null;
-  }
-
-  const replacementLimitPrice = buildSmartReplacementLimit(limitPrice, smartState, comboQuote);
-  if (!(replacementLimitPrice > limitPrice + SMART_ORDER_EPSILON)) {
-    return JSON.stringify(nextWatchingOrder) !== JSON.stringify(order) ? nextWatchingOrder : null;
-  }
-
-  try {
-    await cancelIbkrOrder({
-      accountId: execution.accountId,
-      orderId: execution.brokerOrderId
-    });
-
-    return updateEntrySmartExecution(
-      sanitizePaperOrderPayload(
-        {
-          ...baseOrder,
-          execution: {
-            ...execution,
-            status: "pending_cancel",
-            statusText: "Smart replace cancel requested",
-            statusDescription: `Smart repricing requested at ${replacementLimitPrice.toFixed(2)}.`,
-            lastSyncAt: new Date().toISOString()
-          }
-        },
-        baseOrder
-      ),
-      {
-        ...smartState,
-        status: "pending_replace",
-        pendingLimitPrice: replacementLimitPrice,
-        lastTriggeredAt: new Date().toISOString(),
-        lastDecision: "replace_requested",
-        lastDecisionReason: `Smart repricing requested: ${limitPrice.toFixed(2)} -> ${replacementLimitPrice.toFixed(2)}.`,
-        lastMarketPrice: Number(comboQuote.midPrice ?? limitPrice),
-        lastSuggestedLimitPrice: replacementLimitPrice
-      }
-    );
-  } catch (error) {
-    return getSmartDecisionPausePatch(baseOrder, {
-      decision: "cancel_failed",
-      reason: `Smart repricing paused because the broker cancel request failed: ${error.message}`
-    });
-  }
-}
-
-function applyBrokerClosePrices(order, tradeFillMap) {
-  const nextLegs = (order.legs ?? []).map((leg) => {
-    if (leg?.kind !== "option") {
-      return leg;
-    }
-
-    const fill = tradeFillMap.get(String(leg.brokerConid ?? "").trim()) ?? null;
-    if (!fill || fill.avgPrice == null) {
-      return leg;
-    }
-
-    const quantity = Math.max(Number(leg.quantity ?? 0) || 0, 0);
-    const contractMultiplier = Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1);
-    const units = quantity * contractMultiplier;
-    const entryPrice = Number(leg.entryPrice ?? 0) || 0;
-    const closedPrice = fill.avgPrice;
-    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
-    const closedExposure = Math.abs(closedPrice * units);
-    const closedNetMarkedValue = direction * closedPrice * units;
-    const realizedProfitLossValue =
-      (String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? entryPrice - closedPrice : closedPrice - entryPrice) *
-      units;
-    const entryExposure = Math.abs(entryPrice * units);
-
-    return {
-      ...leg,
-      closedPrice,
-      closedExposure,
-      closedNetMarkedValue,
-      realizedProfitLossValue,
-      realizedProfitLossPercent: entryExposure > 0 ? (realizedProfitLossValue / entryExposure) * 100 : null
-    };
-  });
-
-  const closeSummary = nextLegs.reduce(
-    (totals, leg) => ({
-      currentHoldingValue: totals.currentHoldingValue + Math.max(Number(leg.closedExposure ?? 0) || 0, 0),
-      netMarkedValue: totals.netMarkedValue + (Number(leg.closedNetMarkedValue ?? 0) || 0),
-      profitLossValue: totals.profitLossValue + (Number(leg.realizedProfitLossValue ?? 0) || 0),
-      entryValue:
-        totals.entryValue +
-        Math.abs(
-          (Number(leg.entryPrice ?? 0) || 0) *
-            (leg.kind === "option"
-              ? (Number(leg.quantity ?? 0) || 0) * Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1)
-              : Number(leg.quantity ?? 0) || 0)
-        )
-    }),
-    {
-      currentHoldingValue: 0,
-      netMarkedValue: 0,
-      profitLossValue: 0,
-      entryValue: 0
-    }
-  );
-
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      closeSummary: {
-        currentHoldingValue: closeSummary.currentHoldingValue,
-        netMarkedValue: closeSummary.netMarkedValue,
-        profitLossValue: closeSummary.profitLossValue,
-        profitLossPercent:
-          closeSummary.entryValue > 0 ? (closeSummary.profitLossValue / closeSummary.entryValue) * 100 : null
-      },
-      legs: nextLegs
-    },
-    order
-  );
-}
-
-async function findLiveOrderForExecution(execution, orderBook) {
-  if (!execution) {
-    return null;
-  }
-
-  const byOrderId = orderBook.liveOrdersById.get(String(execution.brokerOrderId ?? "").trim()) ?? null;
-  if (byOrderId) {
-    return byOrderId.raw;
-  }
-
-  const byOrderRef = orderBook.liveOrdersByRef.get(String(execution.orderRef ?? "").trim()) ?? null;
-  if (byOrderRef) {
-    return byOrderRef.raw;
-  }
-
-  if (execution.brokerOrderId && !isIbkrTerminalStatus(execution.status)) {
-    try {
-      return await fetchIbkrOrderStatus({
-        accountId: execution.accountId,
-        orderId: execution.brokerOrderId
-      });
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-async function syncSingleBrokerOrder(record, orderBook) {
-  const existingOrder = record.position;
-  let nextOrder = existingOrder;
-  let changed = false;
-
-  if (isIbkrPaperRoute(existingOrder)) {
-    const entryLiveOrder = await findLiveOrderForExecution(existingOrder.execution, orderBook);
-    const entryTrades = orderBook.tradesByOrderRef.get(String(existingOrder.execution?.orderRef ?? "").trim()) ?? [];
-    const nextExecution = mergeExecutionState(existingOrder.execution, entryLiveOrder, entryTrades);
-    const nextEntryOrder = applyEntryExecutionToOrder(
-      sanitizePaperOrderPayload(
-        {
-          ...nextOrder,
-          execution: nextExecution
-        },
-        nextOrder
-      ),
-      nextExecution,
-      entryTrades
-    );
-
-    if (JSON.stringify(nextEntryOrder) !== JSON.stringify(nextOrder)) {
-      nextOrder = nextEntryOrder;
-      changed = true;
-    }
-
-    const smartManagedOrder = await maybeManageSmartEntryExecution(record, nextOrder);
-    if (smartManagedOrder && JSON.stringify(smartManagedOrder) !== JSON.stringify(nextOrder)) {
-      nextOrder = smartManagedOrder;
-      changed = true;
-    }
-  }
-
-  if (String(nextOrder?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper") {
-    const exitLiveOrder = await findLiveOrderForExecution(nextOrder.closeExecution, orderBook);
-    const exitTrades =
-      orderBook.tradesByOrderRef.get(String(nextOrder.closeExecution?.orderRef ?? "").trim()) ?? [];
-    const nextCloseExecution = mergeExecutionState(nextOrder.closeExecution, exitLiveOrder, exitTrades);
-
-    if (isIbkrFilledStatus(nextCloseExecution?.status)) {
-      const valuation = buildPaperPortfolio({
-        orders: [
-          {
-            ...record,
-            position: nextOrder
-          }
-        ],
-        quotes: liveState.quotes,
-        polymarketMarkets: getPaperValuationPolymarketMarkets(),
-        optionMatches: buildPaperValuationOptionMatches()
-      });
-      const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0] ?? null;
-
-      if (valuedOrder) {
-        let closedOrder = closePaperOrderPayload(
-          {
-            ...nextOrder,
-            closeExecution: mapCloseExecutionToRoute(nextCloseExecution, nextOrder)
-          },
-          valuedOrder,
-          nextCloseExecution.filledAt || new Date().toISOString()
-        );
-        closedOrder = applyBrokerClosePrices(closedOrder, buildTradeFillMap(exitTrades));
-
-        if (JSON.stringify(closedOrder) !== JSON.stringify(nextOrder)) {
-          nextOrder = closedOrder;
-          changed = true;
-        }
-      }
-    } else {
-      const pendingExitOrder = sanitizePaperOrderPayload(
-        {
-          ...nextOrder,
-          closeExecution: mapCloseExecutionToRoute(nextCloseExecution, nextOrder)
-        },
-        nextOrder
-      );
-
-      if (JSON.stringify(pendingExitOrder) !== JSON.stringify(nextOrder)) {
-        nextOrder = pendingExitOrder;
-        changed = true;
-      }
-    }
-  }
-
-  return changed ? nextOrder : null;
-}
-
-async function syncIbkrPaperOrders({ onlyOrderId = null } = {}) {
-  if (paperBrokerState.syncing) {
-    return false;
-  }
-
-  const orderRecords = listPaperOrders().filter((record) => {
-    const order = record.position;
-    if (!isBrokerTrackedOrder(order)) {
-      return false;
-    }
-
-    if (onlyOrderId != null && Number(record.id) !== Number(onlyOrderId)) {
-      return false;
-    }
-
-    return String(order.status ?? "open").toLowerCase() !== "closed" || order.closeExecution;
-  });
-
-  if (!orderRecords.length) {
-    return false;
-  }
-
-  paperBrokerState.syncing = true;
-
-  try {
-    const orderBook = await fetchIbkrOrderBook({
-      accountId: String(orderRecords[0]?.position?.execution?.accountId ?? "").trim()
-    });
-    const liveOrders = (orderBook.orders ?? []).map(normalizeIbkrLiveOrder);
-    const orderBookIndexes = {
-      ...orderBook,
-      liveOrdersById: new Map(liveOrders.map((order) => [String(order.brokerOrderId), order])),
-      liveOrdersByRef: new Map(liveOrders.map((order) => [String(order.orderRef), order])),
-      tradesByOrderRef: groupTradesByOrderRef(orderBook.trades)
-    };
-
-    let changed = false;
-
-    for (const record of orderRecords) {
-      const nextOrder = await syncSingleBrokerOrder(record, orderBookIndexes);
-      if (!nextOrder) {
-        continue;
-      }
-
-      const storedOrder = updatePaperOrder(Number(record.id), nextOrder);
-      const valuation = buildPaperPortfolio({
-        orders: [storedOrder],
-        quotes: liveState.quotes,
-        polymarketMarkets: getPaperValuationPolymarketMarkets(),
-        optionMatches: buildPaperValuationOptionMatches()
-      });
-      const valuedOrder =
-        valuation.openOrders[0] ?? valuation.closedOrders[0] ?? valuation.orders[0] ?? null;
-
-      if (valuedOrder) {
-        recordPaperOrderSnapshots([
-          buildPaperOrderSnapshot(
-            valuedOrder,
-            nextOrder.closedAt || nextOrder.closeExecution?.filledAt || nextOrder.execution?.lastSyncAt || new Date().toISOString()
-          )
-        ]);
-      }
-      changed = true;
-    }
-
-    paperBrokerState.lastSyncAt = new Date().toISOString();
-    paperBrokerState.lastSyncError = null;
-    await refreshIbkrStatusCache();
-
-    if (changed) {
-      invalidateStrategyResponseCache();
-      syncPaperOptionStreamSubscriptions();
-      schedulePaperPortfolioBroadcast(0);
-    }
-
-    return changed;
-  } catch (error) {
-    paperBrokerState.lastSyncError = error.message;
-    await refreshIbkrStatusCache().catch(() => null);
-    return false;
-  } finally {
-    paperBrokerState.syncing = false;
-  }
-}
-
 function formatDiagnosticTimestamp(value) {
   return value ? normalizeTimestamp(value) || null : null;
 }
 
-function getOptionStreamState() {
-  if (!paperLiveState.desiredSymbols.size) {
-    return "idle";
-  }
-
-  if (paperLiveState.authenticated && paperLiveState.socket?.readyState === WebSocket.OPEN) {
-    return "live";
-  }
-
-  if (paperLiveState.socket?.readyState === WebSocket.CONNECTING) {
-    return "connecting";
-  }
-
-  if (paperLiveState.reconnectTimer) {
-    return "retrying";
-  }
-
-  return "disconnected";
-}
-
 function buildStreamDiagnosticsResponse() {
-  const baselineTrackedContracts = getAlwaysTrackedOptionContractSeeds().size;
-  const paperTrackedContracts = [...getOpenPaperOptionContractSeeds().values()].filter(
-    (contract) => contract.isLive === true && contract.contractSymbol
-  ).length;
-
   return {
     generatedAt: new Date().toISOString(),
-    options: {
-      provider: "Polygon / Massive websocket",
-      state: getOptionStreamState(),
-      trackedContracts: paperLiveState.desiredSymbols.size,
-      subscribedContracts: paperLiveState.subscribedSymbols.size,
-      baselineTrackedContracts,
-      paperTrackedContracts,
-      lastAuthAt: formatDiagnosticTimestamp(paperLiveState.lastAuthAt),
-      lastMessageAt: formatDiagnosticTimestamp(paperLiveState.lastMessageAt),
-      lastQuoteAt: formatDiagnosticTimestamp(paperLiveState.lastQuoteAt),
-      lastDisconnectAt: formatDiagnosticTimestamp(paperLiveState.lastDisconnectAt),
-      lastError: paperLiveState.lastError ?? null
-    },
     polymarket: {
       mode: "polling",
       refreshEverySeconds: Math.round(REFERENCE_REFRESH_MS / 1000),
       lastRefreshAt: formatDiagnosticTimestamp(liveState.lastUpdated)
-    },
-    ibkr: {
-      provider: "IBKR Client Portal",
-      configured: paperBrokerState.ibkr.configured === true,
-      connected: paperBrokerState.ibkr.connected === true,
-      authenticated: paperBrokerState.ibkr.authenticated === true,
-      isPaper: paperBrokerState.ibkr.isPaper === true,
-      selectedAccount: paperBrokerState.ibkr.selectedAccount ?? "",
-      lastUpdated: formatDiagnosticTimestamp(paperBrokerState.ibkr.updatedAt),
-      lastSyncAt: formatDiagnosticTimestamp(paperBrokerState.lastSyncAt),
-      lastSyncError: paperBrokerState.lastSyncError ?? null,
-      error: paperBrokerState.ibkr.error ?? null
-    },
-    tws: {
-      provider: "IBKR TWS",
-      configured: paperBrokerState.tws.configured === true,
-      connected: paperBrokerState.tws.connected === true,
-      authenticated: paperBrokerState.tws.authenticated === true,
-      ready: paperBrokerState.tws.ready === true,
-      isPaper: paperBrokerState.tws.isPaper === true,
-      selectedAccount: paperBrokerState.tws.selectedAccount ?? "",
-      host: paperBrokerState.tws.host ?? "",
-      port: paperBrokerState.tws.port ?? null,
-      lastUpdated: formatDiagnosticTimestamp(paperBrokerState.tws.updatedAt),
-      lastSyncAt: formatDiagnosticTimestamp(paperBrokerState.tws.lastSyncAt),
-      lastSyncError: paperBrokerState.tws.lastSyncError ?? null,
-      error: paperBrokerState.tws.error ?? null
     }
   };
 }
@@ -2448,20 +709,36 @@ function writeSseJson(response, payload) {
 }
 
 function broadcastPaperPortfolioNow() {
-  if (!paperStreamClients.size) {
+  if (!paperStreamClientsByUserId.size) {
     return;
   }
 
   try {
-    const payload = {
-      type: "paper-portfolio",
-      lastUpdated: new Date().toISOString(),
-      paperPortfolio: buildPaperPortfolioResponse()
-    };
+    const lastUpdated = new Date().toISOString();
 
-    paperStreamClients.forEach((client) => {
-      writeSseJson(client, payload);
-    });
+    for (const [userId, clients] of paperStreamClientsByUserId.entries()) {
+      if (!clients?.size) {
+        continue;
+      }
+
+      let paperPortfolio = null;
+      try {
+        paperPortfolio = buildPaperPortfolioResponse(userId);
+      } catch (error) {
+        console.warn(`[paper] Broadcast build failed for user ${userId}: ${error.message}`);
+        paperPortfolio = null;
+      }
+
+      const payload = {
+        type: "paper-portfolio",
+        lastUpdated,
+        paperPortfolio
+      };
+
+      clients.forEach((client) => {
+        writeSseJson(client, payload);
+      });
+    }
   } catch (error) {
     console.error("Unable to broadcast paper portfolio:", error.message);
   }
@@ -2501,247 +778,14 @@ function recordPaperPortfolioSnapshotsIfDue(capturedAt = new Date().toISOString(
   paperLiveState.lastSnapshotAt = capturedAtMs;
 }
 
-function clearPaperOptionReconnectTimer() {
-  if (!paperLiveState.reconnectTimer) {
-    return;
-  }
-
-  clearTimeout(paperLiveState.reconnectTimer);
-  paperLiveState.reconnectTimer = null;
-}
-
-function schedulePaperOptionReconnect() {
-  if (
-    paperLiveState.reconnectTimer ||
-    !process.env.POLYGON_API_KEY ||
-    !paperLiveState.desiredSymbols.size
-  ) {
-    return;
-  }
-
-  paperLiveState.reconnectTimer = setTimeout(() => {
-    paperLiveState.reconnectTimer = null;
-    ensurePaperOptionStream();
-  }, 3000);
-}
-
-function closePaperOptionStream() {
-  clearPaperOptionReconnectTimer();
-
-  if (paperLiveState.socket) {
-    paperLiveState.socket.close();
-  }
-
-  paperLiveState.socket = null;
-  paperLiveState.authenticated = false;
-  paperLiveState.subscribedSymbols = new Set();
-}
-
-function sendPaperOptionStreamAction(action, symbols) {
-  if (
-    !paperLiveState.socket ||
-    paperLiveState.socket.readyState !== WebSocket.OPEN ||
-    !paperLiveState.authenticated ||
-    !symbols.length
-  ) {
-    return;
-  }
-
-  const params = symbols.map((symbol) => `Q.${symbol}`).join(",");
-  paperLiveState.socket.send(JSON.stringify({ action, params }));
-}
-
-function updatePaperOptionStreamSubscriptions() {
-  if (
-    !paperLiveState.socket ||
-    paperLiveState.socket.readyState !== WebSocket.OPEN ||
-    !paperLiveState.authenticated
-  ) {
-    return;
-  }
-
-  const desiredSymbols = [...paperLiveState.desiredSymbols];
-  const subscribedSymbols = [...paperLiveState.subscribedSymbols];
-  const toSubscribe = desiredSymbols.filter((symbol) => !paperLiveState.subscribedSymbols.has(symbol));
-  const toUnsubscribe = subscribedSymbols.filter((symbol) => !paperLiveState.desiredSymbols.has(symbol));
-
-  sendPaperOptionStreamAction("unsubscribe", toUnsubscribe);
-  sendPaperOptionStreamAction("subscribe", toSubscribe);
-
-  toUnsubscribe.forEach((symbol) => {
-    paperLiveState.subscribedSymbols.delete(symbol);
-  });
-  toSubscribe.forEach((symbol) => {
-    paperLiveState.subscribedSymbols.add(symbol);
-  });
-}
-
-function handlePaperOptionQuote(message) {
-  const contractSymbol = String(message?.sym ?? "").trim();
-  if (!contractSymbol || !paperLiveState.desiredSymbols.has(contractSymbol)) {
-    return;
-  }
-
-  const bid = toNonNegativeNumber(message.bp, null);
-  const ask = toNonNegativeNumber(message.ap, null);
-  const bidSize = toNonNegativeNumber(message.bs, null);
-  const askSize = toNonNegativeNumber(message.as, null);
-  const hasBid = bid != null && bid > 0;
-  const hasAsk = ask != null && ask > 0;
-  const midpoint =
-    hasBid && hasAsk ? (bid + ask) / 2
-    : hasBid ? bid
-    : hasAsk ? ask
-    : null;
-  const contractSeed =
-    buildPaperValuationOptionMatches().find((contract) => contract.contractSymbol === contractSymbol) ??
-    getOpenPaperOptionContractSeeds().get(contractSymbol) ??
-    { contractSymbol };
-
-  livePaperOptionQuotes.set(contractSymbol, {
-    ...contractSeed,
-    contractSymbol,
-    bid,
-    ask,
-    bidSize,
-    askSize,
-    mark: midpoint,
-    lastPrice: midpoint,
-    source: "polygon-websocket",
-    sourceLabel: "Polygon.io WebSocket",
-    isLive: true,
-    hasRealBidAsk: hasBid && hasAsk,
-    updatedAt:
-      Number.isFinite(Number(message.t)) && Number(message.t) > 0
-        ? new Date(Number(message.t)).toISOString()
-        : new Date().toISOString()
-  });
-  paperLiveState.lastQuoteAt =
-    Number.isFinite(Number(message.t)) && Number(message.t) > 0
-      ? new Date(Number(message.t)).toISOString()
-      : new Date().toISOString();
-  paperLiveState.lastMessageAt = paperLiveState.lastQuoteAt;
-
-  try {
-    recordPaperPortfolioSnapshotsIfDue(
-      Number.isFinite(Number(message.t)) && Number(message.t) > 0
-        ? new Date(Number(message.t)).toISOString()
-        : new Date().toISOString()
-    );
-  } catch (error) {
-    liveState.warnings = [...liveState.warnings, `Paper-trade history unavailable: ${error.message}`].slice(-8);
-  }
-
-  schedulePaperPortfolioBroadcast();
-}
-
-function handlePaperOptionStreamMessage(event) {
-  const rawData =
-    typeof event.data === "string"
-      ? event.data
-      : Buffer.isBuffer(event.data)
-        ? event.data.toString("utf8")
-        : "";
-
-  if (!rawData) {
-    return;
-  }
-
-  let messages = [];
-
-  try {
-    messages = JSON.parse(rawData);
-  } catch (error) {
-    console.error("Unable to parse Massive options websocket payload:", error.message);
-    paperLiveState.lastError = error.message;
-    return;
-  }
-
-  paperLiveState.lastMessageAt = new Date().toISOString();
-
-  messages.forEach((message) => {
-    if (message?.ev === "status") {
-      if (message.status === "auth_success") {
-        paperLiveState.authenticated = true;
-        paperLiveState.subscribedSymbols = new Set();
-        paperLiveState.lastAuthAt = new Date().toISOString();
-        paperLiveState.lastError = null;
-        updatePaperOptionStreamSubscriptions();
-      }
-
-      return;
-    }
-
-    if (message?.ev === "Q") {
-      handlePaperOptionQuote(message);
-    }
-  });
-}
-
-function ensurePaperOptionStream() {
-  if (!process.env.POLYGON_API_KEY || !paperLiveState.desiredSymbols.size) {
-    closePaperOptionStream();
-    return;
-  }
-
-  if (
-    paperLiveState.socket &&
-    (paperLiveState.socket.readyState === WebSocket.OPEN ||
-      paperLiveState.socket.readyState === WebSocket.CONNECTING)
-  ) {
-    if (paperLiveState.authenticated) {
-      updatePaperOptionStreamSubscriptions();
-    }
-    return;
-  }
-
-  clearPaperOptionReconnectTimer();
-  const socket = new WebSocket(MASSIVE_OPTIONS_WS_URL);
-
-  paperLiveState.socket = socket;
-  paperLiveState.authenticated = false;
-  paperLiveState.subscribedSymbols = new Set();
-
-  socket.onopen = () => {
-    paperLiveState.lastError = null;
-    socket.send(JSON.stringify({ action: "auth", params: process.env.POLYGON_API_KEY }));
-  };
-  socket.onmessage = (event) => {
-    handlePaperOptionStreamMessage(event);
-  };
-  socket.onerror = (error) => {
-    paperLiveState.lastError = error?.message ?? "Unknown error";
-    console.error("Massive options websocket error:", error?.message ?? "Unknown error");
-  };
-  socket.onclose = () => {
-    if (paperLiveState.socket === socket) {
-      paperLiveState.socket = null;
-      paperLiveState.authenticated = false;
-      paperLiveState.subscribedSymbols = new Set();
-      paperLiveState.lastDisconnectAt = new Date().toISOString();
-      schedulePaperOptionReconnect();
-    }
-  };
-}
-
 function syncPaperOptionStreamSubscriptions() {
   const desiredSymbols = new Set(getDesiredPaperOptionSymbols());
-  paperLiveState.desiredSymbols = desiredSymbols;
 
   livePaperOptionQuotes.forEach((_quote, contractSymbol) => {
     if (!desiredSymbols.has(contractSymbol)) {
       livePaperOptionQuotes.delete(contractSymbol);
     }
   });
-
-  if (!desiredSymbols.size) {
-    closePaperOptionStream();
-    schedulePaperPortfolioBroadcast(0);
-    return;
-  }
-
-  ensurePaperOptionStream();
-  updatePaperOptionStreamSubscriptions();
 }
 
 function isFreshWithin(refreshTimestamp, maxAgeMs) {
@@ -2863,7 +907,9 @@ async function refreshCalendarState(force = false) {
     warnings.push(`Company events unavailable: ${companyEventsResult.reason.message}`);
   }
 
-  liveState.calendarsRefreshedAt = new Date().toISOString();
+  if (economicResult.status === "fulfilled" && companyEventsResult.status === "fulfilled") {
+    liveState.calendarsRefreshedAt = new Date().toISOString();
+  }
   liveState.calendarWarnings = warnings;
 
   return {
@@ -2886,6 +932,24 @@ function deduplicateBy(items, keyFn) {
   }
 
   return result;
+}
+
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function marketQuestionMentionsSymbol(question, symbol) {
+  const normalizedSymbol = String(symbol ?? "").trim();
+  const normalizedQuestion = String(question ?? "").trim();
+  if (!normalizedSymbol || !normalizedQuestion) {
+    return false;
+  }
+
+  try {
+    return new RegExp(`\\b${escapeRegExp(normalizedSymbol)}\\b`, "i").test(normalizedQuestion);
+  } catch (_error) {
+    return normalizedQuestion.toUpperCase().includes(normalizedSymbol.toUpperCase());
+  }
 }
 
 function getStrategyAssetContext() {
@@ -2959,7 +1023,7 @@ function buildAssetOptionSearchWindow(assetMarkets, fallbackExpiry) {
 function withDerivedQuotes(quotes) {
   const quoteMap = new Map(quotes.map((quote) => [quote.symbol, quote]));
   const glD = quoteMap.get("GLD");
-  const uso = quoteMap.get("USO");
+  const xauUsd = quoteMap.get("XAU-USD");
   const spx = quoteMap.get("SPX");
   const spy = quoteMap.get("SPY");
   const spxIndexPrice = Number(
@@ -2969,20 +1033,12 @@ function withDerivedQuotes(quotes) {
 
   return [
     ...quotes,
-    glD
+    !xauUsd && glD
       ? {
           ...glD,
           symbol: "XAU-USD",
           shortName: "Gold spot proxy",
           regularMarketPrice: Number((glD.regularMarketPrice / 0.1).toFixed(2))
-        }
-      : null,
-    uso
-      ? {
-          ...uso,
-          symbol: "WTI-USD",
-          shortName: "WTI proxy",
-          regularMarketPrice: Number(uso.regularMarketPrice.toFixed(2))
         }
       : null,
     spxIndexPrice > 0
@@ -3004,7 +1060,13 @@ function withDerivedQuotes(quotes) {
   ].filter(Boolean);
 }
 
-async function refreshLiveState({ includeOptions = true } = {}) {
+let liveRefreshPromise = null;
+function refreshLiveState(options = {}) {
+  if (liveRefreshPromise) return liveRefreshPromise;
+  liveRefreshPromise = refreshLiveStateOnce(options).finally(() => { liveRefreshPromise = null; });
+  return liveRefreshPromise;
+}
+async function refreshLiveStateOnce({ includeOptions = true } = {}) {
   const warnings = [];
   const { finderAssets, screenerAssets, quoteWatchlist } = getStrategyAssetContext();
 
@@ -3133,23 +1195,37 @@ async function refreshLiveState({ includeOptions = true } = {}) {
           const leadMarket = assetMarkets[0] ?? null;
           const optionSpot = Number(quoteMap.get(asset.optionSymbol)?.regularMarketPrice ?? 0);
           const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? optionSpot ?? 0);
-          const targetUnderlyings = assetMarkets
-            .map((market) => parseTargetFromQuestion(market.question))
-            .filter((value) => Number.isFinite(value) && value > 0);
-          const targetUnderlying =
-            targetUnderlyings[0] ||
-            parseTargetFromQuestion(leadMarket?.question ?? "") ||
-            underlyingSpot ||
-            optionSpot;
           const ratio =
-            underlyingSpot > 0 && optionSpot > 0 ? optionSpot / underlyingSpot : Number(asset.conversionFallback ?? 1) || 1;
-          const targetStrikes = (targetUnderlyings.length ? targetUnderlyings : [targetUnderlying]).map((value) =>
-            Math.max(Math.round(value * ratio), 1)
-          );
+            underlyingSpot > 0 && optionSpot > 0
+              ? optionSpot / underlyingSpot
+              : Number(asset.conversionFallback ?? 1) || 1;
+          const leadMarketTarget = parseTargetFromQuestion(leadMarket?.question ?? "");
+          const leadStrikeHint =
+            Number.isFinite(leadMarketTarget) && leadMarketTarget > 0
+              ? marketQuestionMentionsSymbol(leadMarket?.question ?? "", asset.optionSymbol)
+                ? leadMarketTarget
+                : leadMarketTarget * ratio
+              : null;
+          const targetStrikes = assetMarkets
+            .map((market) => {
+              const targetValue = parseTargetFromQuestion(market.question);
+              if (!Number.isFinite(targetValue) || targetValue <= 0) {
+                return null;
+              }
+
+              const strikeHint = marketQuestionMentionsSymbol(market.question, asset.optionSymbol)
+                ? targetValue
+                : targetValue * ratio;
+              return Number.isFinite(strikeHint) && strikeHint > 0 ? Math.max(Math.round(strikeHint), 1) : null;
+            })
+            .filter((value) => Number.isFinite(value) && value > 0);
           const targetStrike =
             asset.optionSymbol === defaultStrategyConfig.optionLeg.symbol
               ? defaultStrategyConfig.optionLeg.strike
-              : Math.max(Math.round(targetUnderlying * ratio), 1);
+              : Math.max(
+                  Math.round((targetStrikes[0] ?? leadStrikeHint ?? underlyingSpot * ratio ?? optionSpot ?? 1) || 1),
+                  1
+                );
           const strikeFloor = Math.max(Math.min(...targetStrikes, targetStrike) * 0.85, 1);
           const strikeCeiling = Math.max(...targetStrikes, targetStrike) * 1.15;
           const desiredExpiry = leadMarket?.endDate?.slice(0, 10) || defaultStrategyConfig.optionLeg.expiry;
@@ -3222,12 +1298,13 @@ async function refreshLiveState({ includeOptions = true } = {}) {
   liveState.polymarketMarkets = polymarketMarkets;
   liveState.polymarketValuationMarkets = polymarketValuationMarkets;
   liveState.optionMatches = optionMatches;
-  liveState.lastUpdated = new Date().toISOString();
+  liveState.lastAttempt = new Date().toISOString();
+  if (!warnings.length) liveState.lastUpdated = liveState.lastAttempt;
   liveState.warnings = warnings;
   syncPaperOptionStreamSubscriptions();
 
   try {
-    recordPaperPortfolioSnapshotsIfDue(liveState.lastUpdated, true);
+    recordPaperPortfolioSnapshotsIfDue(liveState.lastAttempt, true);
   } catch (error) {
     warnings.push(`Paper-trade history unavailable: ${error.message}`);
     liveState.warnings = warnings;
@@ -3237,13 +1314,13 @@ async function refreshLiveState({ includeOptions = true } = {}) {
   invalidateStrategyResponseCache();
 }
 
-async function buildStrategiesResponse() {
+async function buildStrategiesBaseResponse() {
   if (strategyResponseCache.response) {
     return strategyResponseCache.response;
   }
 
   if (strategyResponseCache.buildPromise) {
-    return strategyResponseCache.buildPromise;
+    return await strategyResponseCache.buildPromise;
   }
 
   const buildVersion = strategyResponseCache.version;
@@ -3269,10 +1346,8 @@ async function buildStrategiesResponse() {
       lastUpdated: liveState.lastUpdated,
       warnings: liveState.warnings,
       strategies: getStrategies(),
-      recentRuns: getRecentRuns(),
       primaryStrategy: buildSlimPrimaryStrategy(strategySummary),
       v2Screener,
-      paperPortfolioPreview: buildPaperPortfolioPreviewResponse(),
       strategySettings: {
         compareModes: STRATEGY_COMPARE_MODES,
         assets: settingsAssets
@@ -3296,10 +1371,23 @@ async function buildStrategiesResponse() {
   }
 }
 
+async function buildStrategiesResponse(userId) {
+  const base = await buildStrategiesBaseResponse();
+
+  return {
+    ...base,
+    recentRuns: getRecentRuns(8, userId),
+    paperPortfolioPreview: buildPaperPortfolioPreviewResponse(userId),
+    setupWatchlist: listSetupWatchlist(userId),
+    strategyWatchlist: listStrategyWatchlist(userId)
+  };
+}
+
 app.get("/api/health", (_request, response) => {
   response.json({
     ok: true,
     lastUpdated: liveState.lastUpdated,
+    research: { provider: researchService.status().provider, running: researchService.status().running },
     macroDashboardRefreshedAt: liveState.macroDashboard?.refreshedAt ?? null,
     calendarsRefreshedAt: liveState.calendarsRefreshedAt,
     warnings: [...liveState.warnings, ...liveState.calendarWarnings],
@@ -3307,79 +1395,8 @@ app.get("/api/health", (_request, response) => {
   });
 });
 
-app.get("/api/stream-status", (_request, response) => {
-  response.json(buildStreamDiagnosticsResponse());
-});
-
-app.get("/api/market-status", async (_request, response) => {
-  response.json(await getPolygonMarketStatusPayload());
-});
-
-app.get("/api/brokers/ibkr/status", async (_request, response) => {
-  if (!paperBrokerState.ibkr.updatedAt) {
-    await refreshIbkrStatusCache().catch(() => null);
-  } else {
-    refreshIbkrStatusCache().catch(() => null);
-  }
-
-  response.json({
-    ibkr: paperBrokerState.ibkr
-  });
-});
-
-app.get("/api/brokers/tws/status", (_request, response) => {
-  response.json({
-    tws: paperBrokerState.tws
-  });
-});
-
-app.post("/api/brokers/tws/connect", async (request, response) => {
-  const host = String(request.body?.host ?? "").trim();
-  const port = Number(request.body?.port ?? 0);
-
-  if (!host || !Number.isFinite(port)) {
-    response.status(400).json({
-      error: "host and port are required",
-      tws: paperBrokerState.tws
-    });
-    return;
-  }
-
-  try {
-    const status = await twsPaperApi.connect({
-      host,
-      port
-    });
-    paperBrokerState.tws = {
-      ...paperBrokerState.tws,
-      ...status
-    };
-    syncStrategyCacheBrokerStatus();
-    schedulePaperPortfolioBroadcast(0);
-
-    response.json({
-      tws: paperBrokerState.tws
-    });
-  } catch (error) {
-    paperBrokerState.tws = {
-      ...paperBrokerState.tws,
-      configured: true,
-      host,
-      port,
-      connected: false,
-      authenticated: false,
-      ready: false,
-      error: error.message,
-      updatedAt: new Date().toISOString()
-    };
-    syncStrategyCacheBrokerStatus();
-    schedulePaperPortfolioBroadcast(0);
-
-    response.status(502).json({
-      error: error.message,
-      tws: paperBrokerState.tws
-    });
-  }
+app.get("/api/stream-status", (request, response) => {
+  response.json(buildStreamDiagnosticsResponse(request.user.id));
 });
 
 app.post("/api/refresh", async (_request, response) => {
@@ -3399,7 +1416,7 @@ app.post("/api/refresh", async (_request, response) => {
   }
 });
 
-app.get("/api/dashboard", async (_request, response) => {
+app.get("/api/dashboard", async (request, response) => {
   await ensureInitialLiveStateReady();
   const { quoteWatchlist } = getStrategyAssetContext();
   const watchlistOrder = new Map(quoteWatchlist.map((item, index) => [item.symbol, index]));
@@ -3413,7 +1430,7 @@ app.get("/api/dashboard", async (_request, response) => {
     generatedAt: new Date().toISOString(),
     lastUpdated: liveState.lastUpdated,
     warnings: [...liveState.warnings, ...liveState.calendarWarnings],
-    streamDiagnostics: buildStreamDiagnosticsResponse(),
+    streamDiagnostics: buildStreamDiagnosticsResponse(request.user.id),
     heroStats: buildMacroHeroStats(macroDashboard),
     macroDashboard,
     economicCalendar: liveState.economicCalendar,
@@ -3522,7 +1539,7 @@ app.put("/api/strategy-assets/:assetId", async (request, response) => {
     response.json({
       ok: true,
       asset: normalizedAsset,
-      strategyPayload: await buildStrategiesResponse()
+      strategyPayload: await buildStrategiesResponse(request.user.id)
     });
   } catch (error) {
     response.status(400).json({
@@ -3552,18 +1569,196 @@ app.delete("/api/strategy-assets/:assetId", async (request, response) => {
   invalidateStrategyResponseCache();
   response.json({
     ok: true,
-    strategyPayload: await buildStrategiesResponse()
+    strategyPayload: await buildStrategiesResponse(request.user.id)
   });
 });
 
-app.get("/api/strategies", async (_request, response) => {
+function normalizeSetupWatchlistItem(payload) {
+  const sourceInput = String(payload?.source ?? "").trim().toLowerCase();
+  const source =
+    sourceInput === "finder"
+      ? "finder"
+      : sourceInput === "tv" || sourceInput === "tradingview"
+        ? "tradingview"
+        : "custom";
+
+  return {
+    id: String(payload?.id ?? "").trim(),
+    source,
+    strategyId: String(payload?.strategyId ?? "").trim(),
+    combinationId: String(payload?.combinationId ?? "").trim(),
+    title: String(payload?.title ?? "").trim(),
+    payload: payload?.payload && typeof payload.payload === "object" ? payload.payload : {}
+  };
+}
+
+app.get("/api/strategy-watchlist", (request, response) => {
+  response.json({
+    watchlist: listStrategyWatchlist(request.user.id)
+  });
+});
+
+app.post("/api/strategy-watchlist", (request, response) => {
+  const userId = request.user.id;
+  const strategyId = String(request.body?.strategyId ?? "").trim();
+  if (!strategyId) {
+    response.status(400).json({
+      error: "strategyId is required"
+    });
+    return;
+  }
+
+  if (!getStrategies().some((strategy) => strategy.id === strategyId)) {
+    response.status(404).json({
+      error: "Strategy not found"
+    });
+    return;
+  }
+
+  const entry = addStrategyToWatchlist(strategyId, userId);
+  response.status(201).json({
+    ok: true,
+    entry,
+    watchlist: listStrategyWatchlist(userId)
+  });
+});
+
+app.delete("/api/strategy-watchlist/:strategyId", (request, response) => {
+  const userId = request.user.id;
+  const strategyId = String(request.params.strategyId ?? "").trim();
+  if (!strategyId) {
+    response.status(400).json({
+      error: "strategyId is required"
+    });
+    return;
+  }
+
+  const deleted = removeStrategyFromWatchlist(strategyId, userId);
+  if (!deleted) {
+    response.status(404).json({
+      error: "Watchlist entry not found"
+    });
+    return;
+  }
+
+  response.json({
+    ok: true,
+    deleted: true,
+    watchlist: listStrategyWatchlist(userId)
+  });
+});
+
+app.get("/api/setup-watchlist", (request, response) => {
+  response.json({
+    watchlist: listSetupWatchlist(request.user.id)
+  });
+});
+
+app.post("/api/setup-watchlist", (request, response) => {
+  const userId = request.user.id;
+  const item = normalizeSetupWatchlistItem(request.body);
+
+  if (!item.id) {
+    response.status(400).json({
+      error: "id is required"
+    });
+    return;
+  }
+
+  if (!item.strategyId) {
+    response.status(400).json({
+      error: "strategyId is required"
+    });
+    return;
+  }
+
+  if (!getStrategies().some((strategy) => strategy.id === item.strategyId)) {
+    response.status(404).json({
+      error: "Strategy not found"
+    });
+    return;
+  }
+
+  if (!item.combinationId) {
+    response.status(400).json({
+      error: "combinationId is required"
+    });
+    return;
+  }
+
+  if (!item.title) {
+    response.status(400).json({
+      error: "title is required"
+    });
+    return;
+  }
+
+  if (!Array.isArray(item.payload?.legs) || item.payload.legs.length === 0) {
+    response.status(400).json({
+      error: "payload.legs is required"
+    });
+    return;
+  }
+
+  const persisted = upsertSetupWatchlistItem(item, userId);
+  response.status(201).json({
+    ok: true,
+    item: persisted,
+    watchlist: listSetupWatchlist(userId)
+  });
+});
+
+app.delete("/api/setup-watchlist/:id", (request, response) => {
+  const userId = request.user.id;
+  const id = String(request.params.id ?? "").trim();
+  if (!id) {
+    response.status(400).json({
+      error: "id is required"
+    });
+    return;
+  }
+
+  const deleted = deleteSetupWatchlistItem(id, userId);
+  if (!deleted) {
+    response.status(404).json({
+      error: "Watchlist entry not found"
+    });
+    return;
+  }
+
+  response.json({
+    ok: true,
+    deleted: true,
+    watchlist: listSetupWatchlist(userId)
+  });
+});
+
+app.get("/api/strategies", async (request, response) => {
   await ensureInitialLiveStateReady();
-  response.json(await buildStrategiesResponse());
+  response.json(await buildStrategiesResponse(request.user.id));
+});
+
+app.get("/api/strategies/finder/:rowId/theo", async (request, response) => {
+  await ensureInitialLiveStateReady();
+  await buildStrategiesBaseResponse();
+  const row = getCachedFinderRowDetail(request.params.rowId);
+
+  if (!row) {
+    response.status(404).json({
+      error: "Strategy finder row not found"
+    });
+    return;
+  }
+
+  response.json({
+    lastUpdated: liveState.lastUpdated,
+    theoPrice: row.theoPrice ?? row.quickOverview?.theoPrice ?? null
+  });
 });
 
 app.get("/api/strategies/finder/:rowId", async (request, response) => {
   await ensureInitialLiveStateReady();
-  await buildStrategiesResponse();
+  await buildStrategiesBaseResponse();
   const row = getCachedFinderRowDetail(request.params.rowId);
 
   if (!row) {
@@ -3579,11 +1774,11 @@ app.get("/api/strategies/finder/:rowId", async (request, response) => {
   });
 });
 
-app.get("/api/paper-portfolio", async (_request, response) => {
+app.get("/api/paper-portfolio", async (request, response) => {
   await ensureInitialLiveStateReady();
   response.json({
     lastUpdated: liveState.lastUpdated,
-    paperPortfolio: buildPaperPortfolioResponse()
+    paperPortfolio: buildPaperPortfolioResponse(request.user.id)
   });
 });
 
@@ -3599,6 +1794,108 @@ app.post("/api/tradingview/strategy-finder", async (request, response) => {
   }
 });
 
+app.post("/api/tradingview/theo-price", async (request, response) => {
+  await ensureInitialLiveStateReady();
+
+  const payload = request.body ?? {};
+  const legs = Array.isArray(payload?.legs) ? payload.legs : [];
+
+  if (!legs.length) {
+    response.status(400).json({
+      error: "legs are required"
+    });
+    return;
+  }
+
+  const quotedSymbol = String(payload?.symbol ?? "").trim();
+  const normalizedSymbol = quotedSymbol.includes(":") ? quotedSymbol.split(":").slice(-1)[0] : quotedSymbol;
+  const fallbackSpot = payload?.spot == null ? Number.NaN : Number(payload.spot);
+  const quoteMap = new Map(
+    (liveState.quotes ?? []).map((quote) => [
+      String(quote.symbol ?? "").trim().toUpperCase(),
+      Number(quote.regularMarketPrice ?? 0)
+    ])
+  );
+  const quoteSpot = quoteMap.get(normalizedSymbol.toUpperCase()) ?? quoteMap.get(quotedSymbol.toUpperCase()) ?? null;
+  const spot =
+    Number.isFinite(quoteSpot) && quoteSpot > 0
+      ? quoteSpot
+      : Number.isFinite(fallbackSpot) && fallbackSpot > 0
+        ? fallbackSpot
+        : 0;
+  const asOf = new Date().toISOString().slice(0, 10);
+  const asOfDate = new Date(`${asOf}T00:00:00.000Z`);
+
+  const normalizeVolatility = (value, fallback = 0.24) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue) || numericValue <= 0) {
+      return fallback;
+    }
+
+    return numericValue > 2 ? numericValue / 100 : numericValue;
+  };
+
+  const theoPrice = legs.reduce((sum, leg) => {
+    const quantity = Math.max(Number(leg?.quantity ?? 0), 0);
+    if (!(quantity > 0)) {
+      return sum;
+    }
+
+    const expiry = String(leg?.expiry ?? leg?.expiration ?? "").trim();
+    if (!expiry) {
+      return sum;
+    }
+
+    const expiryDate = new Date(`${expiry}T00:00:00.000Z`);
+    if (Number.isNaN(expiryDate.getTime())) {
+      return sum;
+    }
+
+    const strike = Number(leg?.strike ?? 0);
+    if (!(strike > 0)) {
+      return sum;
+    }
+
+    const daysToExpiry = Math.max(
+      Math.round((expiryDate.getTime() - asOfDate.getTime()) / (24 * 60 * 60 * 1000)),
+      0
+    );
+    const timeToExpiryYears = daysToExpiry / 365;
+    const volatility = normalizeVolatility(leg?.impliedVolatility, Number(payload?.annualizedVolatility ?? 0.24));
+    const riskFreeRate = Number(leg?.riskFreeRate ?? payload?.riskFreeRate ?? 0.0425) || 0.0425;
+    const optionType = String(leg?.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
+    const action = String(leg?.action ?? "LONG").trim().toUpperCase();
+    const direction = action === "SHORT" ? -1 : 1;
+    const normalizedSpot = Math.max(Number(spot ?? 0), 0.01);
+
+    const modelPrice =
+      optionType === "put"
+        ? blackScholesPut({
+            spot: normalizedSpot,
+            strike,
+            timeToExpiryYears,
+            volatility,
+            riskFreeRate
+          })
+        : blackScholesCall({
+            spot: normalizedSpot,
+            strike,
+            timeToExpiryYears,
+            volatility,
+            riskFreeRate
+          });
+
+    return sum + direction * modelPrice * quantity;
+  }, 0);
+
+  response.json({
+    lastUpdated: liveState.lastUpdated,
+    asOf,
+    spot,
+    theoPrice
+  });
+});
+
 app.get("/api/paper-orders/stream", (request, response) => {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache, no-transform");
@@ -3606,15 +1903,25 @@ app.get("/api/paper-orders/stream", (request, response) => {
   response.flushHeaders?.();
   response.write("retry: 5000\n\n");
 
-  paperStreamClients.add(response);
+  const userId = request.user.id;
+  const bucket = paperStreamClientsByUserId.get(userId) ?? new Set();
+  bucket.add(response);
+  paperStreamClientsByUserId.set(userId, bucket);
+
   writeSseJson(response, {
     type: "paper-portfolio",
     lastUpdated: new Date().toISOString(),
-    paperPortfolio: buildPaperPortfolioResponse()
+    paperPortfolio: buildPaperPortfolioResponse(userId)
   });
 
   request.on("close", () => {
-    paperStreamClients.delete(response);
+    const currentBucket = paperStreamClientsByUserId.get(userId);
+    if (currentBucket) {
+      currentBucket.delete(response);
+      if (currentBucket.size === 0) {
+        paperStreamClientsByUserId.delete(userId);
+      }
+    }
     response.end();
   });
 });
@@ -3624,6 +1931,8 @@ app.get("/api/options/chain", async (request, response) => {
   const expiration = String(request.query.expiration ?? "").trim();
   const optionType = String(request.query.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
   const strikeHint = Number(request.query.strikeHint ?? 0);
+  const strikeMin = Number(request.query.strikeMin ?? NaN);
+  const strikeMax = Number(request.query.strikeMax ?? NaN);
   const requestedLimit = Number(request.query.limit ?? 60);
 
   if (!symbol || !expiration) {
@@ -3642,6 +1951,8 @@ app.get("/api/options/chain", async (request, response) => {
       optionType,
       currentSpot,
       strikeHint,
+      strikeMin: Number.isFinite(strikeMin) && strikeMin > 0 ? strikeMin : undefined,
+      strikeMax: Number.isFinite(strikeMax) && strikeMax > 0 ? strikeMax : undefined,
       limit: Number.isFinite(requestedLimit) ? requestedLimit : 60
     });
 
@@ -3680,6 +1991,15 @@ app.get("/api/strategies/strategy-2/scan", async (request, response) => {
 
 app.get("/api/strategies/strategy-4/scan", async (request, response) => {
   const requestedLimit = Number(request.query.limit ?? 25);
+  const volRealizedLookback = Number(request.query.volRealizedLookbackDays ?? NaN);
+  const volBaselineLookback = Number(request.query.volBaselineLookbackDays ?? NaN);
+  const volMovementLookback = Number(request.query.volMovementLookbackDays ?? NaN);
+  const volMaxVolRatio = Number(request.query.volMaxVolatilityRatio ?? NaN);
+  const volMaxMoveRatio = Number(request.query.volMaxMovementRatio ?? NaN);
+  const volWeightVol = Number(request.query.volWeightVolatility ?? NaN);
+  const volWeightMove = Number(request.query.volWeightMovement ?? NaN);
+  const volWeightLiquidity = Number(request.query.volWeightLiquidity ?? NaN);
+  const volWeightData = Number(request.query.volWeightDataQuality ?? NaN);
 
   try {
     const payload = await buildStockDeltaHedgeScan({
@@ -3689,7 +2009,31 @@ app.get("/api/strategies/strategy-4/scan", async (request, response) => {
       limit: Number.isFinite(requestedLimit) ? requestedLimit : 25
     });
 
-    response.json(payload);
+    const volWeights = {
+      ...(Number.isFinite(volWeightVol) ? { volatilityDivergence: volWeightVol } : {}),
+      ...(Number.isFinite(volWeightMove) ? { movementDivergence: volWeightMove } : {}),
+      ...(Number.isFinite(volWeightLiquidity) ? { liquidity: volWeightLiquidity } : {}),
+      ...(Number.isFinite(volWeightData) ? { dataQuality: volWeightData } : {})
+    };
+
+    const volatilityOpportunity = await buildVolatilityOpportunityScan({
+      stockUniverse: payload.stockUniverse,
+      optionCandidates: payload.universeRows,
+      limit: Number.isFinite(requestedLimit) ? requestedLimit : 25,
+      config: {
+        ...(Number.isFinite(volRealizedLookback) ? { realizedVolLookbackDays: volRealizedLookback } : {}),
+        ...(Number.isFinite(volBaselineLookback) ? { baselineVolLookbackDays: volBaselineLookback } : {}),
+        ...(Number.isFinite(volMovementLookback) ? { movementLookbackDays: volMovementLookback } : {}),
+        ...(Number.isFinite(volMaxVolRatio) ? { maxVolatilityRatio: volMaxVolRatio } : {}),
+        ...(Number.isFinite(volMaxMoveRatio) ? { maxMovementRatio: volMaxMoveRatio } : {}),
+        ...(Object.keys(volWeights).length ? { weights: volWeights } : {})
+      }
+    });
+
+    response.json({
+      ...payload,
+      volatilityOpportunity
+    });
   } catch (error) {
     response.status(502).json({
       error: error.message
@@ -3761,7 +2105,69 @@ app.delete("/api/strategies/strategy-4/tickers/:symbol", (request, response) => 
   });
 });
 
-app.post("/api/strategies/strategy-1/runs", async (_request, response) => {
+app.post("/api/strategies/strategy-5/scan", async (request, response) => {
+  const force = request.body?.force === true;
+
+  try {
+    await refreshCalendarState(force);
+
+    const payload = await buildCoveredIncomeScan({
+      input: request.body ?? {},
+      fetchQuotes,
+      fetchOptionChain,
+      companyEvents: liveState.companyEvents?.events ?? [],
+      earningsCoverageBySymbol: await researchService.earningsCoverage((request.body?.symbols ?? []).filter(s => typeof s === "string").map(s => s.toUpperCase()).slice(0, 20))
+    });
+
+    response.json(payload);
+  } catch (error) {
+    response.status(502).json({
+      error: error.message
+    });
+  }
+});
+
+app.get("/api/stocks/:symbol/technicals", async (request, response) => {
+  const symbol = normalizeDeltaHedgeTicker(String(request.params.symbol ?? ""));
+
+  if (!symbol) {
+    response.status(400).json({
+      error: "symbol is required"
+    });
+    return;
+  }
+
+  try {
+    const payload = await fetchStockTechnicals({ symbol });
+    response.json(payload);
+  } catch (error) {
+    response.status(502).json({
+      error: error.message
+    });
+  }
+});
+
+app.get("/api/stocks/:symbol/fundamentals", async (request, response) => {
+  const symbol = normalizeDeltaHedgeTicker(String(request.params.symbol ?? ""));
+
+  if (!symbol) {
+    response.status(400).json({
+      error: "symbol is required"
+    });
+    return;
+  }
+
+  try {
+    const payload = await fetchStockFundamentals({ symbol });
+    response.json(payload);
+  } catch (error) {
+    response.status(502).json({
+      error: error.message
+    });
+  }
+});
+
+app.post("/api/strategies/strategy-1/runs", async (request, response) => {
   const optionMatches = buildLiveOptionMatches();
   const { finderAssets } = getStrategyAssetContext();
   const strategySummary = await buildStrategySummary({
@@ -3771,7 +2177,7 @@ app.post("/api/strategies/strategy-1/runs", async (_request, response) => {
     assetUniverse: finderAssets
   });
 
-  saveStrategyRun("strategy-1", strategySummary);
+  saveStrategyRun("strategy-1", strategySummary, request.user.id);
 
   response.status(201).json({
     saved: true,
@@ -3780,112 +2186,11 @@ app.post("/api/strategies/strategy-1/runs", async (_request, response) => {
 });
 
 app.post("/api/paper-orders", async (request, response) => {
+  const userId = request.user.id;
   try {
     const order = sanitizePaperOrderPayload(request.body);
-    if ((isIbkrPaperRoute(order) || isTwsPaperRoute(order)) && !hasOptionLegs(order)) {
-      throw new Error("Broker paper routing requires at least one option leg");
-    }
-
-    const persistedOrder = isIbkrPaperRoute(order)
-      ? prepareOrderForIbkrEntry(order)
-      : isTwsPaperRoute(order)
-        ? prepareOrderForTwsEntry(order)
-        : order;
-    let createdOrder = createPaperOrder(persistedOrder);
-    let createMessage = isIbkrPaperRoute(order)
-      ? "IBKR paper order saved locally and is waiting for broker submission."
-      : isTwsPaperRoute(order)
-        ? "TWS paper order saved locally and is waiting for broker submission."
-        : "Paper order saved.";
-
-    if (isIbkrPaperRoute(order)) {
-      try {
-        const submission = await submitIbkrOptionOrder({
-          order: {
-            ...createdOrder.position,
-            id: Number(createdOrder.id)
-          },
-          purpose: "entry"
-        });
-
-        createdOrder = updatePaperOrder(
-          Number(createdOrder.id),
-          sanitizePaperOrderPayload(
-            {
-              ...createdOrder.position,
-              execution: submission
-            },
-            createdOrder.position
-          )
-        );
-        createMessage = buildIbkrSubmissionMessage(submission, "entry");
-      } catch (error) {
-        createdOrder = updatePaperOrder(
-          Number(createdOrder.id),
-          sanitizePaperOrderPayload(
-            {
-              ...createdOrder.position,
-              execution: buildPendingIbkrExecution(createdOrder.position, {
-                status: "error",
-                statusText: "IBKR paper submission failed",
-                lastError: error.message,
-                lastSyncAt: new Date().toISOString()
-              })
-            },
-            createdOrder.position
-          )
-        );
-        createMessage = `Order saved locally, but IBKR submission failed: ${error.message}`;
-      }
-    }
-
-    if (isTwsPaperRoute(order)) {
-      try {
-        const submission = await twsPaperApi.submitOptionOrder({
-          order: {
-            ...createdOrder.position,
-            id: Number(createdOrder.id)
-          },
-          purpose: "entry"
-        });
-
-        let nextOrder = sanitizePaperOrderPayload(
-          {
-            ...createdOrder.position,
-            execution: submission
-          },
-          createdOrder.position
-        );
-        nextOrder = applyEntryExecutionToOrder(nextOrder, nextOrder.execution, []);
-        createdOrder = updatePaperOrder(Number(createdOrder.id), nextOrder);
-        paperBrokerState.tws = {
-          ...paperBrokerState.tws,
-          lastSyncAt: new Date().toISOString(),
-          lastSyncError: null
-        };
-        syncStrategyCacheBrokerStatus();
-        createMessage = "TWS paper order submitted. You can monitor it from the paper-trading page.";
-      } catch (error) {
-        createdOrder = updatePaperOrder(
-          Number(createdOrder.id),
-          sanitizePaperOrderPayload(
-            {
-              ...createdOrder.position,
-              execution: {
-                ...buildPendingTwsExecution(createdOrder.position, {
-                  status: "error",
-                  statusText: "TWS submission failed",
-                  lastError: error.message
-                }),
-                lastSyncAt: new Date().toISOString()
-              }
-            },
-            createdOrder.position
-          )
-        );
-        createMessage = `Order saved locally, but TWS submission failed: ${error.message}`;
-      }
-    }
+    let createdOrder = createPaperOrder({ ...order, userId });
+    let createMessage = "Paper order saved.";
     const initialCalculatorSnapshotPayload = request.body?.initialCalculatorSnapshot?.payload;
 
     if (initialCalculatorSnapshotPayload && typeof initialCalculatorSnapshotPayload === "object") {
@@ -3935,7 +2240,7 @@ app.post("/api/paper-orders", async (request, response) => {
       ]);
     }
 
-    const paperPortfolio = buildPaperPortfolioResponse();
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
     invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
@@ -3952,7 +2257,8 @@ app.post("/api/paper-orders", async (request, response) => {
   }
 });
 
-app.post("/api/paper-orders/:id/execute", async (request, response) => {
+app.post("/api/paper-orders/:id/hedge", async (request, response) => {
+  const userId = request.user.id;
   const orderId = Number(request.params.id);
 
   if (!Number.isInteger(orderId) || orderId <= 0) {
@@ -3962,7 +2268,7 @@ app.post("/api/paper-orders/:id/execute", async (request, response) => {
     return;
   }
 
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
   if (!existingOrder) {
     response.status(404).json({
       error: "paper order not found"
@@ -3970,459 +2276,113 @@ app.post("/api/paper-orders/:id/execute", async (request, response) => {
     return;
   }
 
-  const purpose = String(request.body?.purpose ?? "entry").trim().toLowerCase() === "exit" ? "exit" : "entry";
-  const isIbkrRoute = isIbkrPaperRoute(existingOrder.position);
-  const isTwsRoute = isTwsPaperRoute(existingOrder.position);
-
-  if (!isIbkrRoute && !isTwsRoute) {
+  if (String(existingOrder.position?.status ?? "open").toLowerCase() === "closed") {
     response.status(400).json({
-      error: "This order is not configured for broker paper routing"
+      error: "paper order is already closed",
+      paperPortfolio: buildPaperPortfolioResponseSafe(userId)
     });
     return;
   }
 
   try {
-    let nextOrder = existingOrder.position;
-    let message = "";
+    const valuedBefore = buildPaperPortfolio({
+      orders: [existingOrder],
+      quotes: liveState.quotes,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
+      optionMatches: buildPaperValuationOptionMatches()
+    });
+    const valuedBeforeOrder =
+      valuedBefore.openOrders[0] ??
+      valuedBefore.orders[0] ??
+      valuedBefore.closedOrders?.[0] ??
+      null;
 
-    if (isIbkrRoute) {
-      if (purpose === "entry") {
-        if (!hasOptionLegs(existingOrder.position)) {
-          throw new Error("IBKR paper routing requires at least one option leg");
-        }
+    const rawRequestedShares = toNumber(request.body?.shares, null);
+    const requestedShares =
+      rawRequestedShares != null ? Math.round(rawRequestedShares) : Math.round(valuedBeforeOrder?.hedgeState?.recommendedSharesDeltaNeutral ?? 0);
 
-        const preparedOrder = prepareOrderForIbkrEntry(
-          sanitizePaperOrderPayload(
-            {
-              ...existingOrder.position,
-              execution: buildPendingIbkrExecution(existingOrder.position, request.body?.execution ?? {})
-            },
-            existingOrder.position
-          )
-        );
-        const submission = await submitIbkrOptionOrder({
-          order: {
-            ...preparedOrder,
-            id: orderId
-          },
-          purpose: "entry"
-        });
-
-        nextOrder = sanitizePaperOrderPayload(
-          {
-            ...preparedOrder,
-            execution: submission
-          },
-          preparedOrder
-        );
-        message = buildIbkrSubmissionMessage(submission, "entry");
-      } else {
-        const optionQuantity = (existingOrder.position.legs ?? [])
-          .filter((leg) => leg?.kind === "option")
-          .reduce((sum, leg) => sum + Math.max(Number(leg.quantity ?? 0) || 0, 0), 0);
-
-        if (!(optionQuantity > 0)) {
-          throw new Error("No filled option position is available to close through IBKR");
-        }
-
-        const submission = await submitIbkrOptionOrder({
-          order: {
-            ...existingOrder.position,
-            id: orderId
-          },
-          purpose: "exit"
-        });
-
-        nextOrder = sanitizePaperOrderPayload(
-          {
-            ...existingOrder.position,
-            closeExecution: mapCloseExecutionToRoute(submission, existingOrder.position)
-          },
-          existingOrder.position
-        );
-        message = buildIbkrSubmissionMessage(submission, "exit");
-      }
-    } else if (isTwsRoute) {
-      if (purpose !== "entry") {
-        throw new Error(
-          "TWS exit orders are managed manually inside TWS. Use the Close action in HedgeHub to move filled positions to history."
-        );
-      }
-
-      if (!hasOptionLegs(existingOrder.position)) {
-        throw new Error("TWS paper routing requires at least one option leg");
-      }
-
-      const preparedOrder = prepareOrderForTwsEntry(
-        sanitizePaperOrderPayload(
-          {
-            ...existingOrder.position,
-            execution: buildPendingTwsExecution(existingOrder.position, request.body?.execution ?? {})
-          },
-          existingOrder.position
-        )
-      );
-      const submission = await twsPaperApi.submitOptionOrder({
-        order: {
-          ...preparedOrder,
-          id: orderId
-        },
-        purpose: "entry"
+    if (!Number.isFinite(requestedShares) || requestedShares === 0) {
+      response.status(400).json({
+        error: "No hedge action is currently available for this order.",
+        paperPortfolio: buildPaperPortfolioResponseSafe(userId)
       });
-
-      nextOrder = sanitizePaperOrderPayload(
-        {
-          ...preparedOrder,
-          execution: submission
-        },
-        preparedOrder
-      );
-      nextOrder = applyEntryExecutionToOrder(nextOrder, nextOrder.execution, []);
-      paperBrokerState.tws = {
-        ...paperBrokerState.tws,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncError: null
-      };
-      syncStrategyCacheBrokerStatus();
-      message = "TWS paper order submitted. You can monitor it from the paper-trading page.";
+      return;
     }
 
-    const updatedOrder = updatePaperOrder(orderId, nextOrder);
-    if (isIbkrRoute) {
-      await refreshIbkrStatusCache().catch(() => null);
-    }
-    invalidateStrategyResponseCache();
-    syncPaperOptionStreamSubscriptions();
-    schedulePaperPortfolioBroadcast(0);
+    const proxySymbol = String(existingOrder.position?.marketContext?.proxySymbol ?? "").trim();
+    const hedgeSymbol = proxySymbol || String(existingOrder.position?.assetLabel ?? "").trim() || "STOCK";
+    const hedgeSpot = toNumber(valuedBeforeOrder?.valuationContext?.currentProxySpot, null) ?? toNumber(existingOrder.position?.marketContext?.currentProxySpot, 0) ?? 0;
+    const hedgePrice = hedgeSpot > 0 ? hedgeSpot : Math.max(toNumber(existingOrder.position?.marketContext?.currentUnderlyingSpot, 0) ?? 0, 0);
 
-    response.json({
-      order: updatedOrder,
-      paperPortfolio: buildPaperPortfolioResponse(),
-      message
-    });
-  } catch (error) {
-    if (isTwsRoute) {
-      const failedOrder = sanitizePaperOrderPayload(
-        {
-          ...existingOrder.position,
-          execution: {
-            ...buildPendingTwsExecution(existingOrder.position, {
-              status: "error",
-              statusText: "TWS submission failed",
-              lastError: error.message
-            }),
-            lastSyncAt: new Date().toISOString()
-          }
-        },
-        existingOrder.position
-      );
-
-      updatePaperOrder(orderId, failedOrder);
-    } else {
-      const failedOrder =
-        purpose === "exit"
-          ? sanitizePaperOrderPayload(
-              {
-                ...existingOrder.position,
-                closeExecution: mapCloseExecutionToRoute(
-                  {
-                    ...(existingOrder.position.closeExecution ?? {}),
-                    route: "ibkr-paper",
-                    purpose: "exit",
-                    status: "error",
-                    statusText: "IBKR exit submission failed",
-                    lastError: error.message,
-                    lastSyncAt: new Date().toISOString()
-                  },
-                  existingOrder.position
-                )
-              },
-              existingOrder.position
-            )
-          : sanitizePaperOrderPayload(
-              {
-                ...prepareOrderForIbkrEntry(existingOrder.position),
-                execution: buildPendingIbkrExecution(existingOrder.position, {
-                  status: "error",
-                  statusText: "IBKR paper submission failed",
-                  lastError: error.message,
-                  lastSyncAt: new Date().toISOString()
-                })
-              },
-              existingOrder.position
-            );
-
-      updatePaperOrder(orderId, failedOrder);
+    if (!(hedgePrice > 0)) {
+      response.status(400).json({
+        error: "Unable to resolve a live spot price to price the hedge shares.",
+        paperPortfolio: buildPaperPortfolioResponseSafe(userId)
+      });
+      return;
     }
 
-    invalidateStrategyResponseCache();
-    syncPaperOptionStreamSubscriptions();
-    schedulePaperPortfolioBroadcast(0);
+    const legQuantity = Math.max(Math.abs(requestedShares), 0);
+    const hedgeAction = requestedShares > 0 ? "LONG" : "SHORT";
 
-    response.status(502).json({
-      error: error.message,
-      paperPortfolio: buildPaperPortfolioResponseSafe()
-    });
-  }
-});
+    const nextLeg = {
+      id: `paper-hedge-${Date.now()}`,
+      label: `${hedgeSymbol} shares`,
+      kind: "stock",
+      action: hedgeAction,
+      quantity: legQuantity,
+      entryPrice: hedgePrice,
+      rootSymbol: hedgeSymbol,
+      quoteSource: "Stock"
+    };
 
-app.post("/api/paper-orders/:id/confirm-execution", async (request, response) => {
-  const orderId = Number(request.params.id);
-
-  if (!Number.isInteger(orderId) || orderId <= 0) {
-    response.status(400).json({
-      error: "paper order id must be a positive integer"
-    });
-    return;
-  }
-
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
-  if (!existingOrder) {
-    response.status(404).json({
-      error: "paper order not found"
-    });
-    return;
-  }
-
-  if (typeof request.body?.confirmed !== "boolean") {
-    response.status(400).json({
-      error: "confirmed must be true or false"
-    });
-    return;
-  }
-
-  const pendingExecution = findPendingConfirmationExecution(existingOrder.position);
-  if (!pendingExecution) {
-    const currentExecution =
-      String(existingOrder.position?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper" &&
-      String(existingOrder.position?.closeExecution?.status ?? "").trim()
-        ? existingOrder.position.closeExecution
-        : existingOrder.position?.execution ?? null;
-    console.warn(
-      `[IBKR] No pending confirmation for paper order ${orderId}. entry=${JSON.stringify({
-        route: existingOrder.position?.execution?.route ?? "",
-        status: existingOrder.position?.execution?.status ?? "",
-        pendingReplyId: existingOrder.position?.execution?.pendingReplyId ?? "",
-        brokerOrderId: existingOrder.position?.execution?.brokerOrderId ?? ""
-      })} exit=${JSON.stringify({
-        route: existingOrder.position?.closeExecution?.route ?? "",
-        status: existingOrder.position?.closeExecution?.status ?? "",
-        pendingReplyId: existingOrder.position?.closeExecution?.pendingReplyId ?? "",
-        brokerOrderId: existingOrder.position?.closeExecution?.brokerOrderId ?? ""
-      })}`
-    );
-    response.json({
-      order: existingOrder,
-      paperPortfolio: buildPaperPortfolioResponse(),
-      message: currentExecution?.brokerOrderId
-        ? `No IBKR confirmation is pending. Broker order ${currentExecution.brokerOrderId} is currently ${
-            currentExecution.statusText || currentExecution.status || "active"
-          }.`
-        : "No IBKR confirmation is pending for this paper order."
-    });
-    return;
-  }
-
-  try {
-    const nextExecution = await continueIbkrOrderConfirmation({
-      execution: {
-        ...pendingExecution.value,
-        warningMessages: getExecutionWarningMessages(pendingExecution.value),
-        pendingReplyMessages: getPendingReplyMessages(pendingExecution.value)
+    const nextOrderPayload = sanitizePaperOrderPayload(
+      {
+        ...existingOrder.position,
+        legs: [...(existingOrder.position?.legs ?? []), nextLeg]
       },
-      confirmed: request.body.confirmed
-    });
-    const updatedOrder = updatePaperOrder(
-      orderId,
-      sanitizePaperOrderPayload(
-        {
-          ...existingOrder.position,
-          [pendingExecution.key]:
-            pendingExecution.key === "closeExecution"
-              ? mapCloseExecutionToRoute(nextExecution, existingOrder.position)
-              : nextExecution
-        },
-        existingOrder.position
-      )
+      existingOrder.position
     );
-    await refreshIbkrStatusCache().catch(() => null);
+
+    const updatedOrder = updatePaperOrder(orderId, nextOrderPayload);
+    const valuedPaperPortfolio = buildPaperPortfolio({
+      orders: [updatedOrder],
+      quotes: liveState.quotes,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
+      optionMatches: buildPaperValuationOptionMatches()
+    });
+    const valuedOrder =
+      valuedPaperPortfolio.openOrders[0] ??
+      valuedPaperPortfolio.orders[0] ??
+      valuedPaperPortfolio.closedOrders[0] ??
+      null;
+
+    if (valuedOrder && !valuedOrder.isClosed) {
+      recordPaperOrderSnapshots([
+        buildPaperOrderSnapshot(valuedOrder, normalizeTimestamp(updatedOrder.updatedAt) || new Date().toISOString())
+      ]);
+    }
+
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
     invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
 
-    const message =
-      request.body.confirmed === true
-        ? buildIbkrSubmissionMessage(nextExecution, pendingExecution.purpose)
-        : pendingExecution.purpose === "exit"
-          ? "IBKR exit confirmation declined. Broker order was not submitted."
-          : "IBKR confirmation declined. Broker order was not submitted.";
-
     response.json({
       order: updatedOrder,
-      paperPortfolio: buildPaperPortfolioResponse(),
-      message
+      paperPortfolio,
+      message: `Hedge leg added: ${hedgeAction === "SHORT" ? "short" : "buy"} ${legQuantity} shares.`
     });
   } catch (error) {
-    response.status(502).json({
+    response.status(400).json({
       error: error.message,
-      paperPortfolio: buildPaperPortfolioResponseSafe()
-    });
-  }
-});
-
-app.post("/api/paper-orders/:id/sync-execution", async (request, response) => {
-  const orderId = Number(request.params.id);
-
-  if (!Number.isInteger(orderId) || orderId <= 0) {
-    response.status(400).json({
-      error: "paper order id must be a positive integer"
-    });
-    return;
-  }
-
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
-  if (!existingOrder) {
-    response.status(404).json({
-      error: "paper order not found"
-    });
-    return;
-  }
-
-  if (!isBrokerTrackedOrder(existingOrder.position)) {
-    response.status(400).json({
-      error: "paper order is not broker-tracked"
-    });
-    return;
-  }
-
-  if (isTwsPaperRoute(existingOrder.position) || isTwsPaperExecution(existingOrder.position?.closeExecution)) {
-    try {
-      await twsPaperApi.requestAllOpenOrders();
-      paperBrokerState.tws = {
-        ...paperBrokerState.tws,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncError: null
-      };
-      syncStrategyCacheBrokerStatus();
-    } catch (error) {
-      paperBrokerState.tws = {
-        ...paperBrokerState.tws,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncError: error.message
-      };
-      syncStrategyCacheBrokerStatus();
-    }
-
-    response.json({
-      order: listPaperOrders().find((order) => Number(order.id) === orderId) ?? existingOrder,
-      paperPortfolio: buildPaperPortfolioResponse(),
-      message: "TWS order state synced."
-    });
-    return;
-  }
-
-  await tickleIbkrSession().catch(() => null);
-  await syncIbkrPaperOrders({
-    onlyOrderId: orderId
-  });
-
-  response.json({
-    order: listPaperOrders().find((order) => Number(order.id) === orderId) ?? existingOrder,
-    paperPortfolio: buildPaperPortfolioResponse(),
-    message: "IBKR order state synced."
-  });
-});
-
-app.post("/api/paper-orders/:id/cancel-execution", async (request, response) => {
-  const orderId = Number(request.params.id);
-
-  if (!Number.isInteger(orderId) || orderId <= 0) {
-    response.status(400).json({
-      error: "paper order id must be a positive integer"
-    });
-    return;
-  }
-
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
-  if (!existingOrder) {
-    response.status(404).json({
-      error: "paper order not found"
-    });
-    return;
-  }
-
-  if (isTwsPaperRoute(existingOrder.position) || isTwsPaperExecution(existingOrder.position?.closeExecution)) {
-    response.status(400).json({
-      error: "Cancel/update TWS orders manually inside TWS. HedgeHub only tracks status.",
-      paperPortfolio: buildPaperPortfolioResponseSafe()
-    });
-    return;
-  }
-
-  const activeExecution =
-    String(existingOrder.position?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper" &&
-    existingOrder.position.closeExecution &&
-    !isIbkrTerminalStatus(existingOrder.position.closeExecution.status)
-      ? {
-          key: "closeExecution",
-          value: existingOrder.position.closeExecution
-        }
-      : isIbkrPaperRoute(existingOrder.position) &&
-          existingOrder.position.execution &&
-          !isIbkrTerminalStatus(existingOrder.position.execution.status)
-        ? {
-            key: "execution",
-            value: existingOrder.position.execution
-          }
-        : null;
-
-  if (!activeExecution?.value?.brokerOrderId) {
-    response.status(400).json({
-      error: "No active IBKR order is available to cancel"
-    });
-    return;
-  }
-
-  try {
-    await cancelIbkrOrder({
-      accountId: activeExecution.value.accountId,
-      orderId: activeExecution.value.brokerOrderId
-    });
-
-    const updatedOrder = updatePaperOrder(
-      orderId,
-      sanitizePaperOrderPayload(
-        {
-          ...existingOrder.position,
-          [activeExecution.key]: {
-            ...activeExecution.value,
-            status: "pending_cancel",
-            statusText: "Cancel requested",
-            lastSyncAt: new Date().toISOString()
-          }
-        },
-        existingOrder.position
-      )
-    );
-    invalidateStrategyResponseCache();
-    await syncIbkrPaperOrders({
-      onlyOrderId: orderId
-    });
-
-    response.json({
-      order: listPaperOrders().find((order) => Number(order.id) === orderId) ?? updatedOrder,
-      paperPortfolio: buildPaperPortfolioResponse(),
-      message: "Cancel request sent to IBKR."
-    });
-  } catch (error) {
-    response.status(502).json({
-      error: error.message,
-      paperPortfolio: buildPaperPortfolioResponseSafe()
+      paperPortfolio: buildPaperPortfolioResponseSafe(userId)
     });
   }
 });
 
 app.patch("/api/paper-orders/:id", async (request, response) => {
+  const userId = request.user.id;
   const orderId = Number(request.params.id);
 
   if (!Number.isInteger(orderId) || orderId <= 0) {
@@ -4432,7 +2392,7 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
     return;
   }
 
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
   if (!existingOrder) {
     response.status(404).json({
       error: "paper order not found"
@@ -4441,7 +2401,7 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
   }
 
   try {
-    const nextOrder = reconcileSmartEntryExecution(applyPaperOrderPatch(existingOrder.position, request.body));
+    const nextOrder = applyPaperOrderPatch(existingOrder.position, request.body);
     const updatedOrder = updatePaperOrder(orderId, nextOrder);
     const valuedPaperPortfolio = buildPaperPortfolio({
       orders: [updatedOrder],
@@ -4461,7 +2421,7 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
       ]);
     }
 
-    const paperPortfolio = buildPaperPortfolioResponse();
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
     invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
@@ -4477,7 +2437,296 @@ app.patch("/api/paper-orders/:id", async (request, response) => {
   }
 });
 
+app.post("/api/paper-orders/:id/legs/:legId/close", async (request, response) => {
+  const userId = request.user.id;
+  const orderId = Number(request.params.id);
+  const legId = String(request.params.legId ?? "").trim();
+
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    response.status(400).json({
+      error: "paper order id must be a positive integer"
+    });
+    return;
+  }
+
+  if (!legId) {
+    response.status(400).json({
+      error: "leg id is required"
+    });
+    return;
+  }
+
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
+  if (!existingOrder) {
+    response.status(404).json({
+      error: "paper order not found"
+    });
+    return;
+  }
+
+  if (String(existingOrder.position?.status ?? "open").toLowerCase() === "closed") {
+    response.status(400).json({
+      error: "paper order is already closed"
+    });
+    return;
+  }
+
+  const legs = Array.isArray(existingOrder.position?.legs) ? existingOrder.position.legs : [];
+  const existingLeg = legs.find((leg) => String(leg?.id ?? "") === legId) ?? null;
+
+  if (!existingLeg) {
+    response.status(404).json({
+      error: "paper order leg not found"
+    });
+    return;
+  }
+
+  if (String(existingLeg?.status ?? "open").trim().toLowerCase() === "closed") {
+    response.status(400).json({
+      error: "paper order leg is already closed"
+    });
+    return;
+  }
+
+  try {
+    const valuation = buildPaperPortfolio({
+      orders: [
+        {
+          ...existingOrder,
+          position: existingOrder.position
+        }
+      ],
+      quotes: liveState.quotes,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
+      optionMatches: buildPaperValuationOptionMatches()
+    });
+    const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0] ?? null;
+
+    if (!valuedOrder) {
+      throw new Error("Unable to value the paper order before closing the leg");
+    }
+
+    const valuedLeg = valuedOrder.legs.find((leg) => String(leg?.id ?? "") === legId) ?? null;
+    if (!valuedLeg) {
+      throw new Error("Unable to value the paper order leg before closing");
+    }
+
+    const hasClosedPrice = Object.prototype.hasOwnProperty.call(request.body ?? {}, "closedPrice");
+    const requestedClosedPrice =
+      hasClosedPrice && request.body?.closedPrice != null && String(request.body.closedPrice).trim() !== ""
+        ? Number(request.body.closedPrice)
+        : null;
+    const defaultClosedPrice = valuedLeg.currentPrice != null ? Number(valuedLeg.currentPrice) : null;
+    const closedPrice = Number.isFinite(requestedClosedPrice) ? requestedClosedPrice : defaultClosedPrice;
+
+    if (closedPrice == null || Number.isNaN(Number(closedPrice))) {
+      throw new Error("closedPrice must be a valid number");
+    }
+
+    const closedAt = normalizeTimestamp(request.body?.closedAt ?? new Date().toISOString()) || new Date().toISOString();
+    const closedDate = closedAt.slice(0, 10);
+
+    const nextOrder = sanitizePaperOrderPayload(
+      {
+        ...existingOrder.position,
+        legs: legs.map((leg) =>
+          String(leg?.id ?? "") === legId
+            ? {
+                ...leg,
+                status: "closed",
+                closedAt,
+                closedDate,
+                closedPrice,
+                closedExposure: null,
+                closedNetMarkedValue: null,
+                realizedProfitLossValue: null,
+                realizedProfitLossPercent: null
+              }
+            : leg
+        )
+      },
+      existingOrder.position
+    );
+
+    const allLegsClosed = (nextOrder.legs ?? []).every(
+      (leg) => String(leg?.status ?? "open").trim().toLowerCase() === "closed"
+    );
+
+    let updatedPayload = nextOrder;
+
+    if (allLegsClosed) {
+      const closeValuation = buildPaperPortfolio({
+        orders: [
+          {
+            ...existingOrder,
+            position: nextOrder
+          }
+        ],
+        quotes: liveState.quotes,
+        polymarketMarkets: getPaperValuationPolymarketMarkets(),
+        optionMatches: buildPaperValuationOptionMatches()
+      });
+      const valuedCloseOrder =
+        closeValuation.orders[0] ?? closeValuation.openOrders[0] ?? closeValuation.closedOrders[0] ?? null;
+
+      if (!valuedCloseOrder) {
+        throw new Error("Unable to value the paper order before closing");
+      }
+
+      updatedPayload = closePaperOrderPayload(updatedPayload, valuedCloseOrder, closedAt);
+    }
+
+    const updatedOrder = updatePaperOrder(orderId, updatedPayload);
+
+    const updatedValuation = buildPaperPortfolio({
+      orders: [updatedOrder],
+      quotes: liveState.quotes,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
+      optionMatches: buildPaperValuationOptionMatches()
+    });
+    const updatedValuedOrder =
+      updatedValuation.openOrders[0] ?? updatedValuation.orders[0] ?? updatedValuation.closedOrders[0] ?? null;
+
+    if (updatedValuedOrder) {
+      recordPaperOrderSnapshots([
+        buildPaperOrderSnapshot(
+          updatedValuedOrder,
+          allLegsClosed ? updatedPayload.closedAt : normalizeTimestamp(updatedOrder.updatedAt) || new Date().toISOString()
+        )
+      ]);
+    }
+
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
+    invalidateStrategyResponseCache();
+    syncPaperOptionStreamSubscriptions();
+    schedulePaperPortfolioBroadcast(0);
+
+    response.json({
+      order: updatedOrder,
+      paperPortfolio,
+      message: allLegsClosed ? "Leg closed. Order moved to history." : "Leg closed."
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error.message,
+      paperPortfolio: buildPaperPortfolioResponseSafe(userId)
+    });
+  }
+});
+
+app.post("/api/paper-orders/:id/legs/:legId/revive", async (request, response) => {
+  const userId = request.user.id;
+  const orderId = Number(request.params.id);
+  const legId = String(request.params.legId ?? "").trim();
+
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    response.status(400).json({
+      error: "paper order id must be a positive integer"
+    });
+    return;
+  }
+
+  if (!legId) {
+    response.status(400).json({
+      error: "leg id is required"
+    });
+    return;
+  }
+
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
+  if (!existingOrder) {
+    response.status(404).json({
+      error: "paper order not found"
+    });
+    return;
+  }
+
+  const legs = Array.isArray(existingOrder.position?.legs) ? existingOrder.position.legs : [];
+  const existingLeg = legs.find((leg) => String(leg?.id ?? "") === legId) ?? null;
+
+  if (!existingLeg) {
+    response.status(404).json({
+      error: "paper order leg not found"
+    });
+    return;
+  }
+
+  const legStatus = String(
+    existingLeg?.status ??
+      (existingLeg?.closedAt || existingLeg?.closedDate || existingLeg?.closedPrice != null ? "closed" : "open")
+  )
+    .trim()
+    .toLowerCase();
+
+  if (legStatus !== "closed") {
+    response.status(400).json({
+      error: "paper order leg is not closed"
+    });
+    return;
+  }
+
+  try {
+    const orderStatus = String(existingOrder.position?.status ?? "open").trim().toLowerCase();
+    const revivedOrder = sanitizePaperOrderPayload(
+      {
+        ...existingOrder.position,
+        ...(orderStatus === "closed" ? { status: "open" } : {}),
+        legs: legs.map((leg) =>
+          String(leg?.id ?? "") === legId
+            ? {
+                ...leg,
+                status: "open",
+                closedAt: null,
+                closedDate: null,
+                closedPrice: null,
+                closedExposure: null,
+                closedNetMarkedValue: null,
+                realizedProfitLossValue: null,
+                realizedProfitLossPercent: null
+              }
+            : leg
+        )
+      },
+      existingOrder.position
+    );
+
+    const updatedOrder = updatePaperOrder(orderId, revivedOrder);
+
+    const updatedValuation = buildPaperPortfolio({
+      orders: [updatedOrder],
+      quotes: liveState.quotes,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
+      optionMatches: buildPaperValuationOptionMatches()
+    });
+    const updatedValuedOrder =
+      updatedValuation.openOrders[0] ?? updatedValuation.orders[0] ?? updatedValuation.closedOrders[0] ?? null;
+
+    if (updatedValuedOrder && !updatedValuedOrder.isClosed) {
+      recordPaperOrderSnapshots([
+        buildPaperOrderSnapshot(updatedValuedOrder, normalizeTimestamp(updatedOrder.updatedAt) || new Date().toISOString())
+      ]);
+    }
+
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
+    invalidateStrategyResponseCache();
+    syncPaperOptionStreamSubscriptions();
+    schedulePaperPortfolioBroadcast(0);
+
+    response.json({
+      order: updatedOrder,
+      paperPortfolio,
+      message: "Leg revived."
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error.message,
+      paperPortfolio: buildPaperPortfolioResponseSafe(userId)
+    });
+  }
+});
+
 app.post("/api/paper-orders/:id/close", async (request, response) => {
+  const userId = request.user.id;
   const orderId = Number(request.params.id);
 
   if (!Number.isInteger(orderId) || orderId <= 0) {
@@ -4487,7 +2736,7 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
     return;
   }
 
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
   if (!existingOrder) {
     response.status(404).json({
       error: "paper order not found"
@@ -4504,299 +2753,6 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
 
   try {
     const patchedOrder = applyPaperOrderPatch(existingOrder.position, request.body);
-
-    if (isIbkrPaperRoute(patchedOrder)) {
-      const optionQuantity = (patchedOrder.legs ?? [])
-        .filter((leg) => leg?.kind === "option")
-        .reduce((sum, leg) => sum + Math.max(Number(leg.quantity ?? 0) || 0, 0), 0);
-
-      if (!(optionQuantity > 0)) {
-        const valuation = buildPaperPortfolio({
-          orders: [
-            {
-              ...existingOrder,
-              position: patchedOrder
-            }
-          ],
-          quotes: liveState.quotes,
-          polymarketMarkets: getPaperValuationPolymarketMarkets(),
-          optionMatches: buildPaperValuationOptionMatches()
-        });
-        const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0];
-
-        if (!valuedOrder) {
-          throw new Error("Unable to value the paper order before closing");
-        }
-
-        const closedOrder = closePaperOrderPayload(
-          {
-            ...patchedOrder,
-            closeExecution: null
-          },
-          valuedOrder
-        );
-        const updatedOrder = updatePaperOrder(orderId, closedOrder);
-        recordPaperOrderSnapshots([
-          buildPaperOrderSnapshot(
-            {
-              ...valuedOrder,
-              status: "closed"
-            },
-            closedOrder.closedAt
-          )
-        ]);
-        const paperPortfolio = buildPaperPortfolioResponse();
-        invalidateStrategyResponseCache();
-        syncPaperOptionStreamSubscriptions();
-        schedulePaperPortfolioBroadcast(0);
-
-        response.json({
-          order: updatedOrder,
-          paperPortfolio,
-          message: "No IBKR option position to close. Order closed locally."
-        });
-        return;
-      }
-
-      const submission = await submitIbkrOptionOrder({
-        order: {
-          ...patchedOrder,
-          id: orderId
-        },
-        purpose: "exit"
-      });
-      const updatedOrder = updatePaperOrder(
-        orderId,
-        sanitizePaperOrderPayload(
-          {
-            ...patchedOrder,
-            closeExecution: mapCloseExecutionToRoute(submission, patchedOrder)
-          },
-          patchedOrder
-        )
-      );
-      await refreshIbkrStatusCache().catch(() => null);
-      invalidateStrategyResponseCache();
-      syncPaperOptionStreamSubscriptions();
-      schedulePaperPortfolioBroadcast(0);
-
-      response.json({
-        order: updatedOrder,
-        paperPortfolio: buildPaperPortfolioResponse(),
-        message: buildIbkrSubmissionMessage(submission, "exit")
-      });
-      return;
-    }
-
-    if (isTwsPaperRoute(patchedOrder)) {
-      const entryStatus = String(patchedOrder.execution?.status ?? "").trim().toLowerCase();
-
-      if (entryStatus !== "filled") {
-        throw new Error("TWS entry order is not filled yet. Wait for the fill before moving it to closed history.");
-      }
-
-      if (paperBrokerState.tws.connected !== true || paperBrokerState.tws.ready !== true) {
-        const valuation = buildPaperPortfolio({
-          orders: [
-            {
-              ...existingOrder,
-              position: patchedOrder
-            }
-          ],
-          quotes: liveState.quotes,
-          polymarketMarkets: getPaperValuationPolymarketMarkets(),
-          optionMatches: buildPaperValuationOptionMatches()
-        });
-        const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0];
-
-        if (!valuedOrder) {
-          throw new Error("Unable to value the paper order before closing");
-        }
-
-        const closedOrder = closePaperOrderPayload(
-          {
-            ...patchedOrder,
-            closeExecution: null
-          },
-          valuedOrder
-        );
-        const updatedOrder = updatePaperOrder(orderId, closedOrder);
-        recordPaperOrderSnapshots([buildPaperOrderSnapshot({ ...valuedOrder, status: "closed" }, closedOrder.closedAt)]);
-        const paperPortfolio = buildPaperPortfolioResponse();
-        invalidateStrategyResponseCache();
-        syncPaperOptionStreamSubscriptions();
-        schedulePaperPortfolioBroadcast(0);
-
-        response.json({
-          order: updatedOrder,
-          paperPortfolio,
-          message: "Order moved to closed history (TWS disconnected)."
-        });
-        return;
-      }
-
-      const optionLegs = (patchedOrder.legs ?? []).filter((leg) => leg?.kind === "option");
-      const closeSideByConid = new Map();
-      const closeQuantityByConid = new Map();
-
-      optionLegs.forEach((leg) => {
-        const conid = String(leg?.brokerConid ?? "").trim();
-        if (!conid) {
-          return;
-        }
-
-        const quantity = Math.max(Number(leg.quantity ?? 0) || 0, 0);
-        if (!(quantity > 0)) {
-          return;
-        }
-
-        closeSideByConid.set(
-          conid,
-          String(leg.action ?? "LONG").trim().toUpperCase() === "SHORT" ? "BUY" : "SELL"
-        );
-        closeQuantityByConid.set(conid, quantity);
-      });
-
-      if (!closeSideByConid.size) {
-        throw new Error("No filled option position is available to close for this TWS-routed order.");
-      }
-
-      const since =
-        patchedOrder.execution?.filledAt ||
-        patchedOrder.execution?.submittedAt ||
-        normalizeTimestamp(existingOrder.createdAt) ||
-        new Date().toISOString();
-      const executions = await twsPaperApi.fetchExecutions({
-        since
-      });
-
-      const closeTrades = (executions ?? [])
-        .map((item) => {
-          const conid = String(item?.contract?.conId ?? item?.contract?.conid ?? "").trim();
-          if (!conid || !closeSideByConid.has(conid)) {
-            return null;
-          }
-
-          const rawSide = String(item?.exec?.side ?? "").trim().toUpperCase();
-          const side = rawSide === "BOT" ? "BUY" : rawSide === "SLD" ? "SELL" : rawSide;
-          if (side !== closeSideByConid.get(conid)) {
-            return null;
-          }
-
-          return {
-            conid,
-            quantity: Math.abs(Number(item?.exec?.shares ?? 0) || 0),
-            price: Number(item?.exec?.price ?? 0) || 0,
-            execution_time: String(item?.time ?? normalizeTimestamp(item?.exec?.time ?? "") ?? "")
-          };
-        })
-        .filter((trade) => trade && trade.conid && trade.quantity > 0);
-
-      const tradeFillMap = buildTradeFillMap(closeTrades);
-      const missingCloseFills = [];
-
-      closeQuantityByConid.forEach((requiredQuantity, conid) => {
-        const fill = tradeFillMap.get(String(conid));
-        if (!fill || !(fill.quantity > 0)) {
-          missingCloseFills.push(conid);
-          return;
-        }
-
-        if (fill.quantity + 0.000001 < requiredQuantity) {
-          missingCloseFills.push(conid);
-        }
-      });
-
-      if (missingCloseFills.length) {
-        throw new Error(
-          `No TWS close fills found for ${missingCloseFills.length} leg(s). Close the position(s) in TWS first, then try again.`
-        );
-      }
-
-      const latestTradeTimestamp = [...tradeFillMap.values()]
-        .map((fill) => fill.latestAt)
-        .filter(Boolean)
-        .sort()
-        .slice(-1)[0];
-      const closedAt = latestTradeTimestamp || new Date().toISOString();
-
-      const valuation = buildPaperPortfolio({
-        orders: [
-          {
-            ...existingOrder,
-            position: patchedOrder
-          }
-        ],
-        quotes: liveState.quotes,
-        polymarketMarkets: getPaperValuationPolymarketMarkets(),
-        optionMatches: buildPaperValuationOptionMatches()
-      });
-      const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0];
-
-      if (!valuedOrder) {
-        throw new Error("Unable to value the paper order before closing");
-      }
-
-      let closedOrder = closePaperOrderPayload(
-        {
-          ...patchedOrder,
-          closeExecution: {
-            route: "tws-paper",
-            purpose: "exit",
-            status: "filled",
-            statusText: "Closed in TWS",
-            accountId: paperBrokerState.tws.selectedAccount ?? patchedOrder.execution?.accountId ?? "",
-            isPaper: paperBrokerState.tws.isPaper === true,
-            orderType: "MKT",
-            tif: "DAY",
-            outsideRth: false,
-            limitPrice: null,
-            avgFillPrice: null,
-            combo: patchedOrder.execution?.combo === true,
-            filledAt: closedAt,
-            lastSyncAt: new Date().toISOString(),
-            requestedLegs:
-              patchedOrder.execution?.requestedLegs && Array.isArray(patchedOrder.execution.requestedLegs)
-                ? patchedOrder.execution.requestedLegs
-                : buildRequestedExecutionLegs(patchedOrder)
-          }
-        },
-        valuedOrder,
-        closedAt
-      );
-      closedOrder = applyBrokerClosePrices(closedOrder, tradeFillMap);
-
-      const updatedOrder = updatePaperOrder(orderId, closedOrder);
-      const closedValuation = buildPaperPortfolio({
-        orders: [updatedOrder],
-        quotes: liveState.quotes,
-        polymarketMarkets: getPaperValuationPolymarketMarkets(),
-        optionMatches: buildPaperValuationOptionMatches()
-      });
-      const valuedClosedOrder =
-        closedValuation.closedOrders[0] ?? closedValuation.orders[0] ?? closedValuation.openOrders[0] ?? null;
-
-      if (valuedClosedOrder) {
-        recordPaperOrderSnapshots([buildPaperOrderSnapshot(valuedClosedOrder, closedOrder.closedAt)]);
-      }
-      const paperPortfolio = buildPaperPortfolioResponse();
-      paperBrokerState.tws = {
-        ...paperBrokerState.tws,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncError: null
-      };
-      syncStrategyCacheBrokerStatus();
-      invalidateStrategyResponseCache();
-      syncPaperOptionStreamSubscriptions();
-      schedulePaperPortfolioBroadcast(0);
-
-      response.json({
-        order: updatedOrder,
-        paperPortfolio,
-        message: "TWS order moved to closed history."
-      });
-      return;
-    }
 
     const valuation = buildPaperPortfolio({
       orders: [
@@ -4817,16 +2773,24 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
 
     const closedOrder = closePaperOrderPayload(patchedOrder, valuedOrder);
     const updatedOrder = updatePaperOrder(orderId, closedOrder);
-    recordPaperOrderSnapshots([
-      buildPaperOrderSnapshot(
-        {
-          ...valuedOrder,
-          status: "closed"
-        },
-        closedOrder.closedAt
-      )
-    ]);
-    const paperPortfolio = buildPaperPortfolioResponse();
+    const closedValuation = buildPaperPortfolio({
+      orders: [updatedOrder],
+      quotes: liveState.quotes,
+      polymarketMarkets: getPaperValuationPolymarketMarkets(),
+      optionMatches: buildPaperValuationOptionMatches()
+    });
+    const valuedClosedOrder =
+      closedValuation.closedOrders[0] ??
+      closedValuation.orders[0] ??
+      closedValuation.openOrders[0] ??
+      null;
+
+    if (valuedClosedOrder) {
+      recordPaperOrderSnapshots([buildPaperOrderSnapshot(valuedClosedOrder, closedOrder.closedAt)]);
+    } else {
+      recordPaperOrderSnapshots([buildPaperOrderSnapshot({ ...valuedOrder, status: "closed" }, closedOrder.closedAt)]);
+    }
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
     invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
@@ -4843,6 +2807,7 @@ app.post("/api/paper-orders/:id/close", async (request, response) => {
 });
 
 app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response) => {
+  const userId = request.user.id;
   const orderId = Number(request.params.id);
 
   if (!Number.isInteger(orderId) || orderId <= 0) {
@@ -4852,7 +2817,7 @@ app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response)
     return;
   }
 
-  const existingOrder = listPaperOrders().find((order) => Number(order.id) === orderId);
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
   if (!existingOrder) {
     response.status(404).json({
       error: "paper order not found"
@@ -4876,7 +2841,7 @@ app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response)
         "Calculator snapshot",
       payload
     );
-    const paperPortfolio = buildPaperPortfolioResponse();
+    const paperPortfolio = buildPaperPortfolioResponse(userId);
     invalidateStrategyResponseCache();
     syncPaperOptionStreamSubscriptions();
     schedulePaperPortfolioBroadcast(0);
@@ -4893,11 +2858,20 @@ app.post("/api/paper-orders/:id/calculator-snapshots", async (request, response)
 });
 
 app.delete("/api/paper-orders/:id", async (request, response) => {
+  const userId = request.user.id;
   const orderId = Number(request.params.id);
 
   if (!Number.isInteger(orderId) || orderId <= 0) {
     response.status(400).json({
       error: "paper order id must be a positive integer"
+    });
+    return;
+  }
+
+  const existingOrder = listPaperOrders(null, userId).find((order) => Number(order.id) === orderId);
+  if (!existingOrder) {
+    response.status(404).json({
+      error: "paper order not found"
     });
     return;
   }
@@ -4913,7 +2887,7 @@ app.delete("/api/paper-orders/:id", async (request, response) => {
 
   deletePaperOrderSnapshots(orderId);
   deletePaperCalculatorSnapshots(orderId);
-  const paperPortfolio = buildPaperPortfolioResponse();
+  const paperPortfolio = buildPaperPortfolioResponse(userId);
   invalidateStrategyResponseCache();
   syncPaperOptionStreamSubscriptions();
   schedulePaperPortfolioBroadcast(0);
@@ -4955,14 +2929,6 @@ try {
 refreshCalendarState().catch((error) => {
   liveState.calendarWarnings = [`Calendar refresh failed: ${error.message}`];
 });
-refreshIbkrStatusCache().catch((error) => {
-  paperBrokerState.ibkr = {
-    ...paperBrokerState.ibkr,
-    configured: true,
-    error: error.message,
-    updatedAt: new Date().toISOString()
-  };
-});
 setInterval(() => {
   refreshLiveState({ includeOptions: true }).catch((error) => {
     liveState.warnings = [`Refresh failed: ${error.message}`];
@@ -4981,41 +2947,16 @@ setInterval(() => {
   });
 }, CALENDAR_REFRESH_MS);
 setInterval(() => {
-  paperStreamClients.forEach((client) => {
-    client.write(": heartbeat\n\n");
-  });
-}, PAPER_STREAM_HEARTBEAT_MS);
-setInterval(() => {
-  refreshIbkrStatusCache().catch(() => null);
-  syncIbkrPaperOrders().catch(() => null);
-}, IBKR_SYNC_INTERVAL_MS);
-setInterval(() => {
-  if (paperBrokerState.tws.connected !== true) {
-    return;
+  for (const clients of paperStreamClientsByUserId.values()) {
+    clients.forEach((client) => {
+      client.write(": heartbeat\n\n");
+    });
   }
 
-  twsPaperApi
-    .requestAllOpenOrders()
-    .then(() => {
-      paperBrokerState.tws = {
-        ...paperBrokerState.tws,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncError: null
-      };
-      syncStrategyCacheBrokerStatus();
-      schedulePaperPortfolioBroadcast(0);
-    })
-    .catch((error) => {
-      paperBrokerState.tws = {
-        ...paperBrokerState.tws,
-        lastSyncAt: new Date().toISOString(),
-        lastSyncError: error.message
-      };
-      syncStrategyCacheBrokerStatus();
-      schedulePaperPortfolioBroadcast(0);
-    });
-}, TWS_SYNC_INTERVAL_MS);
-
+  if (paperStreamClientsByUserId.size) {
+    schedulePaperPortfolioBroadcast(0);
+  }
+}, PAPER_STREAM_HEARTBEAT_MS);
 app.listen(port, () => {
   console.log(`HedgeHub listening on http://localhost:${port}`);
 });

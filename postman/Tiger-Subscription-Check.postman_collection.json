@@ -1,0 +1,656 @@
+{
+  "info": {
+    "name": "HedgeHub · Tiger Read-Only Subscription Check",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Tests the implemented local Python SDK bridge, not Tiger native HTTP APIs. Start tiger-bridge/app.py first. No orders, subscription purchases or credential changes. See Tiger-Subscription-Check.zh-CN.md."
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{tigerBridgeToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "01 · Bridge health / 本地连接",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/health",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Only checks local bridge configuration; does not validate Tiger credentials or subscriptions."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Read-only bridge configured', () => { pm.expect(body.data.readOnly).to.eql(true); pm.expect(body.data.configured).to.eql(true); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 · Permissions and quota / 实际 API 权限",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/permissions",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "permissions"
+          ]
+        },
+        "description": "Inspect data.permissions and data.quota. An empty permission list is not proof of access. Confirm each actual endpoint below; do not buy duplicate subscriptions based only on App labels."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Permission and quota fields present', () => { pm.expect(body.data).to.have.property('permissions'); pm.expect(body.data).to.have.property('quota'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 · US market session / 市场状态",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/session",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "session"
+          ]
+        },
+        "description": ""
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 · Stock quote / 股票报价",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/quotes?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "quotes"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Inspect latest_time/time. HTTP 200 alone does not establish that the quote is real-time. Compare during US market hours."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Positive underlying price returned', () => { pm.expect(body.data).to.be.an('array').that.is.not.empty; pm.expect(Number(body.data[0].latest_price)).to.be.above(0); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 · Option expirations / 自动选择到期日",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/options/expirations?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "options",
+            "expirations"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Automatically selects the first future expiry and clears the previous contract. Run again after changing symbol. You may then edit expiry manually before request 06."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.environment.unset('expiry'); pm.environment.unset('contractSymbol');",
+              "const today = new Date().toISOString().slice(0, 10);",
+              "const expiries = (Array.isArray(body.data) ? body.data : []).map(x => x.date).filter(x => typeof x === 'string' && /^\\d{4}-\\d{2}-\\d{2}$/.test(x) && x > today).sort();",
+              "pm.test('Future expiry available', () => pm.expect(expiries.length).to.be.above(0));",
+              "if (expiries.length) pm.environment.set('expiry', expiries[0]);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 · Option chain / 自动选择期权合约",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/options/chain?symbol={{symbol}}&expiry={{expiry}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "options",
+            "chain"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            },
+            {
+              "key": "expiry",
+              "value": "{{expiry}}"
+            }
+          ]
+        },
+        "description": "Selects a positive, uncrossed bid/ask contract of optionType, prioritising volume. This is only a test sample, not a trade recommendation. Inspect IV, volume and open interest separately."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.environment.unset('contractSymbol');",
+              "const side = String(pm.environment.get('optionType') || 'put').toLowerCase();",
+              "const rows = (Array.isArray(body.data) ? body.data : []).filter(x => String(x.put_call).toLowerCase() === side && x.identifier && Number(x.bid_price) > 0 && Number(x.ask_price) >= Number(x.bid_price)).sort((a,b) => Number(b.volume || 0)-Number(a.volume || 0));",
+              "pm.test('Contract with valid bid/ask found', () => pm.expect(rows.length).to.be.above(0));",
+              "if (rows.length) pm.environment.set('contractSymbol', rows[0].identifier);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 · Option bid/ask timestamps / 期权盘口时效",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/options/depth?symbol={{symbol}}&contract={{contractSymbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "options",
+            "depth"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            },
+            {
+              "key": "contract",
+              "value": "{{contractSymbol}}"
+            }
+          ]
+        },
+        "description": "The bridge uses get_option_depth for quote timestamps. Turn requireFreshQuotes=true during active US trading. Old quotes after close do not by themselves indicate missing permission."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "const id = pm.environment.get('contractSymbol');",
+              "const depth = body.data && (body.data[id] || (body.data.identifier === id ? body.data : null));",
+              "const bids = (depth?.bids || []).filter(x => Number(x[0]) > 0 && Number(x[1]) > 0).sort((a,b)=>Number(b[0])-Number(a[0]));",
+              "const asks = (depth?.asks || []).filter(x => Number(x[0]) > 0 && Number(x[1]) > 0).sort((a,b)=>Number(a[0])-Number(b[0]));",
+              "pm.test('Positive uncrossed option market', () => { pm.expect(bids.length).to.be.above(0); pm.expect(asks.length).to.be.above(0); pm.expect(Number(asks[0][0])).to.be.at.least(Number(bids[0][0])); });",
+              "function ms(v) { const n=Number(v); if(!Number.isFinite(n)||n<=0)return NaN; return n>1e17?n/1e6:n>1e14?n/1e3:n<1e11?n*1e3:n; }",
+              "const stamp = Math.min(ms(bids[0]?.[2]), ms(asks[0]?.[2]));",
+              "pm.test('Bid/ask timestamp provided', () => pm.expect(Number.isFinite(stamp)).to.eql(true));",
+              "if (pm.environment.get('requireFreshQuotes') === 'true') pm.test('Both sides updated within 90 seconds', () => { const age=Date.now()-stamp; pm.expect(age).to.be.within(-5000,90000); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 · Daily bars / 历史价格",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/bars?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "bars"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Tests historical access/quota separately from real-time quote entitlement."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Historical rows returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "09 · IV history / 波动率历史",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/options/analysis?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "options",
+            "analysis"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Missing history may be symbol-specific or entitlement-related; a successful quote test does not establish IV history access."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('IV analysis returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);",
+              "pm.test('IV history available', () => pm.expect(body.data?.[0]?.volatility_list).to.be.an('array').that.is.not.empty);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "10 · Fundamentals / 基本面权限",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/fundamentals?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "fundamentals"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Additional fundamental-data permission may be required. Contact Tiger support before purchasing any upgrade."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Fundamentals returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "11 · Financial reports / 财务报表权限",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/financials?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "financials"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Use a company such as AAPL for this test, not an ETF."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Financial report history returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "12 · Historical valuation / 历史估值权限",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/valuation?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "valuation"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": ""
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });",
+              "pm.test('Valuation history returned', () => pm.expect(body.data).to.be.an('array').that.is.not.empty);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "13 · Earnings / 财报日历",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/events?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "events"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "An empty calendar is not proof of no upcoming earnings."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "14 · Dividends / 分红日历",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/dividends?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "dividends"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "An empty result may be normal; it is not necessarily an entitlement failure."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "15 · Classified flow / 资金流数据",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{tigerBridgeUrl}}/flow?symbol={{symbol}}",
+          "host": [
+            "{{tigerBridgeUrl}}"
+          ],
+          "path": [
+            "flow"
+          ],
+          "query": [
+            {
+              "key": "symbol",
+              "value": "{{symbol}}"
+            }
+          ]
+        },
+        "description": "Provider-classified flow, not social sentiment or verified institutional buying."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Timestamped bridge response', () => { pm.expect(body).to.have.property('data'); pm.expect(Number.isFinite(Date.parse(body.fetchedAt))).to.eql(true); });"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

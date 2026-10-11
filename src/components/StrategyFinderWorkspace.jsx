@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import EntryResearchPanel from "./EntryResearchPanel.jsx";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   CartesianGrid,
@@ -10,8 +11,6 @@ import {
   YAxis
 } from "recharts";
 import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
-import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
-import { isTwsReady } from "../twsStatus.js";
 import { createMarketTimerContext } from "../marketTimers.js";
 import { getChartPalette } from "../theme.js";
 import {
@@ -26,10 +25,95 @@ import {
   projectPolymarketTargetProxySpot,
   resolvePolymarketSignal
 } from "../../shared/polymarketSignals.js";
+import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
+
+const OPTION_CHAIN_SIDE_COLUMNS = [
+  { key: "bid", label: "Bid", kind: "price" },
+  { key: "ask", label: "Ask", kind: "price" },
+  { key: "bidSize", label: "Bid x", kind: "count" },
+  { key: "askSize", label: "Ask x", kind: "count" },
+  { key: "mark", label: "Mark", kind: "select" },
+  { key: "changePercent", label: "Chg%", kind: "percent" },
+  { key: "volume", label: "Vol", kind: "count" },
+  { key: "openInterest", label: "OI", kind: "count" },
+  { key: "impliedVolatility", label: "IV", kind: "percent", scale: 100, digits: 2 },
+  { key: "delta", label: "Δ", kind: "number", digits: 3 },
+  { key: "gamma", label: "Γ", kind: "number", digits: 4 },
+  { key: "theta", label: "Θ", kind: "number", digits: 3 },
+  { key: "vega", label: "Vega", kind: "number", digits: 3 },
+  { key: "rho", label: "Rho", kind: "number", digits: 3 },
+  { key: "intrinsicValue", label: "Intrinsic", kind: "price" },
+  { key: "timeValue", label: "Time", kind: "price" },
+  { key: "premiumPercent", label: "Premium%", kind: "percent" },
+  { key: "lastPrice", label: "Last", kind: "price" }
+];
+const OPTION_CHAIN_CALL_COLUMNS = [...OPTION_CHAIN_SIDE_COLUMNS].reverse();
+const LIVE_OPTION_QUOTES_POLL_MS = 5000;
+const MAX_OPTION_CHAIN_CACHE_ENTRIES = 8;
+const MAX_FINDER_DETAIL_CACHE_ENTRIES = 1;
+
+function writeBoundedCacheRecord(current, key, value, maxEntries) {
+  const normalizedKey = String(key ?? "").trim();
+  if (!normalizedKey) {
+    return current && typeof current === "object" ? { ...current } : {};
+  }
+
+  const entries = Object.entries(current ?? {}).filter(([entryKey]) => entryKey !== normalizedKey);
+  entries.push([normalizedKey, value]);
+
+  return Object.fromEntries(entries.slice(-Math.max(Number(maxEntries) || 0, 0)));
+}
+
+function retainCacheEntries(current, keys) {
+  const allowedKeys = new Set((keys ?? []).map((key) => String(key ?? "").trim()).filter(Boolean));
+  if (!allowedKeys.size) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(current ?? {}).filter(([entryKey]) => allowedKeys.has(String(entryKey ?? "").trim()))
+  );
+}
+
+function normalizeStrategyDirection(value) {
+  return String(value ?? "").trim().toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+}
+
+function inferStrategyDirection(strategyType) {
+  const normalized = String(strategyType ?? "").trim().toLowerCase();
+  if (normalized.startsWith("short")) {
+    return "SHORT";
+  }
+
+  if (normalized.startsWith("long")) {
+    return "LONG";
+  }
+
+  return "LONG";
+}
+
+function formatStrategyTypeForDirection(strategyType, direction) {
+  const normalizedDirection = normalizeStrategyDirection(direction);
+  const raw = String(strategyType ?? "").trim();
+  const rawLower = raw.toLowerCase();
+  const baseLabel = rawLower.startsWith("long ") ? raw.slice(5) : rawLower.startsWith("short ") ? raw.slice(6) : raw;
+  const prefix = normalizedDirection === "SHORT" ? "Short" : "Long";
+  const core = baseLabel.trim();
+  if (!core) {
+    return prefix;
+  }
+
+  return `${prefix} ${core}`;
+}
+
+function invertPositionAction(action) {
+  return String(action ?? "").trim().toUpperCase() === "SHORT" ? "LONG" : "SHORT";
+}
 
 function normalCdf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  const absX = Math.abs(x);
+  const scaledX = x / Math.SQRT2;
+  const sign = scaledX >= 0 ? 1 : -1;
+  const absX = Math.abs(scaledX);
   const a1 = 0.254829592;
   const a2 = -0.284496736;
   const a3 = 1.421413741;
@@ -131,6 +215,29 @@ function formatNumber(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function formatQuotePrice(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return "n/a";
+  }
+
+  const digits = Math.abs(numericValue) < 1 ? 4 : 2;
+  return numericValue.toFixed(digits);
+}
+
+function formatShortTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).format(date);
+}
+
 function gcd(left, right) {
   const a = Math.abs(Math.round(left));
   const b = Math.abs(Math.round(right));
@@ -152,66 +259,6 @@ function gcd(left, right) {
   }
 
   return currentLeft;
-}
-
-function calculateIbkrNetLimitPrice(optionLegs) {
-  const normalizedLegs = (optionLegs ?? []).filter((leg) => Number(leg?.quantity ?? 0) > 0);
-  if (!normalizedLegs.length) {
-    return null;
-  }
-
-  if (normalizedLegs.length === 1) {
-    return Number(normalizedLegs[0].entryPrice ?? 0) || 0;
-  }
-
-  const comboQuantity = normalizedLegs.reduce(
-    (current, leg) => gcd(current, Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0)),
-    0
-  );
-  const normalizedComboQuantity = comboQuantity || 1;
-
-  return normalizedLegs.reduce((sum, leg) => {
-    const ratio = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0) / normalizedComboQuantity || 1;
-    const signedPrice =
-      leg.action === "SHORT" ? -(Number(leg.entryPrice ?? 0) || 0) : Number(leg.entryPrice ?? 0) || 0;
-    return sum + (signedPrice * ratio);
-  }, 0);
-}
-
-function parseLimitPriceCents(value) {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) {
-    return null;
-  }
-
-  return Math.round(numericValue * 100);
-}
-
-function formatLimitPriceCents(value) {
-  return (Number(value ?? 0) / 100).toFixed(2);
-}
-
-function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
-  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
-  if (anchorCents == null) {
-    return [];
-  }
-
-  const windowOffsets = 10;
-  const priceCents = new Set();
-
-  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
-    priceCents.add(anchorCents + offset);
-  }
-
-  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
-  if (selectedCents != null) {
-    priceCents.add(selectedCents);
-  }
-
-  return Array.from(priceCents)
-    .sort((left, right) => left - right)
-    .map(formatLimitPriceCents);
 }
 
 function formatWholeNumber(value) {
@@ -324,6 +371,47 @@ function buildOptionLiquidityMeta(leg) {
   return liquidityParts.join(" · ");
 }
 
+function getFinderMidPrice(row) {
+  const bid = Number(row?.bid);
+  const ask = Number(row?.ask);
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+    return null;
+  }
+
+  return (bid + ask) / 2;
+}
+
+function getFinderMidMinusTheo(row) {
+  const averagePrice = getFinderMidPrice(row);
+  const theoreticalPrice = Number(row?.theoPrice);
+  if (!Number.isFinite(averagePrice) || !Number.isFinite(theoreticalPrice)) {
+    return null;
+  }
+
+  return averagePrice - theoreticalPrice;
+}
+
+function getFinderMidMinusTheoTone(row) {
+  const averagePrice = getFinderMidPrice(row);
+  const theoreticalPrice = Number(row?.theoPrice);
+  if (!Number.isFinite(averagePrice) || !Number.isFinite(theoreticalPrice)) {
+    return "";
+  }
+
+  const bothPositive = averagePrice > 0 && theoreticalPrice > 0;
+  const bothNegative = averagePrice < 0 && theoreticalPrice < 0;
+
+  if (bothPositive) {
+    return theoreticalPrice < averagePrice ? "negative" : "positive";
+  }
+
+  if (bothNegative) {
+    return theoreticalPrice > averagePrice ? "positive" : "negative";
+  }
+
+  return theoreticalPrice >= averagePrice ? "positive" : "negative";
+}
+
 function compareValues(left, right, direction) {
   if (left == null && right == null) {
     return 0;
@@ -417,6 +505,27 @@ function addDays(dateValue, days) {
 
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+function buildWeeklyExpiryTabs(anchorIso, { pastWeeks = 4, futureWeeks = 12 } = {}) {
+  if (!anchorIso) {
+    return [];
+  }
+
+  const anchor = parseIsoDate(anchorIso);
+  if (!anchor) {
+    return [];
+  }
+
+  const dates = new Set();
+  for (let weekOffset = -pastWeeks; weekOffset <= futureWeeks; weekOffset += 1) {
+    const next = addDays(anchorIso, weekOffset * 7);
+    if (next) {
+      dates.add(next);
+    }
+  }
+
+  return Array.from(dates).sort();
 }
 
 function clamp(value, min, max) {
@@ -669,7 +778,15 @@ function resolveDateRangeForRows(range, rows = []) {
 }
 
 function buildSelectionSummary(selectedItems, allItems, fallbackLabel) {
-  if (!allItems.length || selectedItems.length === allItems.length) {
+  if (!allItems.length) {
+    return fallbackLabel;
+  }
+
+  if (selectedItems.length === 0) {
+    return `${fallbackLabel} (none)`;
+  }
+
+  if (selectedItems.length === allItems.length) {
     return fallbackLabel;
   }
 
@@ -702,19 +819,77 @@ function formatFilterThreshold(value) {
   }).format(numericValue);
 }
 
-function buildPnlFilterSummary({ maxProfitMin, maxProfitMax, maxLossMin, maxLossMax }) {
-  const activeFilters = [
-    maxLossMin != null ? `Max loss >= ${formatFilterThreshold(maxLossMin)}` : null,
-    maxLossMax != null ? `Max loss <= ${formatFilterThreshold(maxLossMax)}` : null,
-    maxProfitMin != null ? `Max profit >= ${formatFilterThreshold(maxProfitMin)}` : null,
-    maxProfitMax != null ? `Max profit <= ${formatFilterThreshold(maxProfitMax)}` : null
-  ].filter(Boolean);
-
-  if (!activeFilters.length) {
-    return "P&L filters";
+function formatSignedPercentLabel(value, digits = 0) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
   }
 
-  return activeFilters.length === 1 ? activeFilters[0] : `P&L filters (${activeFilters.length})`;
+  return `${numericValue > 0 ? "+" : ""}${numericValue.toFixed(digits)}%`;
+}
+
+function formatFilterPercent(value, digits = 1) {
+  if (value == null) {
+    return null;
+  }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return null;
+  }
+
+  return `${numericValue.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: digits
+  })}%`;
+}
+
+function formatFilterNumber(value, digits = 2) {
+  if (value == null) {
+    return null;
+  }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  return numericValue.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  });
+}
+
+function formatFilterCount(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return null;
+  }
+
+  return formatCompactCount(numericValue);
+}
+
+function buildMetricRangeSummary({ label, min, max, formatValue }) {
+  if (min == null && max == null) {
+    return label;
+  }
+
+  const minLabel = min != null ? formatValue(min) : null;
+  const maxLabel = max != null ? formatValue(max) : null;
+
+  if (minLabel && maxLabel) {
+    return `${label} ${minLabel} - ${maxLabel}`;
+  }
+
+  if (minLabel) {
+    return `${label} ≥ ${minLabel}`;
+  }
+
+  if (maxLabel) {
+    return `${label} ≤ ${maxLabel}`;
+  }
+
+  return label;
 }
 
 function buildQuoteSizeFilterSummary(threshold, quoteSizeDataAvailable = true) {
@@ -726,19 +901,24 @@ function buildQuoteSizeFilterSummary(threshold, quoteSizeDataAvailable = true) {
   return thresholdLabel ? `Bid/ask size > ${thresholdLabel}` : "Bid/ask size";
 }
 
-function buildSourceFilterSummary(sourceFilter) {
-  if (sourceFilter === "live") {
-    return "Live only";
+function calculateExpectedMovePercent(row) {
+  const explicitExpectedMove = Number(row?.expectedMovePercent ?? NaN);
+  if (Number.isFinite(explicitExpectedMove)) {
+    return explicitExpectedMove;
   }
 
-  if (sourceFilter === "seed") {
-    return "Seed only";
+  const currentUnderlyingSpot = Number(row?.marketContext?.currentUnderlyingSpot ?? NaN);
+  const targetUnderlyingValue = Number(row?.marketContext?.targetUnderlyingValue ?? NaN);
+
+  if (!(currentUnderlyingSpot > 0) || !(targetUnderlyingValue > 0)) {
+    return null;
   }
 
-  return "Sources";
+  return ((targetUnderlyingValue / currentUnderlyingSpot) - 1) * 100;
 }
 
 const DEFAULT_MAX_LOSS_FLOOR = "-3000";
+const STRATEGY_FINDER_FILTERS_STORAGE_KEY = "hedgehub:filters:strategy-finder";
 
 function calculateSpreadPercent(bid, ask) {
   const numericBid = Number(bid);
@@ -852,8 +1032,8 @@ function formatQuoteSourceLabel(leg) {
     return "Polymarket";
   }
 
-  if (leg?.isLive === true || leg?.quoteSource === "polygon" || leg?.quoteSource === "Polygon.io") {
-    return "Polygon.io";
+  if (leg?.isLive === true) {
+    return "Live";
   }
 
   if (
@@ -880,8 +1060,10 @@ function formatOptionReferenceLabel(leg) {
 }
 
 function formatContractChoiceLabel(contract) {
-  const bidLabel = formatNumber(contract?.bid, 2) ?? "n/a";
-  const askLabel = formatNumber(contract?.ask, 2) ?? "n/a";
+  const strikeLabel = formatNumber(contract?.strike, 1);
+  const typeLabel = contract?.optionType === "put" ? "P" : "C";
+  const bidLabel = formatNumber(contract?.bid, 2);
+  const askLabel = formatNumber(contract?.ask, 2);
   const quoteSizePair = formatQuoteSizePair(contract?.bidSize, contract?.askSize);
   const sizeSuffix = quoteSizePair ? ` · size ${quoteSizePair}` : "";
   const volumeSuffix =
@@ -893,13 +1075,7 @@ function formatContractChoiceLabel(contract) {
       ? ` · oi ${formatCompactCount(contract.openInterest)}`
       : "";
 
-  if (contract?.isLive === true && contract?.contractSymbol) {
-    return `${contract.contractSymbol} · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}${volumeSuffix}${openInterestSuffix}`;
-  }
-
-  return `Synthetic ${formatNumber(contract?.strike, 1)}${contract?.optionType === "put" ? "P" : "C"} · ${
-    contract?.expiration
-  } · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}${volumeSuffix}${openInterestSuffix}`;
+  return `${strikeLabel}${typeLabel} · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}${volumeSuffix}${openInterestSuffix}`;
 }
 
 function binaryPriceFromYes(outcome, yesPrice) {
@@ -1216,33 +1392,71 @@ function calculateHeatmapExtremaForRow(row, currentDate) {
 }
 
 const columns = [
-  { key: "expiration", label: "Expiration" },
-  { key: "days", label: "Days", mobileHidden: true },
-  { key: "assetLabel", label: "Asset" },
-  { key: "strategyType", label: "Strategy type", mobileHidden: true },
-  { key: "marketBias", label: "Tag", mobileHidden: true },
-  { key: "formula", label: "Formula", mobileHidden: true },
-  { key: "polymarketPrice", label: "Poly price", mobileHidden: true },
-  { key: "normalizedOptionVolume", label: "Opt vol (norm)" },
-  { key: "polymarketVolume", label: "Poly volume" },
-  { key: "maxProfit", label: "Max profit" },
-  { key: "maxLoss", label: "Max loss" },
-  { key: "rewardRisk", label: "Reward/Risk", mobileHidden: true },
-  { key: "breakevens", label: "Breakeven(s)", mobileHidden: true },
-  { key: "theoPrice", label: "Theo price", mobileHidden: true },
-  { key: "bid", label: "Bid" },
-  { key: "ask", label: "Ask", mobileHidden: true },
-  { key: "bidAskSpread", label: "Bid-ask spread" },
-  { key: "expPayoff", label: "Exp payoff", mobileHidden: true }
+  { key: "expiration", label: "Expiration", width: "112px" },
+  { key: "days", label: "Days", width: "72px" },
+  { key: "assetLabel", label: "Asset", width: "156px" },
+  { key: "strategyType", label: "Strategy type", width: "156px" },
+  { key: "marketBias", label: "Tag", width: "110px" },
+  { key: "formula", label: "Formula", width: "168px" },
+  { key: "polymarketPrice", label: "Poly price", width: "98px" },
+  { key: "normalizedOptionVolume", label: "Opt vol (norm)", width: "122px" },
+  { key: "midMinusTheo", label: "Avg B/A - Theo", width: "124px" },
+  { key: "polymarketVolume", label: "Poly volume", width: "120px" },
+  { key: "maxProfit", label: "Max profit", width: "138px" },
+  { key: "maxLoss", label: "Max loss", width: "138px" },
+  { key: "rewardRisk", label: "Reward/Risk", width: "110px" },
+  { key: "breakevens", label: "Breakeven(s)", width: "136px" },
+  { key: "theoPrice", label: "Theo price", width: "100px" },
+  { key: "bid", label: "Bid", width: "88px" },
+  { key: "ask", label: "Ask", width: "88px" },
+  { key: "bidAskSpread", label: "Bid-ask spread", width: "122px" },
+  { key: "expPayoff", label: "Payoff at target", width: "120px" }
 ];
+
+const FINDER_COMPACT_MEDIA_QUERY = "(max-width: 1240px)";
+const FINDER_COMPACT_COLUMN_KEYS = [
+  "expiration",
+  "assetLabel",
+  "normalizedOptionVolume",
+  "midMinusTheo",
+  "polymarketVolume",
+  "maxProfit",
+  "maxLoss",
+  "bid",
+  "bidAskSpread"
+];
+
+function matchesFinderCompactViewport() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+
+  return window.matchMedia(FINDER_COMPACT_MEDIA_QUERY).matches;
+}
+
+function getDefaultVisibleFinderColumnKeys(isCompactViewport = false) {
+  if (isCompactViewport) {
+    return FINDER_COMPACT_COLUMN_KEYS.filter((key) => columns.some((column) => column.key === key));
+  }
+
+  return columns.map((column) => column.key);
+}
 
 const MAX_SORT_PRIORITIES = 4;
 
 const BIAS_FILTER_ORDER = ["Bull", "Bear", "Range-bound", "Breakout", "Neutral"];
-const SOURCE_FILTER_OPTIONS = [
-  { id: "all", label: "All sources" },
-  { id: "live", label: "Live only" },
-  { id: "seed", label: "Seed only" }
+const BID_ASK_SPREAD_PRESETS = [
+  { label: "Below 1%", description: "Tight", max: 1 },
+  { label: "1% to 3%", description: "Medium", min: 1, max: 3 },
+  { label: "Above 3%", description: "Wide", min: 3 }
+];
+const EXPECTED_PRICE_RANGE_PRESETS = [
+  { label: "-20% to +20%", description: "Wide", min: -20, max: 20 },
+  { label: "-20% to -10%", description: "Bearish", min: -20, max: -10 },
+  { label: "-10% to -5%", description: "Slightly bearish", min: -10, max: -5 },
+  { label: "-5% to +5%", description: "Neutral", min: -5, max: 5 },
+  { label: "+5% to +10%", description: "Slightly bullish", min: 5, max: 10 },
+  { label: "+10% to +20%", description: "Bullish", min: 10, max: 20 }
 ];
 
 function getPendingConfirmation(order) {
@@ -1282,6 +1496,11 @@ function getPendingConfirmation(order) {
 export default function StrategyFinderWorkspace({
   strategyPayload,
   strategyDefinition = null,
+  setupWatchlist = [],
+  onUpsertSetupWatchlistItem = null,
+  onDeleteSetupWatchlistItem = null,
+  autoOpenRowId = "",
+  onAutoOpenRowHandled = null,
   onManualRefresh = null,
   refreshing = false,
   refreshNotice = null,
@@ -1298,7 +1517,22 @@ export default function StrategyFinderWorkspace({
     strategyPayload?.lastUpdated?.slice(0, 10) ??
     finder?.filters?.dateRange?.from ??
     new Date().toISOString().slice(0, 10);
-  const rows = finder?.rows ?? [];
+  const rawRows = finder?.rows ?? [];
+  const rows = useMemo(
+    () =>
+      rawRows.map((row) => {
+        const midMinusTheo = getFinderMidMinusTheo(row);
+        const bidAskSpread =
+          row.bidAskSpread != null ? row.bidAskSpread : calculateSpreadPercent(row.bid, row.ask);
+
+        return {
+          ...row,
+          midMinusTheo,
+          bidAskSpread
+        };
+      }),
+    [rawRows]
+  );
   const defaultDateRange = resolveDateRangeForRows(
     normalizeDateRange(finder?.filters?.dateRange, currentDate),
     rows
@@ -1324,22 +1558,36 @@ export default function StrategyFinderWorkspace({
   const availableBiasTagsKey = availableBiasTags.join("|");
   const quoteSizeThresholdOptionsKey = quoteSizeThresholdOptions.join("|");
   const detailRef = useRef(null);
+  const liveTheoRowIdRef = useRef(null);
   const filterMenuRefs = useRef({});
   const hasHydratedFiltersRef = useRef(false);
+  const hasAutoRevealedHiddenDataRef = useRef(false);
   const [sortState, setSortState] = useState([{ key: "rewardRisk", direction: "desc" }]);
+  const [isCompactFinderViewport, setIsCompactFinderViewport] = useState(() => matchesFinderCompactViewport());
+  const [visibleColumnKeys, setVisibleColumnKeys] = useState(() =>
+    getDefaultVisibleFinderColumnKeys(matchesFinderCompactViewport())
+  );
   const [selectedRowId, setSelectedRowId] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailCollapsed, setDetailCollapsed] = useState(false);
+  const [liveTheoPrice, setLiveTheoPrice] = useState(null);
+  const [liveOptionLegQuotes, setLiveOptionLegQuotes] = useState({});
+  const [liveOptionLegQuotesUpdatedAt, setLiveOptionLegQuotesUpdatedAt] = useState(null);
+  const [liveOptionLegQuotesError, setLiveOptionLegQuotesError] = useState("");
+  const liveOptionQuoteRowIdRef = useRef(null);
   const [strategyEditorOpen, setStrategyEditorOpen] = useState(false);
+  const [activeLegId, setActiveLegId] = useState("");
+  const [chainShowAll, setChainShowAll] = useState(false);
   const [chartMode, setChartMode] = useState("date");
   const [chartExpanded, setChartExpanded] = useState(false);
   const [heatmapRangeMultiplier, setHeatmapRangeMultiplier] = useState(1);
+  const [heatmapRowCount, setHeatmapRowCount] = useState(13);
+  const [strategyDirection, setStrategyDirection] = useState("LONG");
   const [dateFrom, setDateFrom] = useState(defaultDateRange.from);
   const [dateTo, setDateTo] = useState(defaultDateRange.to);
   const [activeAssets, setActiveAssets] = useState(availableAssets);
   const [activeStrategyTypes, setActiveStrategyTypes] = useState(availableStrategyTypes);
   const [activeBiasTags, setActiveBiasTags] = useState(availableBiasTags);
-  const [sourceFilter, setSourceFilter] = useState("all");
   const [showSyntheticChain, setShowSyntheticChain] = useState(false);
   const [showSeedData, setShowSeedData] = useState(false);
   const [targetOptionQuoteSizeThreshold, setTargetOptionQuoteSizeThreshold] = useState(defaultQuoteSizeThreshold);
@@ -1347,66 +1595,41 @@ export default function StrategyFinderWorkspace({
   const [maxProfitMax, setMaxProfitMax] = useState("");
   const [maxLossMin, setMaxLossMin] = useState(DEFAULT_MAX_LOSS_FLOOR);
   const [maxLossMax, setMaxLossMax] = useState("");
+  const [bidAskSpreadMin, setBidAskSpreadMin] = useState("");
+  const [bidAskSpreadMax, setBidAskSpreadMax] = useState("");
+  const [expectedMoveMin, setExpectedMoveMin] = useState("-20");
+  const [expectedMoveMax, setExpectedMoveMax] = useState("20");
+  const [normalizedOptionVolumeMin, setNormalizedOptionVolumeMin] = useState("");
+  const [normalizedOptionVolumeMax, setNormalizedOptionVolumeMax] = useState("");
+  const [midMinusTheoMin, setMidMinusTheoMin] = useState("");
+  const [midMinusTheoMax, setMidMinusTheoMax] = useState("");
   const [controls, setControls] = useState(null);
   const [optionChains, setOptionChains] = useState({});
   const [optionChainStatus, setOptionChainStatus] = useState({});
   const [paperTradeDate, setPaperTradeDate] = useState("");
   const [paperOrderState, setPaperOrderState] = useState(null);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
-  const [paperExecutionRoute, setPaperExecutionRoute] = useState("tws-paper");
+  const [watchlistSaving, setWatchlistSaving] = useState(false);
+  const [watchlistNotice, setWatchlistNotice] = useState("");
   const [paperComboQuantity, setPaperComboQuantity] = useState(1);
   const [paperComboQuantityInput, setPaperComboQuantityInput] = useState("1");
-  const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
-  const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
-  const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
-  const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
-  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
   const [optionPriceRefreshing, setOptionPriceRefreshing] = useState(false);
   const [optionPriceRefreshState, setOptionPriceRefreshState] = useState(null);
   const [finderRowDetails, setFinderRowDetails] = useState({});
   const [finderDetailLoadingId, setFinderDetailLoadingId] = useState("");
   const [finderDetailErrors, setFinderDetailErrors] = useState({});
-  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const [twsStatus, setTwsStatus] = useState(() => paperPortfolio?.brokerStatus?.tws ?? null);
-  const ibkrReady = isIbkrReady(ibkrStatus);
-  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
-  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
-  const twsReady = isTwsReady(twsStatus);
   const minProfitThreshold = parseOptionalNumber(maxProfitMin);
   const maxProfitThreshold = parseOptionalNumber(maxProfitMax);
   const minLossThreshold = parseOptionalNumber(maxLossMin);
   const maxLossThreshold = parseOptionalNumber(maxLossMax);
-
-  useEffect(() => {
-    if (paperPortfolio?.brokerStatus?.tws) {
-      setTwsStatus(paperPortfolio.brokerStatus.tws);
-    }
-  }, [paperPortfolio?.brokerStatus?.tws]);
-
-  useEffect(() => {
-    if (paperExecutionRoute !== "tws-paper") {
-      return;
-    }
-
-    let cancelled = false;
-
-    async function refreshTwsStatus() {
-      try {
-        const response = await fetch("/api/brokers/tws/status");
-        const payload = await response.json().catch(() => null);
-        if (!cancelled && response.ok) {
-          setTwsStatus(payload?.tws ?? null);
-        }
-      } catch (_error) {
-        // ignore
-      }
-    }
-
-    void refreshTwsStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, [paperExecutionRoute]);
+  const bidAskSpreadMinThreshold = parseOptionalNumber(bidAskSpreadMin);
+  const bidAskSpreadMaxThreshold = parseOptionalNumber(bidAskSpreadMax);
+  const expectedMoveMinThreshold = parseOptionalNumber(expectedMoveMin);
+  const expectedMoveMaxThreshold = parseOptionalNumber(expectedMoveMax);
+  const normalizedOptionVolumeMinThreshold = parseOptionalNumber(normalizedOptionVolumeMin);
+  const normalizedOptionVolumeMaxThreshold = parseOptionalNumber(normalizedOptionVolumeMax);
+  const midMinusTheoMinThreshold = parseOptionalNumber(midMinusTheoMin);
+  const midMinusTheoMaxThreshold = parseOptionalNumber(midMinusTheoMax);
 
   useEffect(() => {
     setFinderRowDetails({});
@@ -1415,23 +1638,157 @@ export default function StrategyFinderWorkspace({
   }, [finder?.rows]);
 
   useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia(FINDER_COMPACT_MEDIA_QUERY);
+
+    function handleViewportChange(event) {
+      setIsCompactFinderViewport(event.matches);
+    }
+
+    handleViewportChange(mediaQuery);
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleViewportChange);
+      return () => {
+        mediaQuery.removeEventListener("change", handleViewportChange);
+      };
+    }
+
+    mediaQuery.addListener(handleViewportChange);
+    return () => {
+      mediaQuery.removeListener(handleViewportChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!finder) {
       return;
     }
 
     if (!hasHydratedFiltersRef.current) {
-      setDateFrom(defaultDateRange.from);
-      setDateTo(defaultDateRange.to);
-      setActiveAssets(availableAssets);
-      setActiveStrategyTypes(availableStrategyTypes);
-      setActiveBiasTags(availableBiasTags);
-      setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold);
       setControls(finder.calculatorDefaults ?? null);
+      const savedFilters = loadSavedFilters(STRATEGY_FINDER_FILTERS_STORAGE_KEY);
+
+      if (savedFilters) {
+        const nextDateFrom = typeof savedFilters.dateFrom === "string" ? savedFilters.dateFrom : defaultDateRange.from;
+        const nextDateTo = typeof savedFilters.dateTo === "string" ? savedFilters.dateTo : defaultDateRange.to;
+        const normalizedDateFrom = nextDateFrom || defaultDateRange.from;
+        const normalizedDateTo = nextDateTo || defaultDateRange.to;
+        setDateFrom(normalizedDateFrom);
+        setDateTo(
+          normalizedDateTo && normalizedDateFrom && normalizedDateTo < normalizedDateFrom
+            ? normalizedDateFrom
+            : normalizedDateTo
+        );
+
+        if (Array.isArray(savedFilters.activeAssets)) {
+          if (savedFilters.activeAssets.length === 0) {
+            setActiveAssets([]);
+          } else {
+            const nextAssets = savedFilters.activeAssets.filter((asset) => availableAssets.includes(asset));
+            setActiveAssets(nextAssets.length ? nextAssets : availableAssets);
+          }
+        } else {
+          setActiveAssets(availableAssets);
+        }
+
+        if (Array.isArray(savedFilters.activeStrategyTypes)) {
+          if (savedFilters.activeStrategyTypes.length === 0) {
+            setActiveStrategyTypes([]);
+          } else {
+            const nextTypes = savedFilters.activeStrategyTypes.filter((strategyType) =>
+              availableStrategyTypes.includes(strategyType)
+            );
+            setActiveStrategyTypes(nextTypes.length ? nextTypes : availableStrategyTypes);
+          }
+        } else {
+          setActiveStrategyTypes(availableStrategyTypes);
+        }
+
+        if (Array.isArray(savedFilters.activeBiasTags)) {
+          if (savedFilters.activeBiasTags.length === 0) {
+            setActiveBiasTags([]);
+          } else {
+            const nextTags = savedFilters.activeBiasTags.filter((marketBias) => availableBiasTags.includes(marketBias));
+            setActiveBiasTags(nextTags.length ? nextTags : availableBiasTags);
+          }
+        } else {
+          setActiveBiasTags(availableBiasTags);
+        }
+
+        setShowSyntheticChain(savedFilters.showSyntheticChain === true);
+        setShowSeedData(savedFilters.showSeedData === true);
+
+        const savedQuoteSizeThreshold = Number(savedFilters.targetOptionQuoteSizeThreshold);
+        setTargetOptionQuoteSizeThreshold(
+          Number.isFinite(savedQuoteSizeThreshold) && quoteSizeThresholdOptions.includes(savedQuoteSizeThreshold)
+            ? savedQuoteSizeThreshold
+            : defaultQuoteSizeThreshold
+        );
+
+        setMaxProfitMin(typeof savedFilters.maxProfitMin === "string" ? savedFilters.maxProfitMin : "");
+        setMaxProfitMax(typeof savedFilters.maxProfitMax === "string" ? savedFilters.maxProfitMax : "");
+        setMaxLossMin(typeof savedFilters.maxLossMin === "string" ? savedFilters.maxLossMin : DEFAULT_MAX_LOSS_FLOOR);
+        setMaxLossMax(typeof savedFilters.maxLossMax === "string" ? savedFilters.maxLossMax : "");
+        setBidAskSpreadMin(typeof savedFilters.bidAskSpreadMin === "string" ? savedFilters.bidAskSpreadMin : "");
+        setBidAskSpreadMax(typeof savedFilters.bidAskSpreadMax === "string" ? savedFilters.bidAskSpreadMax : "");
+        setExpectedMoveMin(typeof savedFilters.expectedMoveMin === "string" ? savedFilters.expectedMoveMin : "-20");
+        setExpectedMoveMax(typeof savedFilters.expectedMoveMax === "string" ? savedFilters.expectedMoveMax : "20");
+        setNormalizedOptionVolumeMin(
+          typeof savedFilters.normalizedOptionVolumeMin === "string" ? savedFilters.normalizedOptionVolumeMin : ""
+        );
+        setNormalizedOptionVolumeMax(
+          typeof savedFilters.normalizedOptionVolumeMax === "string" ? savedFilters.normalizedOptionVolumeMax : ""
+        );
+        setMidMinusTheoMin(typeof savedFilters.midMinusTheoMin === "string" ? savedFilters.midMinusTheoMin : "");
+        setMidMinusTheoMax(typeof savedFilters.midMinusTheoMax === "string" ? savedFilters.midMinusTheoMax : "");
+        if (Array.isArray(savedFilters.visibleColumnKeys)) {
+          const nextVisibleColumnKeys = columns
+            .map((column) => column.key)
+            .filter((key) => savedFilters.visibleColumnKeys.includes(key));
+          setVisibleColumnKeys(
+            nextVisibleColumnKeys.length
+              ? nextVisibleColumnKeys
+              : getDefaultVisibleFinderColumnKeys(matchesFinderCompactViewport())
+          );
+        } else {
+          setVisibleColumnKeys(getDefaultVisibleFinderColumnKeys(matchesFinderCompactViewport()));
+        }
+      } else {
+        setDateFrom(defaultDateRange.from);
+        setDateTo(defaultDateRange.to);
+        setActiveAssets(availableAssets);
+        setActiveStrategyTypes(availableStrategyTypes);
+        setActiveBiasTags(availableBiasTags);
+        setShowSyntheticChain(false);
+        setShowSeedData(false);
+        setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold);
+        setMaxProfitMin("");
+        setMaxProfitMax("");
+        setMaxLossMin(DEFAULT_MAX_LOSS_FLOOR);
+        setMaxLossMax("");
+        setBidAskSpreadMin("");
+        setBidAskSpreadMax("");
+        setExpectedMoveMin("-20");
+        setExpectedMoveMax("20");
+        setNormalizedOptionVolumeMin("");
+        setNormalizedOptionVolumeMax("");
+        setMidMinusTheoMin("");
+        setMidMinusTheoMax("");
+        setVisibleColumnKeys(getDefaultVisibleFinderColumnKeys(matchesFinderCompactViewport()));
+      }
       hasHydratedFiltersRef.current = true;
       return;
     }
 
     setActiveAssets((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+
       const next = current.filter((asset) => availableAssets.includes(asset));
       if (next.length === current.length && next.every((asset, index) => asset === current[index])) {
         return current;
@@ -1440,6 +1797,10 @@ export default function StrategyFinderWorkspace({
       return next.length ? next : availableAssets;
     });
     setActiveStrategyTypes((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+
       const next = current.filter((strategyType) => availableStrategyTypes.includes(strategyType));
       if (
         next.length === current.length &&
@@ -1451,6 +1812,10 @@ export default function StrategyFinderWorkspace({
       return next.length ? next : availableStrategyTypes;
     });
     setActiveBiasTags((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+
       const next = current.filter((marketBias) => availableBiasTags.includes(marketBias));
       if (
         next.length === current.length &&
@@ -1483,15 +1848,13 @@ export default function StrategyFinderWorkspace({
         const assetMatch = activeAssets.includes(row.assetLabel);
         const strategyMatch = activeStrategyTypes.includes(row.strategyType);
         const biasMatch = activeBiasTags.includes(row.marketBias ?? "Neutral");
-        const sourceMatch =
-          sourceFilter === "all"
-            ? true
-            : sourceFilter === "seed"
-              ? String(row.polymarketSource ?? "").toLowerCase() === "seed"
-              : String(row.polymarketSource ?? "").toLowerCase() !== "seed";
         const numericTargetOptionQuoteSize = Number(row.targetOptionQuoteSize);
         const numericMaxProfit = Number(row.maxProfit);
         const numericMaxLoss = Number(row.maxLoss);
+        const numericBidAskSpread = row.bidAskSpread == null ? null : Number(row.bidAskSpread);
+        const numericNormalizedOptionVolume =
+          row.normalizedOptionVolume == null ? null : Number(row.normalizedOptionVolume);
+        const numericMidMinusTheo = row.midMinusTheo == null ? null : Number(row.midMinusTheo);
         const rowHasQuoteSizeData =
           Number.isFinite(numericTargetOptionQuoteSize) && numericTargetOptionQuoteSize > 0;
         const quoteSizeMatch =
@@ -1515,6 +1878,29 @@ export default function StrategyFinderWorkspace({
             (row.maxLossUnbounded !== true &&
               Number.isFinite(numericMaxLoss) &&
               numericMaxLoss <= maxLossThreshold));
+        const bidAskSpreadMatch =
+          (bidAskSpreadMinThreshold == null ||
+            (Number.isFinite(numericBidAskSpread) && numericBidAskSpread >= bidAskSpreadMinThreshold)) &&
+          (bidAskSpreadMaxThreshold == null ||
+            (Number.isFinite(numericBidAskSpread) && numericBidAskSpread <= bidAskSpreadMaxThreshold));
+        const normalizedOptionVolumeMatch =
+          (normalizedOptionVolumeMinThreshold == null ||
+            (Number.isFinite(numericNormalizedOptionVolume) &&
+              numericNormalizedOptionVolume >= normalizedOptionVolumeMinThreshold)) &&
+          (normalizedOptionVolumeMaxThreshold == null ||
+            (Number.isFinite(numericNormalizedOptionVolume) &&
+              numericNormalizedOptionVolume <= normalizedOptionVolumeMaxThreshold));
+        const midMinusTheoMatch =
+          (midMinusTheoMinThreshold == null ||
+            (Number.isFinite(numericMidMinusTheo) && numericMidMinusTheo >= midMinusTheoMinThreshold)) &&
+          (midMinusTheoMaxThreshold == null ||
+            (Number.isFinite(numericMidMinusTheo) && numericMidMinusTheo <= midMinusTheoMaxThreshold));
+        const expectedMovePercent = calculateExpectedMovePercent(row);
+        const expectedMoveMatch =
+          (expectedMoveMinThreshold == null ||
+            (Number.isFinite(expectedMovePercent) && expectedMovePercent >= expectedMoveMinThreshold)) &&
+          (expectedMoveMaxThreshold == null ||
+            (Number.isFinite(expectedMovePercent) && expectedMovePercent <= expectedMoveMaxThreshold));
 
         return (
           withinFrom &&
@@ -1522,25 +1908,35 @@ export default function StrategyFinderWorkspace({
           assetMatch &&
           strategyMatch &&
           biasMatch &&
-          sourceMatch &&
           quoteSizeMatch &&
+          expectedMoveMatch &&
+          bidAskSpreadMatch &&
+          normalizedOptionVolumeMatch &&
           maxProfitMatch &&
-          maxLossMatch
+          maxLossMatch &&
+          midMinusTheoMatch
         );
       }),
     [
       activeAssets,
       activeBiasTags,
       activeStrategyTypes,
+      bidAskSpreadMaxThreshold,
+      bidAskSpreadMinThreshold,
       dateFrom,
       dateTo,
+      expectedMoveMaxThreshold,
+      expectedMoveMinThreshold,
       maxLossThreshold,
       maxProfitThreshold,
+      midMinusTheoMaxThreshold,
+      midMinusTheoMinThreshold,
       minLossThreshold,
       minProfitThreshold,
+      normalizedOptionVolumeMaxThreshold,
+      normalizedOptionVolumeMinThreshold,
       quoteSizeDataAvailable,
       rows,
-      sourceFilter,
       targetOptionQuoteSizeThreshold
     ]
   );
@@ -1561,6 +1957,40 @@ export default function StrategyFinderWorkspace({
       }),
     [baseFilteredRows, showSeedData, showSyntheticChain]
   );
+
+  useEffect(() => {
+    if (hasAutoRevealedHiddenDataRef.current) {
+      return;
+    }
+
+    if (filteredRows.length > 0 || baseFilteredRows.length === 0) {
+      return;
+    }
+
+    let didReveal = false;
+
+    if (!showSyntheticChain && syntheticHiddenCount > 0) {
+      setShowSyntheticChain(true);
+      didReveal = true;
+    }
+
+    if (!showSeedData && seedHiddenCount > 0) {
+      setShowSeedData(true);
+      didReveal = true;
+    }
+
+    if (didReveal) {
+      hasAutoRevealedHiddenDataRef.current = true;
+    }
+  }, [
+    baseFilteredRows.length,
+    filteredRows.length,
+    seedHiddenCount,
+    showSeedData,
+    showSyntheticChain,
+    syntheticHiddenCount
+  ]);
+
   const sortedRows = useMemo(
     () =>
       [...filteredRows].sort((left, right) => {
@@ -1580,11 +2010,28 @@ export default function StrategyFinderWorkspace({
       }),
     [filteredRows, sortState]
   );
+  const visibleColumns = useMemo(() => {
+    const orderedColumns = columns.filter((column) => visibleColumnKeys.includes(column.key));
+    return orderedColumns.length ? orderedColumns : columns.filter((column) => column.key === "expiration");
+  }, [visibleColumnKeys]);
+  const visibleFinderColumnKeys = useMemo(() => visibleColumns.map((column) => column.key), [visibleColumns]);
+  const finderGridTemplateColumns = useMemo(
+    () => visibleColumns.map((column) => column.width ?? "minmax(100px, 1fr)").join(" "),
+    [visibleColumns]
+  );
   const selectedRowSummary = useMemo(
     () => sortedRows.find((row) => row.id === selectedRowId) ?? null,
     [selectedRowId, sortedRows]
   );
   const selectedRow = selectedRowSummary ? finderRowDetails[selectedRowSummary.id] ?? null : null;
+  const setupWatchlistItems = Array.isArray(setupWatchlist) ? setupWatchlist : [];
+  const selectedSetupWatchlistId = selectedRow ? `finder:${selectedRow.id}` : "";
+  const selectedSetupWatchlistEntry = selectedSetupWatchlistId
+    ? setupWatchlistItems.find((entry) => entry.id === selectedSetupWatchlistId) ?? null
+    : null;
+  const isSelectedInSetupWatchlist = Boolean(selectedSetupWatchlistEntry);
+  const canMutateSetupWatchlist =
+    typeof onUpsertSetupWatchlistItem === "function" && typeof onDeleteSetupWatchlistItem === "function";
   const selectedRowDetailLoading =
     Boolean(selectedRowSummary?.id) &&
     !selectedRow &&
@@ -1649,6 +2096,30 @@ export default function StrategyFinderWorkspace({
   }, [finder?.calculatorDefaults, selectedRowId, sortedRows]);
 
   useEffect(() => {
+    const desiredRowId = String(autoOpenRowId ?? "").trim();
+    if (!desiredRowId) {
+      return;
+    }
+
+    const row = rows.find((candidate) => candidate.id === desiredRowId) ?? rawRows.find((candidate) => candidate.id === desiredRowId) ?? null;
+    if (row?.usesSyntheticChain === true) {
+      setShowSyntheticChain(true);
+    }
+
+    if (String(row?.polymarketSource ?? "").toLowerCase() === "seed") {
+      setShowSeedData(true);
+    }
+
+    setSelectedRowId(desiredRowId);
+    setDetailOpen(true);
+    setDetailCollapsed(false);
+
+    if (typeof onAutoOpenRowHandled === "function") {
+      onAutoOpenRowHandled();
+    }
+  }, [autoOpenRowId, onAutoOpenRowHandled, rawRows, rows]);
+
+  useEffect(() => {
     if (!detailOpen || !selectedRowSummary?.id || finderRowDetails[selectedRowSummary.id]) {
       return;
     }
@@ -1678,10 +2149,9 @@ export default function StrategyFinderWorkspace({
           return;
         }
 
-        setFinderRowDetails((current) => ({
-          ...current,
-          [rowId]: payload?.row ?? null
-        }));
+        setFinderRowDetails((current) =>
+          writeBoundedCacheRecord(current, rowId, payload?.row ?? null, MAX_FINDER_DETAIL_CACHE_ENTRIES)
+        );
       } catch (error) {
         if (controller.signal.aborted) {
           return;
@@ -1706,41 +2176,120 @@ export default function StrategyFinderWorkspace({
   }, [detailOpen, finderRowDetails, selectedRowSummary]);
 
   useEffect(() => {
+    if (!detailOpen || detailCollapsed || !selectedRowSummary?.id) {
+      setLiveTheoPrice(null);
+      liveTheoRowIdRef.current = null;
+      return;
+    }
+
+    const rowId = selectedRowSummary.id;
+    if (liveTheoRowIdRef.current !== rowId) {
+      liveTheoRowIdRef.current = rowId;
+      setLiveTheoPrice(null);
+    }
+    let cancelled = false;
+    let controller = null;
+    let inFlight = false;
+
+    async function refreshLiveTheoPrice() {
+      if (inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      controller?.abort();
+      controller = new AbortController();
+
+      try {
+        const response = await fetch(`/api/strategies/finder/${encodeURIComponent(rowId)}/theo`, {
+          signal: controller.signal,
+          cache: "no-store"
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || "Unable to load live theo price");
+        }
+
+        const nextTheoPrice = Number(payload?.theoPrice ?? NaN);
+
+        if (!cancelled) {
+          setLiveTheoPrice(Number.isFinite(nextTheoPrice) ? nextTheoPrice : null);
+        }
+      } catch (_error) {
+        // Keep last live theo visible if the lightweight poll fails.
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    void refreshLiveTheoPrice();
+    const interval = window.setInterval(() => {
+      void refreshLiveTheoPrice();
+    }, 15_000);
+
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      window.clearInterval(interval);
+    };
+  }, [detailCollapsed, detailOpen, selectedRowSummary?.id]);
+
+  useEffect(() => {
     if (!selectedRow) {
       return;
     }
 
     const defaultCloseDate = selectedRow.strategyCloseDate ?? selectedRow.expiration;
+    const baseVolatility =
+      (selectedRow.legs.find((leg) => leg.kind === "option")?.impliedVolatility ?? 0.24) * 100;
     setControls({
       valuationDate: defaultCloseDate,
       underlyingPrice:
         selectedRow.payoffCurve[Math.round(selectedRow.payoffCurve.length * 0.6)]?.spot ??
         selectedRow.quickOverview.underlyingPrice,
       impliedVolatility:
-        (selectedRow.legs.find((leg) => leg.kind === "option")?.impliedVolatility ?? 0.24) * 100,
+        baseVolatility,
+      ivPut: baseVolatility * 1.2,
+      ivCall: baseVolatility * 0.9,
+      polymarketYesPrice: "",
+      manualOptionLegs: [],
+      removedLegIds: [],
       legConfigs: Object.fromEntries(
         selectedRow.legs
-          .filter((leg) => leg.kind === "option")
-          .map((leg) => [
-            leg.id,
-            {
-              action: leg.action,
-              optionType: leg.optionType,
-              expiry: leg.expiry,
-              strike: Number(leg.strike),
-              bid: Number(leg.bid ?? 0),
-              ask: Number(leg.ask ?? 0),
-              bidSize: leg.bidSize != null ? Number(leg.bidSize) : null,
-              askSize: leg.askSize != null ? Number(leg.askSize) : null,
-              volume: leg.volume != null ? Number(leg.volume) : null,
-              openInterest: leg.openInterest != null ? Number(leg.openInterest) : null,
-              contractSymbol: leg.contractSymbol ?? "",
-              impliedVolatility: Number(leg.impliedVolatility ?? 0) || 0.24,
-              quoteSource: leg.quoteSource ?? "seed",
-              isLive: leg.isLive === true,
-              hasRealBidAsk: leg.hasRealBidAsk === true
+          .filter((leg) => leg.kind === "option" || leg.kind === "binary")
+          .map((leg) => {
+            if (leg.kind === "binary") {
+              return [
+                leg.id,
+                {
+                  action: leg.action,
+                  outcome: leg.outcome
+                }
+              ];
             }
-          ])
+
+            return [
+              leg.id,
+              {
+                action: leg.action,
+                optionType: leg.optionType,
+                expiry: leg.expiry,
+                strike: Number(leg.strike),
+                bid: Number(leg.bid ?? 0),
+                ask: Number(leg.ask ?? 0),
+                bidSize: leg.bidSize != null ? Number(leg.bidSize) : null,
+                askSize: leg.askSize != null ? Number(leg.askSize) : null,
+                volume: leg.volume != null ? Number(leg.volume) : null,
+                openInterest: leg.openInterest != null ? Number(leg.openInterest) : null,
+                contractSymbol: leg.contractSymbol ?? "",
+                impliedVolatility: Number(leg.impliedVolatility ?? 0) || 0.24,
+                quoteSource: leg.quoteSource ?? "seed",
+                isLive: leg.isLive === true,
+                hasRealBidAsk: leg.hasRealBidAsk === true
+              }
+            ];
+          })
       ),
       legEdits: Object.fromEntries(
         selectedRow.legs.map((leg) => [
@@ -1753,6 +2302,8 @@ export default function StrategyFinderWorkspace({
       )
     });
     setStrategyEditorOpen(false);
+    setActiveLegId("");
+    setChainShowAll(false);
   }, [selectedRow?.id]);
 
   useEffect(() => {
@@ -1890,13 +2441,150 @@ export default function StrategyFinderWorkspace({
     });
   }
 
+  function toggleVisibleColumn(columnKey) {
+    setVisibleColumnKeys((current) => {
+      if (current.includes(columnKey)) {
+        if (current.length <= 1) {
+          return current;
+        }
+
+        return current.filter((key) => key !== columnKey);
+      }
+
+      return columns.map((column) => column.key).filter((key) => key === columnKey || current.includes(key));
+    });
+  }
+
+  function resetVisibleColumns() {
+    setVisibleColumnKeys(columns.map((column) => column.key));
+  }
+
+  function applyCompactVisibleColumns() {
+    setVisibleColumnKeys(getDefaultVisibleFinderColumnKeys(true));
+  }
+
+  function renderFinderCell(row, columnKey) {
+    switch (columnKey) {
+      case "expiration":
+        return <span>{row.expiration}</span>;
+      case "days":
+        return <span>{row.days}</span>;
+      case "assetLabel":
+        return (
+          <span className="finder-asset-cell">
+            <span>{row.assetLabel}</span>
+            {String(row.polymarketSource ?? "").toLowerCase() === "seed" ? (
+              <span className="source-pill source-pill--seed">Seed</span>
+            ) : null}
+          </span>
+        );
+      case "strategyType":
+        return <span>{row.strategyType}</span>;
+      case "marketBias":
+        return (
+          <span>
+            <span className={`bias-pill bias-pill--${row.marketBiasTone ?? "neutral"}`}>
+              {row.marketBias ?? "Neutral"}
+            </span>
+          </span>
+        );
+      case "formula":
+        return (
+          <span className="formula-cell">
+            {row.formula.map((item) => (
+              <span key={`${row.id}-${item.label}`} className={`formula-pill formula-pill--${item.tone}`}>
+                {item.label}
+              </span>
+            ))}
+          </span>
+        );
+      case "polymarketPrice":
+        return <span>{`${row.polymarketPriceSide === "NO" ? "N" : "Y"} ${formatNumber(row.polymarketPrice, 2)}`}</span>;
+      case "normalizedOptionVolume":
+        return <span>{formatCompactCount(row.normalizedOptionVolume)}</span>;
+      case "midMinusTheo":
+        return <span className={getFinderMidMinusTheoTone(row)}>{formatNumber(row.midMinusTheo, 2)}</span>;
+      case "polymarketVolume":
+        return <span>{formatCompactUsd(row.polymarketVolume)}</span>;
+      case "maxProfit":
+        return (
+          <span className="finder-metric-cell">
+            <span
+              className={row.maxProfitUnbounded === true ? "" : Number(row.maxProfit) >= 0 ? "positive" : "negative"}
+            >
+              {formatExtrema(row.maxProfit, {
+                unbounded: row.maxProfitUnbounded === true,
+                kind: "profit"
+              })}
+            </span>
+            {row.maxProfitRangeTag ? <span className="finder-range-tag">{row.maxProfitRangeTag}</span> : null}
+          </span>
+        );
+      case "maxLoss":
+        return (
+          <span className="finder-metric-cell">
+            <span
+              className={row.maxLossUnbounded === true ? "" : Number(row.maxLoss) >= 0 ? "positive" : "negative"}
+            >
+              {formatExtrema(row.maxLoss, {
+                unbounded: row.maxLossUnbounded === true,
+                kind: "loss"
+              })}
+            </span>
+            {row.maxLossRangeTag ? <span className="finder-range-tag">{row.maxLossRangeTag}</span> : null}
+          </span>
+        );
+      case "rewardRisk":
+        return <span>{formatNumber(row.rewardRisk, 2)}</span>;
+      case "breakevens":
+        return <span>{row.breakevens.join("/") || "n/a"}</span>;
+      case "theoPrice":
+        return <span>{formatNumber(row.theoPrice, 2)}</span>;
+      case "bid":
+        return <span>{formatNumber(row.bid, 2)}</span>;
+      case "ask":
+        return <span>{formatNumber(row.ask, 2)}</span>;
+      case "bidAskSpread":
+        return <span className="negative">{row.bidAskSpread != null ? `${formatNumber(row.bidAskSpread, 2)}%` : ""}</span>;
+      case "expPayoff":
+        return <span>{formatCurrency(row.expPayoff)}</span>;
+      default:
+        return <span />;
+    }
+  }
+
+  function saveFilters() {
+    persistSavedFilters(STRATEGY_FINDER_FILTERS_STORAGE_KEY, {
+      dateFrom,
+      dateTo,
+      activeAssets,
+      activeStrategyTypes,
+      activeBiasTags,
+      showSyntheticChain,
+      showSeedData,
+      targetOptionQuoteSizeThreshold,
+      maxProfitMin,
+      maxProfitMax,
+      maxLossMin,
+      maxLossMax,
+      bidAskSpreadMin,
+      bidAskSpreadMax,
+      expectedMoveMin,
+      expectedMoveMax,
+      normalizedOptionVolumeMin,
+      normalizedOptionVolumeMax,
+      midMinusTheoMin,
+      midMinusTheoMax,
+      visibleColumnKeys
+    });
+  }
+
   function resetFilters() {
     setDateFrom(defaultDateRange.from);
     setDateTo(defaultDateRange.to);
     setActiveAssets(availableAssets);
     setActiveStrategyTypes(availableStrategyTypes);
     setActiveBiasTags(availableBiasTags);
-    setSourceFilter("all");
     setShowSyntheticChain(false);
     setShowSeedData(false);
     setTargetOptionQuoteSizeThreshold(defaultQuoteSizeThreshold);
@@ -1904,6 +2592,15 @@ export default function StrategyFinderWorkspace({
     setMaxProfitMax("");
     setMaxLossMin(DEFAULT_MAX_LOSS_FLOOR);
     setMaxLossMax("");
+    setBidAskSpreadMin("");
+    setBidAskSpreadMax("");
+    setExpectedMoveMin("-20");
+    setExpectedMoveMax("20");
+    setNormalizedOptionVolumeMin("");
+    setNormalizedOptionVolumeMax("");
+    setMidMinusTheoMin("");
+    setMidMinusTheoMax("");
+    setVisibleColumnKeys(getDefaultVisibleFinderColumnKeys(isCompactFinderViewport));
   }
 
   function handleDateFromChange(nextFrom) {
@@ -1952,8 +2649,15 @@ export default function StrategyFinderWorkspace({
     }));
   }
 
-  const optionLegs = selectedRow?.legs?.filter((leg) => leg.kind === "option") ?? [];
-  const polymarketLegs = selectedRow?.legs?.filter((leg) => leg.kind === "binary") ?? [];
+  const removedLegIds = new Set((controls?.removedLegIds ?? []).map((id) => String(id ?? "")).filter(Boolean));
+  const manualOptionLegs = controls?.manualOptionLegs ?? [];
+  const optionLegs = [
+    ...((selectedRow?.legs ?? []).filter((leg) => leg.kind === "option") ?? []),
+    ...(manualOptionLegs ?? [])
+  ].filter((leg) => leg?.kind === "option" && !removedLegIds.has(String(leg?.id ?? "")));
+  const polymarketSeedLegs = (selectedRow?.legs ?? []).filter((leg) => leg.kind === "binary");
+  const polymarketLegs = polymarketSeedLegs.filter((leg) => !removedLegIds.has(String(leg?.id ?? "")));
+  const removedPolymarketLeg = polymarketSeedLegs.find((leg) => removedLegIds.has(String(leg?.id ?? ""))) ?? null;
   const optionRootSymbol =
     selectedRow?.marketContext?.proxySymbol ?? optionLegs[0]?.label?.split(" ")?.[0] ?? "";
   const polymarketResolutionDate =
@@ -1962,6 +2666,8 @@ export default function StrategyFinderWorkspace({
     controls?.underlyingPrice ?? selectedRow?.quickOverview?.underlyingPrice ?? 0
   );
   const impliedVolatility = Number(controls?.impliedVolatility ?? 24) / 100;
+  const putVolatility = Number(controls?.ivPut ?? Number(controls?.impliedVolatility ?? 24) * 1.2) / 100;
+  const callVolatility = Number(controls?.ivCall ?? Number(controls?.impliedVolatility ?? 24) * 0.9) / 100;
   const riskFreeRate = 0.0425;
 
   useEffect(() => {
@@ -1972,6 +2678,253 @@ export default function StrategyFinderWorkspace({
     setOptionPriceRefreshState(null);
   }, [currentDate, selectedRow?.id]);
 
+  function handleStrategyDirectionChange(nextDirection) {
+    const normalizedNextDirection = normalizeStrategyDirection(nextDirection);
+    const normalizedCurrentDirection = normalizeStrategyDirection(strategyDirection);
+    if (normalizedNextDirection === normalizedCurrentDirection) {
+      return;
+    }
+
+    setStrategyDirection(normalizedNextDirection);
+
+    setControls((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const currentLegConfigs = current.legConfigs ?? {};
+      const nextLegConfigs = { ...currentLegConfigs };
+      Object.entries(currentLegConfigs).forEach(([legId, config]) => {
+        if (!config || typeof config !== "object") {
+          return;
+        }
+
+        nextLegConfigs[legId] = {
+          ...config,
+          action: invertPositionAction(config.action)
+        };
+      });
+
+      return {
+        ...current,
+        legConfigs: nextLegConfigs
+      };
+    });
+  }
+
+  const liveOptionQuoteSpot = Number(
+    selectedRow?.marketContext?.currentProxySpot ?? selectedRow?.quickOverview?.underlyingPrice ?? 0
+  );
+  const optionLegQuoteSignature = optionLegs
+    .map((leg) => {
+      const config = controls?.legConfigs?.[leg.id] ?? {};
+      const contractSymbol = String(config.contractSymbol ?? leg.contractSymbol ?? "").trim();
+      const expiry = String(config.expiry ?? leg.expiry ?? "").trim();
+      const optionType = String(config.optionType ?? leg.optionType ?? "").trim();
+      const strike = config.strike ?? leg.strike;
+      return `${leg.id}:${contractSymbol}:${expiry}:${optionType}:${strike}:${config.action ?? leg.action}:${config.quantity ?? leg.quantity}`;
+    })
+    .join("|");
+
+  useEffect(() => {
+    if (!detailOpen || detailCollapsed || !selectedRow || !optionRootSymbol) {
+      setLiveOptionLegQuotes({});
+      setLiveOptionLegQuotesUpdatedAt(null);
+      setLiveOptionLegQuotesError("");
+      liveOptionQuoteRowIdRef.current = null;
+      return;
+    }
+
+    const rowId = selectedRow.id ?? null;
+    if (rowId && liveOptionQuoteRowIdRef.current !== rowId) {
+      liveOptionQuoteRowIdRef.current = rowId;
+      setLiveOptionLegQuotes({});
+      setLiveOptionLegQuotesUpdatedAt(null);
+      setLiveOptionLegQuotesError("");
+    }
+
+    const requestedLegs = optionLegs
+      .map((leg) => {
+        const config = controls?.legConfigs?.[leg.id] ?? {};
+        const strike = Number(config.strike ?? leg.strike ?? NaN);
+        const expiry = String(config.expiry ?? leg.expiry ?? "").trim();
+        const optionType = String(config.optionType ?? leg.optionType ?? "call").trim().toLowerCase() === "put"
+          ? "put"
+          : "call";
+        const action = String(config.action ?? leg.action ?? "LONG").trim().toUpperCase() === "SHORT"
+          ? "SHORT"
+          : "LONG";
+        const contractSymbol = String(config.contractSymbol ?? leg.contractSymbol ?? "").trim();
+
+        return {
+          id: leg.id,
+          strike,
+          expiry,
+          optionType,
+          action,
+          contractSymbol
+        };
+      })
+      .filter((leg) => leg.expiry && Number.isFinite(leg.strike) && leg.strike > 0);
+
+    if (!requestedLegs.length) {
+      setLiveOptionLegQuotes({});
+      setLiveOptionLegQuotesUpdatedAt(null);
+      setLiveOptionLegQuotesError("");
+      return;
+    }
+
+    const groupLegs = new Map();
+    requestedLegs.forEach((leg) => {
+      const key = buildChainKey(optionRootSymbol, leg.expiry, leg.optionType);
+      const current = groupLegs.get(key) ?? {
+        expiration: leg.expiry,
+        optionType: leg.optionType,
+        strikes: []
+      };
+      current.strikes.push(leg.strike);
+      groupLegs.set(key, current);
+    });
+
+    let cancelled = false;
+    let controller = null;
+    let inFlight = false;
+
+    async function refreshLiveOptionQuotes() {
+      if (inFlight) {
+        return;
+      }
+
+      inFlight = true;
+      controller?.abort();
+      controller = new AbortController();
+
+      try {
+        const requests = [...groupLegs.entries()].map(async ([key, group]) => {
+          const strikes = group.strikes.filter((value) => Number.isFinite(value) && value > 0);
+          if (!strikes.length) {
+            return [key, []];
+          }
+
+          const minStrike = Math.min(...strikes);
+          const maxStrike = Math.max(...strikes);
+          const padding = Math.max((maxStrike - minStrike) * 0.15, liveOptionQuoteSpot > 200 ? 5 : 1);
+          const strikeMin = Math.max(minStrike - padding, 0.01);
+          const strikeMax = Math.max(maxStrike + padding, strikeMin);
+          const limit = Math.max(strikes.length * 12, 60);
+
+          const url = `/api/options/chain?symbol=${encodeURIComponent(optionRootSymbol)}&expiration=${encodeURIComponent(
+            group.expiration
+          )}&optionType=${encodeURIComponent(group.optionType)}&strikeMin=${encodeURIComponent(
+            strikeMin
+          )}&strikeMax=${encodeURIComponent(strikeMax)}&limit=${encodeURIComponent(limit)}`;
+
+          const response = await fetch(url, {
+            signal: controller.signal,
+            cache: "no-store"
+          });
+          const payload = await response.json().catch(() => null);
+
+          if (!response.ok) {
+            throw new Error(payload?.error || "Unable to load live option quotes");
+          }
+
+          return [key, Array.isArray(payload?.contracts) ? payload.contracts : []];
+        });
+
+        const results = await Promise.allSettled(requests);
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        const fulfilledResults = results.filter((result) => result.status === "fulfilled");
+        if (!fulfilledResults.length) {
+          const firstError = results.find((result) => result.status === "rejected")?.reason;
+          setLiveOptionLegQuotesError(
+            firstError?.message ? String(firstError.message) : "Unable to refresh live option quotes."
+          );
+          return;
+        }
+
+        const contractsByGroup = new Map();
+        fulfilledResults.forEach((result) => {
+          if (result.status !== "fulfilled") {
+            return;
+          }
+
+          const [key, contracts] = result.value ?? [];
+          if (key) {
+            contractsByGroup.set(key, Array.isArray(contracts) ? contracts : []);
+          }
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        setLiveOptionLegQuotes((current) => {
+          const next = {};
+
+          requestedLegs.forEach((leg) => {
+            const key = buildChainKey(optionRootSymbol, leg.expiry, leg.optionType);
+            const contracts = contractsByGroup.get(key) ?? [];
+            const targetContractSymbol = String(leg.contractSymbol ?? "").trim();
+            const matched =
+              (targetContractSymbol
+                ? contracts.find(
+                    (contract) => String(contract?.contractSymbol ?? "").trim() === targetContractSymbol
+                  )
+                : null) ??
+              contracts.find((contract) => {
+                const contractStrike = Number(contract?.strike ?? NaN);
+                return Number.isFinite(contractStrike) && Math.abs(contractStrike - leg.strike) < 0.01;
+              }) ??
+              null;
+
+            if (matched) {
+              next[leg.id] = {
+                bid: matched.bid ?? null,
+                ask: matched.ask ?? null,
+                bidSize: matched.bidSize ?? null,
+                askSize: matched.askSize ?? null,
+                volume: matched.volume ?? null,
+                openInterest: matched.openInterest ?? null,
+                mark: matched.mark ?? null,
+                sourceLabel: matched.sourceLabel ?? matched.source ?? null,
+                isLive: matched.isLive === true,
+                hasRealBidAsk: matched.hasRealBidAsk === true
+              };
+              return;
+            }
+
+            if (current?.[leg.id]) {
+              next[leg.id] = current[leg.id];
+            }
+          });
+
+          return next;
+        });
+        setLiveOptionLegQuotesError("");
+        setLiveOptionLegQuotesUpdatedAt(new Date().toISOString());
+      } catch (_error) {
+        // Keep the last known live quotes visible if the lightweight poll fails.
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    void refreshLiveOptionQuotes();
+    const interval = window.setInterval(() => {
+      void refreshLiveOptionQuotes();
+    }, LIVE_OPTION_QUOTES_POLL_MS);
+
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      window.clearInterval(interval);
+    };
+  }, [detailCollapsed, detailOpen, liveOptionQuoteSpot, optionLegQuoteSignature, optionRootSymbol, selectedRow?.id]);
+
   const datePresets = buildDatePresets(currentDate || finder?.filters?.dateRange?.from || "");
   const activeDatePreset =
     datePresets.find((preset) => preset.from === dateFrom && preset.to === dateTo) ?? null;
@@ -1981,20 +2934,63 @@ export default function StrategyFinderWorkspace({
   const productSummary = buildSelectionSummary(activeAssets, availableAssets, "Products");
   const strategySummary = buildSelectionSummary(activeStrategyTypes, availableStrategyTypes, "Strategy types");
   const biasSummary = buildSelectionSummary(activeBiasTags, availableBiasTags, "Tags");
-  const sourceSummary = buildSourceFilterSummary(sourceFilter);
   const quoteSizeSummary = buildQuoteSizeFilterSummary(targetOptionQuoteSizeThreshold, quoteSizeDataAvailable);
   const hiddenDataLabels = [
-    !showSyntheticChain ? "synthetic chain" : null,
-    !showSeedData ? "seed data" : null
+    !showSyntheticChain && syntheticHiddenCount ? `synthetic chain (${syntheticHiddenCount})` : null,
+    !showSeedData && seedHiddenCount ? `seed data (${seedHiddenCount})` : null
   ].filter(Boolean);
   const emptyStateMessage = hiddenDataLabels.length
     ? `No matched hedge combinations for the selected filters. ${hiddenDataLabels.join(" and ")} are hidden by default.`
     : "No matched hedge combinations for the selected products, date range, strategy types, and bid/ask size filter.";
-  const pnlSummary = buildPnlFilterSummary({
-    maxProfitMin: minProfitThreshold,
-    maxProfitMax: maxProfitThreshold,
-    maxLossMin: minLossThreshold,
-    maxLossMax: maxLossThreshold
+  const activeBidAskSpreadPreset =
+    BID_ASK_SPREAD_PRESETS.find(
+      (preset) =>
+        (preset.min ?? null) === bidAskSpreadMinThreshold &&
+        (preset.max ?? null) === bidAskSpreadMaxThreshold
+    ) ?? null;
+  const bidAskSpreadSummary =
+    activeBidAskSpreadPreset?.label ??
+    buildMetricRangeSummary({
+      label: "Bid-ask spread",
+      min: bidAskSpreadMinThreshold,
+      max: bidAskSpreadMaxThreshold,
+      formatValue: (value) => formatFilterPercent(value, 1)
+    });
+  const activeExpectedMovePreset =
+    EXPECTED_PRICE_RANGE_PRESETS.find(
+      (preset) => preset.min === expectedMoveMinThreshold && preset.max === expectedMoveMaxThreshold
+    ) ?? null;
+  const expectedMoveSummary =
+    activeExpectedMovePreset?.label ??
+    buildMetricRangeSummary({
+      label: "Expected move",
+      min: expectedMoveMinThreshold,
+      max: expectedMoveMaxThreshold,
+      formatValue: (value) => formatSignedPercentLabel(value, 0)
+    });
+  const normalizedOptionVolumeSummary = buildMetricRangeSummary({
+    label: "Opt vol (norm)",
+    min: normalizedOptionVolumeMinThreshold,
+    max: normalizedOptionVolumeMaxThreshold,
+    formatValue: formatFilterCount
+  });
+  const maxLossSummary = buildMetricRangeSummary({
+    label: "Max loss",
+    min: minLossThreshold,
+    max: maxLossThreshold,
+    formatValue: formatFilterThreshold
+  });
+  const midMinusTheoSummary = buildMetricRangeSummary({
+    label: "Avg B/A - Theo",
+    min: midMinusTheoMinThreshold,
+    max: midMinusTheoMaxThreshold,
+    formatValue: (value) => formatFilterNumber(value, 2)
+  });
+  const maxProfitSummary = buildMetricRangeSummary({
+    label: "Max profit",
+    min: minProfitThreshold,
+    max: maxProfitThreshold,
+    formatValue: formatFilterThreshold
   });
   const currentProxySpot = Number(
     selectedRow?.marketContext?.currentProxySpot ?? selectedRow?.quickOverview?.underlyingPrice ?? 0
@@ -2003,6 +2999,7 @@ export default function StrategyFinderWorkspace({
   const converterRatio =
     Number(selectedRow?.marketContext?.conversionRatio ?? 0) ||
     (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
+  const strategyTypeLabel = formatStrategyTypeForDirection(selectedRow?.strategyType, strategyDirection);
   const polymarketSignal = resolveFinderPolymarketSignal(selectedRow?.polymarketQuestion, selectedRow?.marketContext);
   const targetUnderlyingValue =
     polymarketSignal?.targetValue ||
@@ -2053,8 +3050,8 @@ export default function StrategyFinderWorkspace({
         Number(config.impliedVolatility ?? leg.impliedVolatility ?? 0) ||
         Number(leg.impliedVolatility ?? 0) ||
         impliedVolatility,
-      quoteSource: config.quoteSource ?? leg.quoteSource ?? "seed",
-      isLive: config.isLive === true || leg.isLive === true
+        quoteSource: config.quoteSource ?? leg.quoteSource ?? "seed",
+        isLive: config.isLive === true || leg.isLive === true
     };
   });
   const strategyCloseDate =
@@ -2062,6 +3059,79 @@ export default function StrategyFinderWorkspace({
     selectedRow?.strategyCloseDate ||
     selectedRow?.expiration ||
     polymarketResolutionDate;
+  const activeOptionLeg =
+    effectiveOptionLegs.find((leg) => leg.id === activeLegId) ?? effectiveOptionLegs[effectiveOptionLegs.length - 1] ?? null;
+  const activeChainExpiration = activeOptionLeg?.expiry ?? strategyCloseDate ?? "";
+  const activeExpiryTabs = useMemo(
+    () => {
+      if (!activeChainExpiration) {
+        return [];
+      }
+
+      const tabs = buildWeeklyExpiryTabs(activeChainExpiration);
+      const minIso = currentDate || new Date().toISOString().slice(0, 10);
+      return tabs.filter((value) => value >= minIso);
+    },
+    [activeChainExpiration, currentDate]
+  );
+  const activeCallChainKey =
+    optionRootSymbol && activeChainExpiration ? buildChainKey(optionRootSymbol, activeChainExpiration, "call") : "";
+  const activePutChainKey =
+    optionRootSymbol && activeChainExpiration ? buildChainKey(optionRootSymbol, activeChainExpiration, "put") : "";
+  const activeCallChain = activeCallChainKey ? optionChains[activeCallChainKey] ?? null : null;
+  const activePutChain = activePutChainKey ? optionChains[activePutChainKey] ?? null : null;
+  const activeCallChainStatus = activeCallChainKey ? optionChainStatus[activeCallChainKey] ?? null : null;
+  const activePutChainStatus = activePutChainKey ? optionChainStatus[activePutChainKey] ?? null : null;
+  const activeChainRows = useMemo(() => {
+    const contractsByStrike = new Map();
+
+    (activeCallChain?.contracts ?? []).forEach((contract) => {
+      const strike = Number(contract?.strike ?? NaN);
+      if (!Number.isFinite(strike)) {
+        return;
+      }
+
+      const row = contractsByStrike.get(strike) ?? { strike, call: null, put: null };
+      row.call = contract;
+      contractsByStrike.set(strike, row);
+    });
+
+    (activePutChain?.contracts ?? []).forEach((contract) => {
+      const strike = Number(contract?.strike ?? NaN);
+      if (!Number.isFinite(strike)) {
+        return;
+      }
+
+      const row = contractsByStrike.get(strike) ?? { strike, call: null, put: null };
+      row.put = contract;
+      contractsByStrike.set(strike, row);
+    });
+
+    const strikes = Array.from(contractsByStrike.keys()).sort((left, right) => left - right);
+    if (!strikes.length) {
+      return [];
+    }
+
+    const spot = Number(currentProxySpot ?? rawUnderlyingPrice ?? 0);
+    if (chainShowAll) {
+      return strikes.map((strike) => contractsByStrike.get(strike));
+    }
+
+    const strikeWindow = 30;
+    const windowedStrikes =
+      Number.isFinite(spot) && spot > 0
+        ? [...strikes]
+            .sort((left, right) => {
+              const leftDistance = Math.abs(left - spot);
+              const rightDistance = Math.abs(right - spot);
+              return leftDistance === rightDistance ? left - right : leftDistance - rightDistance;
+            })
+            .slice(0, strikeWindow)
+            .sort((left, right) => left - right)
+        : strikes.slice(0, strikeWindow);
+
+    return windowedStrikes.map((strike) => contractsByStrike.get(strike));
+  }, [activeCallChain?.contracts, activePutChain?.contracts, chainShowAll, currentProxySpot, rawUnderlyingPrice]);
   const strategyCloseDays = countTradingDaysBetween(currentDate || strategyCloseDate, strategyCloseDate, {
     includeStart: false,
     includeEnd: true
@@ -2195,11 +3265,27 @@ export default function StrategyFinderWorkspace({
     };
   });
 
-  const referenceYesLeg = polymarketLegs.find((leg) => leg.outcome === "YES") ?? null;
-  const referenceNoLeg = polymarketLegs.find((leg) => leg.outcome === "NO") ?? null;
-  const marketReferenceYesPrice = Number(
-    referenceYesLeg?.entryPrice ?? (referenceNoLeg ? 1 - Number(referenceNoLeg.entryPrice) : selectedRow?.polymarketPrice ?? 0)
-  );
+  const marketReferenceYesPrice = (() => {
+    const polymarketPriceSide = String(selectedRow?.polymarketPriceSide ?? "").trim().toUpperCase();
+    const rowPrice = Number(selectedRow?.polymarketPrice ?? Number.NaN);
+
+    if (Number.isFinite(rowPrice)) {
+      const inferredYesPrice = polymarketPriceSide === "NO" ? 1 - rowPrice : rowPrice;
+      return clampProbability(inferredYesPrice);
+    }
+
+    const fallbackLeg = polymarketLegs[0] ?? null;
+    const fallbackOutcome = String(fallbackLeg?.outcome ?? "").trim().toUpperCase();
+    const fallbackPrice = Number(fallbackLeg?.entryPrice ?? Number.NaN);
+
+    if (Number.isFinite(fallbackPrice)) {
+      const inferredYesPrice = fallbackOutcome === "NO" ? 1 - fallbackPrice : fallbackPrice;
+      return clampProbability(inferredYesPrice);
+    }
+
+    return clampProbability(0.5);
+  })();
+  const marketReferenceNoPrice = clampProbability(1 - marketReferenceYesPrice);
   const estimatedYesPrice = estimatePolymarketYesPrice({
     spot: equivalentUnderlyingSpot,
     strike: targetUnderlyingValue,
@@ -2211,50 +3297,65 @@ export default function StrategyFinderWorkspace({
     currentTimeYears: currentTimeToMarketResolutionYears,
     signalDirection: polymarketSignal?.direction
   });
+  const polymarketYesPriceInput = String(controls?.polymarketYesPrice ?? "").trim();
+  const polymarketYesPriceManual = polymarketYesPriceInput ? Number(polymarketYesPriceInput) : null;
+  const polymarketYesPrice = clamp(
+    Number.isFinite(polymarketYesPriceManual) ? polymarketYesPriceManual : estimatedYesPrice,
+    0,
+    1
+  );
   const repricedPolymarketLegs = polymarketLegs.map((leg) => {
     const editedLeg = controls?.legEdits?.[leg.id] ?? {};
-    const entryPrice = Number(editedLeg.entryPrice ?? leg.entryPrice);
+    const config = controls?.legConfigs?.[leg.id] ?? {};
+    const action = normalizeStrategyDirection(config.action ?? leg.action);
+    const outcome = String(config.outcome ?? leg.outcome).trim().toUpperCase() === "NO" ? "NO" : "YES";
+    const fallbackEntryPrice = outcome === "YES" ? marketReferenceYesPrice : marketReferenceNoPrice;
+    const entryPrice = Number(editedLeg.entryPrice ?? fallbackEntryPrice);
     const quantity = normalizeQuantityInput(editedLeg.quantity ?? leg.quantity, normalizeQuantityInput(leg.quantity, 0));
-    const modelPrice = binaryPriceFromYes(leg.outcome, estimatedYesPrice);
+    const modelPrice = binaryPriceFromYes(outcome, polymarketYesPrice);
     const pnl = binaryPnL({
-      action: leg.action,
+      action,
       entryPrice,
       markPrice: modelPrice,
       quantity
     });
-    const markValue = (leg.action === "LONG" ? 1 : -1) * modelPrice * quantity;
-    const entryValue = (leg.action === "LONG" ? 1 : -1) * entryPrice * quantity;
+    const markValue = (action === "LONG" ? 1 : -1) * modelPrice * quantity;
+    const entryValue = (action === "LONG" ? 1 : -1) * entryPrice * quantity;
 
     return {
       ...leg,
+      action,
+      outcome,
+      label: `PM ${outcome}`,
       entryPrice,
       quantity,
-      bid: Number(leg.bid ?? leg.entryPrice ?? 0),
-      ask: Number(leg.ask ?? leg.entryPrice ?? 0),
-      spread: leg.spread,
+      bid: outcome === "YES" ? marketReferenceYesPrice : marketReferenceNoPrice,
+      ask: outcome === "YES" ? marketReferenceYesPrice : marketReferenceNoPrice,
+      spread: 0,
       modelPrice,
       pnl,
       markValue,
       entryValue
     };
   });
-  const ibkrSuggestedLimitPrice = calculateIbkrNetLimitPrice(repricedOptionLegs);
-  const twsLimitPriceWindow = useMemo(
-    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
-    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
-  );
-
   useEffect(() => {
-    setPaperExecutionRoute("tws-paper");
     setPaperComboQuantity(1);
     setPaperComboQuantityInput("1");
-    setPaperIbkrOrderType("LMT");
-    setPaperIbkrTif("DAY");
-    setPaperIbkrOutsideRth(false);
-    setPaperIbkrSmartEnabled(false);
-    setPaperIbkrLimitPrice(
-      ibkrSuggestedLimitPrice == null ? "" : String(Number(ibkrSuggestedLimitPrice.toFixed(2)))
-    );
+    setStrategyDirection(inferStrategyDirection(selectedRowSummary?.strategyType ?? selectedRow?.strategyType));
+    setFinderRowDetails((current) => retainCacheEntries(current, [selectedRowId]));
+    setFinderDetailErrors((current) => retainCacheEntries(current, [selectedRowId]));
+    setFinderDetailLoadingId((current) => {
+      const normalizedSelectedRowId = String(selectedRowId ?? "").trim();
+      return current === normalizedSelectedRowId ? current : "";
+    });
+    setLiveOptionLegQuotes({});
+    setLiveOptionLegQuotesUpdatedAt(null);
+    setLiveOptionLegQuotesError("");
+    setOptionChains({});
+    setOptionChainStatus({});
+    setChainShowAll(false);
+    setStrategyEditorOpen(false);
+    setActiveLegId("");
   }, [selectedRowId]);
 
   function applyPaperComboQuantity(nextComboQuantity, { syncInput = true } = {}) {
@@ -2323,17 +3424,128 @@ export default function StrategyFinderWorkspace({
     setPaperComboQuantityInput(String(paperComboQuantity));
   }
 
-  useEffect(() => {
-    if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
-      setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
+  function buildSetupWatchlistPayload() {
+    if (!selectedRow) {
+      return null;
     }
-  }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
 
-  useEffect(() => {
-    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
-      setPaperIbkrSmartEnabled(false);
+    return {
+      strategyId: strategyDefinition?.id ?? "strategy-1",
+      strategyName: strategyDefinition?.name ?? "Strategy",
+      combinationId: selectedRow.id,
+      combinationLabel: `${selectedRow.assetLabel} · ${strategyTypeLabel} · ${strategyCloseDate}`,
+      assetLabel: selectedRow.assetLabel,
+      strategyType: strategyTypeLabel,
+      marketBias: selectedRow.marketBias,
+      marketBiasTone: selectedRow.marketBiasTone,
+      maxProfit: selectedRow.maxProfit,
+      maxLoss: selectedRow.maxLoss,
+      maxProfitUnbounded: selectedRow.maxProfitUnbounded,
+      maxLossUnbounded: selectedRow.maxLossUnbounded,
+      polymarketMarketId: selectedRow.polymarketMarketId,
+      polymarketMarketSlug: selectedRow.polymarketMarketSlug,
+      polymarketEventSlug: selectedRow.polymarketEventSlug,
+      polymarketQuestion: selectedRow.polymarketQuestion,
+      polymarketUrl: selectedRow.polymarketUrl,
+      polymarketSource: selectedRow.polymarketSource,
+      polymarketResolutionDate,
+      strategyCloseDate,
+      marketReferenceYesPrice,
+      marketContext: {
+        proxySymbol: optionRootSymbol || selectedRow?.marketContext?.proxySymbol || "",
+        underlyingSymbol: selectedRow?.marketContext?.underlyingSymbol ?? "",
+        currentProxySpot: currentProxySpot || underlyingPrice,
+        currentUnderlyingSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
+        conversionRatio: converterRatio,
+        targetUnderlyingValue,
+        polymarketDirection: polymarketSignal?.direction ?? "up",
+        polymarketTriggerType: polymarketSignal?.triggerType ?? "touch",
+        impliedVolatility,
+        riskFreeRate
+      },
+      legs: [
+        ...repricedOptionLegs.map((leg) => ({
+          id: leg.id,
+          label: leg.label,
+          kind: "option",
+          action: leg.action,
+          quantity: leg.quantity,
+          entryPrice: leg.entryPrice,
+          contractMultiplier: leg.contractMultiplier ?? 100,
+          optionType: leg.optionType,
+          expiry: leg.expiry,
+          strike: Number(leg.strike),
+          contractSymbol: leg.contractSymbol ?? "",
+          rootSymbol: optionRootSymbol,
+          bid: leg.bid ?? null,
+          ask: leg.ask ?? null,
+          bidSize: leg.bidSize ?? null,
+          askSize: leg.askSize ?? null,
+          volume: leg.volume ?? null,
+          openInterest: leg.openInterest ?? null,
+          impliedVolatility: Number(leg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
+          riskFreeRate,
+          quoteSource: leg.quoteSource ?? "seed",
+          isLive: leg.isLive === true
+        })),
+        ...repricedPolymarketLegs.map((leg) => ({
+          id: leg.id,
+          label: leg.label,
+          kind: "binary",
+          action: leg.action,
+          quantity: leg.quantity,
+          entryPrice: leg.entryPrice,
+          outcome: leg.outcome,
+          polymarketMarketId: leg.polymarketMarketId ?? selectedRow.polymarketMarketId ?? "",
+          marketVolume: leg.volume ?? selectedRow.polymarketVolume ?? null,
+          marketLiquidity: leg.liquidity ?? selectedRow.polymarketLiquidity ?? null,
+          quoteSource: "Polymarket",
+          isLive: true
+        }))
+      ],
+      execution: {
+        route: "local-paper"
+      }
+    };
+  }
+
+  async function handleToggleSetupWatchlist() {
+    if (!selectedRow || !selectedSetupWatchlistId || !canMutateSetupWatchlist) {
+      return;
     }
-  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
+
+    if (watchlistSaving) {
+      return;
+    }
+
+    setWatchlistNotice("");
+    setWatchlistSaving(true);
+
+    try {
+      if (isSelectedInSetupWatchlist) {
+        await onDeleteSetupWatchlistItem(selectedSetupWatchlistId);
+        return;
+      }
+
+      const payload = buildSetupWatchlistPayload();
+      if (!payload) {
+        return;
+      }
+
+      await onUpsertSetupWatchlistItem({
+        id: selectedSetupWatchlistId,
+        source: "finder",
+        strategyId: String(strategyDefinition?.id ?? payload.strategyId ?? "strategy-1"),
+        combinationId: String(payload.combinationId ?? selectedRow.id),
+        title: String(payload.combinationLabel ?? `${selectedRow.assetLabel} · ${strategyTypeLabel}`).trim(),
+        payload
+      });
+    } catch (error) {
+      setWatchlistNotice(error?.message || "Watchlist update failed");
+    } finally {
+      setWatchlistSaving(false);
+    }
+  }
 
   async function handleCreatePaperTrade() {
     if (!selectedRow || !onCreatePaperOrder) {
@@ -2344,43 +3556,13 @@ export default function StrategyFinderWorkspace({
     setPaperOrderState(null);
 
     try {
-      if (paperExecutionRoute === "ibkr-paper") {
-        if (!ibkrReady) {
-          throw new Error(
-            ibkrStatus?.error || "IBKR paper gateway is not ready. Check the connection on the paper-trading page."
-          );
-        }
-
-        if (!repricedOptionLegs.length) {
-          throw new Error("This setup does not have any option legs to route to IBKR.");
-        }
-
-        if (paperIbkrOrderType === "LMT" && paperIbkrLimitPrice === "") {
-          throw new Error("Enter an IBKR limit price before routing this order.");
-        }
-      }
-
-      if (paperExecutionRoute === "tws-paper") {
-        if (!twsReady) {
-          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
-        }
-
-        if (!repricedOptionLegs.length) {
-          throw new Error("This setup does not have any option legs to route to TWS.");
-        }
-
-        if (paperIbkrOrderType === "LMT" && paperIbkrLimitPrice === "") {
-          throw new Error("Enter a TWS limit price before routing this order.");
-        }
-      }
-
       const baseOrderPayload = {
         strategyId: strategyDefinition?.id ?? "strategy-1",
         strategyName: strategyDefinition?.name ?? "Strategy",
         combinationId: selectedRow.id,
-        combinationLabel: `${selectedRow.assetLabel} · ${selectedRow.strategyType} · ${strategyCloseDate}`,
+        combinationLabel: `${selectedRow.assetLabel} · ${strategyTypeLabel} · ${strategyCloseDate}`,
         assetLabel: selectedRow.assetLabel,
-        strategyType: selectedRow.strategyType,
+        strategyType: strategyTypeLabel,
         marketBias: selectedRow.marketBias,
         marketBiasTone: selectedRow.marketBiasTone,
         maxProfit: selectedRow.maxProfit,
@@ -2449,48 +3631,24 @@ export default function StrategyFinderWorkspace({
             isLive: true
           }))
         ],
-        execution:
-          paperExecutionRoute === "ibkr-paper"
-            ? {
-                route: "ibkr-paper",
-                orderType: paperIbkrOrderType,
-                tif: paperIbkrTif,
-                outsideRth: paperIbkrOutsideRth,
-                limitPrice:
-                  paperIbkrOrderType === "LMT"
-                    ? Number(paperIbkrLimitPrice)
-                    : null,
-                accountId: ibkrStatus?.selectedAccount ?? "",
-                smart: {
-                  enabled: paperIbkrOrderType === "LMT" && paperIbkrSmartEnabled
-                }
-              }
-            : paperExecutionRoute === "tws-paper"
-              ? {
-                  route: "tws-paper",
-                  orderType: paperIbkrOrderType,
-                  tif: paperIbkrTif,
-                  outsideRth: paperIbkrOutsideRth,
-                  limitPrice:
-                    paperIbkrOrderType === "LMT"
-                      ? Number(paperIbkrLimitPrice)
-                      : null,
-                  accountId: twsStatus?.selectedAccount ?? ""
-                }
-            : {
-                route: "local-paper"
-              }
+        execution: {
+          route: "local-paper"
+        }
       };
       const heatmapSnapshot = buildScenarioHeatmapSnapshot({
         startDate: valuationMinDate,
         endDate: valuationMaxDate,
         currentPrice: currentProxySpot || underlyingPrice,
         volatility: impliedVolatility,
+        ivAtm: impliedVolatility,
+        ivPut: putVolatility,
+        ivCall: callVolatility,
         spotLabel: proxySpotLabel,
         priceDigits: proxySpotDigits,
         secondarySpotLabel: converterRatio > 0 ? actualSpotLabel : "",
         secondaryPriceDigits: actualSpotDigits,
         getSecondarySpot: converterRatio > 0 ? (spot) => spot / converterRatio : null,
+        rowCount: heatmapRowCount,
         getCellPnL: calculateHeatmapPnL,
         rangeMultiplier: heatmapRangeMultiplier
       });
@@ -2499,7 +3657,10 @@ export default function StrategyFinderWorkspace({
         underlyingPrice: String(underlyingPrice),
         impliedVolatility: String(
           controls?.impliedVolatility ?? Number((impliedVolatility * 100).toFixed(2))
-        )
+        ),
+        ivPut: String(controls?.ivPut ?? Number((putVolatility * 100).toFixed(2))),
+        ivCall: String(controls?.ivCall ?? Number((callVolatility * 100).toFixed(2))),
+        polymarketYesPrice: String(controls?.polymarketYesPrice ?? "")
       };
       const orderSnapshot = {
         ...baseOrderPayload,
@@ -2534,20 +3695,9 @@ export default function StrategyFinderWorkspace({
       const pendingConfirmation = getPendingConfirmation(createResponse?.order);
 
       setPaperOrderState({
-        tone:
-          (paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper") &&
-          createResponse?.message?.toLowerCase().includes("failed")
-            ? "warning"
-            : pendingConfirmation
-              ? "warning"
-              : "success",
+        tone: pendingConfirmation ? "warning" : "success",
         message:
-          createResponse?.message ??
-          (paperExecutionRoute === "ibkr-paper"
-            ? "IBKR paper order submitted. You can monitor it from the paper-trading page."
-            : paperExecutionRoute === "tws-paper"
-              ? "TWS paper order submitted. You can monitor it from the paper-trading page."
-              : "Paper order saved. You can review or edit it from the paper-trading page."),
+          createResponse?.message ?? "Paper order saved. You can review or edit it from the paper-trading page.",
         confirmation: pendingConfirmation
       });
     } catch (error) {
@@ -2715,6 +3865,87 @@ export default function StrategyFinderWorkspace({
     (sum, leg) => sum + (leg.action === "LONG" ? Number(leg.ask ?? leg.entryPrice) : -Number(leg.ask ?? leg.entryPrice)),
     0
   );
+  const liveOptionComboQuote = (() => {
+    if (!repricedOptionLegs.length) {
+      return null;
+    }
+
+    const gcd = (left, right) => {
+      let a = Math.abs(Math.round(Number(left) || 0));
+      let b = Math.abs(Math.round(Number(right) || 0));
+
+      while (b) {
+        const next = a % b;
+        a = b;
+        b = next;
+      }
+
+      return a;
+    };
+
+    const lotCount = repricedOptionLegs.reduce((current, leg) => {
+      const quantity = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0);
+      if (!(quantity > 0)) {
+        return current;
+      }
+      if (current == null) {
+        return quantity;
+      }
+      return gcd(current, quantity);
+    }, null);
+
+    if (!(lotCount > 0)) {
+      return null;
+    }
+
+    let ready = true;
+    let bid = 0;
+    let ask = 0;
+
+    repricedOptionLegs.forEach((leg) => {
+      const quote = liveOptionLegQuotes?.[leg.id] ?? null;
+      const legBid = Number(quote?.bid ?? NaN);
+      const legAsk = Number(quote?.ask ?? NaN);
+
+      if (!(legBid > 0) || !(legAsk > 0) || legAsk < legBid) {
+        ready = false;
+        return;
+      }
+
+      const ratio = Math.max(Number(leg.quantity ?? 0), 0) / lotCount;
+      const direction = String(leg.action ?? "LONG").trim().toUpperCase() === "SHORT" ? -1 : 1;
+      const isShort = direction < 0;
+
+      bid += direction * (isShort ? legAsk : legBid) * ratio;
+      ask += direction * (isShort ? legBid : legAsk) * ratio;
+    });
+
+    if (!ready) {
+      return {
+        ready: false,
+        bid: null,
+        ask: null,
+        mid: null
+      };
+    }
+
+    return {
+      ready: true,
+      bid: Number(bid.toFixed(2)),
+      ask: Number(ask.toFixed(2)),
+      mid: Number(((bid + ask) / 2).toFixed(2))
+    };
+  })();
+  const displayedNetBid = liveOptionComboQuote?.ready ? liveOptionComboQuote.bid : effectiveNetBid;
+  const displayedNetAsk = liveOptionComboQuote?.ready ? liveOptionComboQuote.ask : effectiveNetAsk;
+  const displayedNetMark =
+    liveOptionComboQuote?.ready
+      ? liveOptionComboQuote.mid
+      : (() => {
+          const bid = Number(effectiveNetBid);
+          const ask = Number(effectiveNetAsk);
+          return Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : null;
+        })();
   const detailLegRows = [
     ...repricedPolymarketLegs.map((leg) => ({
       id: leg.id,
@@ -2746,14 +3977,21 @@ export default function StrategyFinderWorkspace({
     }))
   ];
 
-  async function loadOptionChain({ expiration, optionType, strikeHint = 0, force = false }) {
+  async function loadOptionChain({ expiration, optionType, strikeHint = 0, limit = 30, force = false }) {
     if (!optionRootSymbol || !expiration) {
       return null;
     }
 
     const requestKey = buildChainKey(optionRootSymbol, expiration, optionType);
-    if (!force && (optionChains[requestKey] || optionChainStatus[requestKey]?.loading)) {
-      return optionChains[requestKey] ?? null;
+    const cached = optionChains[requestKey] ?? null;
+    const cachedLimit = Number(cached?.requestedLimit ?? NaN);
+    const cachedIsAll = cached && Number.isFinite(cachedLimit) && cachedLimit <= 0;
+    const normalizedLimit = Number(limit ?? 30);
+    const wantsAll = Number.isFinite(normalizedLimit) && normalizedLimit <= 0;
+    const hasSufficientCache = cached && (!wantsAll || cachedIsAll);
+
+    if (!force && (hasSufficientCache || optionChainStatus[requestKey]?.loading)) {
+      return cached;
     }
 
     setOptionChainStatus((current) => ({
@@ -2768,7 +4006,9 @@ export default function StrategyFinderWorkspace({
       const response = await fetch(
         `/api/options/chain?symbol=${encodeURIComponent(optionRootSymbol)}&expiration=${encodeURIComponent(
           expiration
-        )}&optionType=${encodeURIComponent(optionType)}&strikeHint=${encodeURIComponent(strikeHint)}`
+        )}&optionType=${encodeURIComponent(optionType)}&strikeHint=${encodeURIComponent(
+          strikeHint
+        )}&limit=${encodeURIComponent(limit)}`
       );
 
       if (!response.ok) {
@@ -2776,26 +4016,27 @@ export default function StrategyFinderWorkspace({
       }
 
       const payload = await response.json();
-      setOptionChains((current) => ({
-        ...current,
-        [requestKey]: payload
-      }));
-      setOptionChainStatus((current) => ({
-        ...current,
-        [requestKey]: {
+      const enrichedPayload = {
+        ...payload,
+        requestedLimit: Number.isFinite(normalizedLimit) ? normalizedLimit : 30
+      };
+      setOptionChains((current) =>
+        writeBoundedCacheRecord(current, requestKey, enrichedPayload, MAX_OPTION_CHAIN_CACHE_ENTRIES)
+      );
+      setOptionChainStatus((current) =>
+        writeBoundedCacheRecord(current, requestKey, {
           loading: false,
           error: null
-        }
-      }));
-      return payload;
+        }, MAX_OPTION_CHAIN_CACHE_ENTRIES)
+      );
+      return enrichedPayload;
     } catch (error) {
-      setOptionChainStatus((current) => ({
-        ...current,
-        [requestKey]: {
+      setOptionChainStatus((current) =>
+        writeBoundedCacheRecord(current, requestKey, {
           loading: false,
           error: error.message
-        }
-      }));
+        }, MAX_OPTION_CHAIN_CACHE_ENTRIES)
+      );
       return null;
     }
   }
@@ -2875,6 +4116,28 @@ export default function StrategyFinderWorkspace({
   }
 
   function refreshVisibleOptionChains() {
+    if (optionRootSymbol && activeChainExpiration) {
+      const spot = Number(currentProxySpot ?? rawUnderlyingPrice ?? 0);
+      const resolvedStrikeHint =
+        Number.isFinite(spot) && spot > 0 ? spot : Number(activeOptionLeg?.strike ?? 0) || 0;
+      const requestLimit = chainShowAll ? 0 : 30;
+
+      loadOptionChain({
+        expiration: activeChainExpiration,
+        optionType: "call",
+        strikeHint: resolvedStrikeHint,
+        limit: requestLimit,
+        force: true
+      });
+      loadOptionChain({
+        expiration: activeChainExpiration,
+        optionType: "put",
+        strikeHint: resolvedStrikeHint,
+        limit: requestLimit,
+        force: true
+      });
+    }
+
     effectiveOptionLegs.forEach((leg) => {
       loadOptionChain({
         expiration: leg.expiry,
@@ -2882,6 +4145,244 @@ export default function StrategyFinderWorkspace({
         strikeHint: leg.strike,
         force: true
       });
+    });
+  }
+
+  function buildManualOptionLeg() {
+    const anchorLeg = effectiveOptionLegs[effectiveOptionLegs.length - 1] ?? optionLegs[optionLegs.length - 1] ?? null;
+    const spot = Number(currentProxySpot ?? rawUnderlyingPrice ?? 0);
+    const strikeHint = Number.isFinite(spot) && spot > 0 ? Math.round(spot) : Number(anchorLeg?.strike ?? 0) || 0;
+    const seed =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const legId = `${selectedRow?.id ?? "finder"}:option:manual:${seed}`;
+    const expiry = anchorLeg?.expiry ?? strategyCloseDate ?? polymarketResolutionDate ?? currentDate ?? "";
+    const optionType = anchorLeg?.optionType ?? "call";
+
+    return {
+      id: legId,
+      kind: "option",
+      label: `LONG ${String(optionType).toUpperCase()} ${strikeHint}`,
+      action: "LONG",
+      quantity: 1,
+      entryPrice: 0,
+      contractMultiplier: Number(anchorLeg?.contractMultiplier ?? 100) || 100,
+      optionType,
+      expiry,
+      strike: strikeHint,
+      contractSymbol: "",
+      bid: null,
+      ask: null,
+      bidSize: null,
+      askSize: null,
+      volume: null,
+      openInterest: null,
+      impliedVolatility: Number(anchorLeg?.impliedVolatility ?? impliedVolatility) || impliedVolatility,
+      quoteSource: "Manual",
+      isLive: false,
+      hasRealBidAsk: false
+    };
+  }
+
+  function handleAddManualLeg() {
+    if (!selectedRow) {
+      return;
+    }
+
+    const nextLeg = buildManualOptionLeg();
+    setActiveLegId(nextLeg.id);
+    setControls((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        manualOptionLegs: [...(current.manualOptionLegs ?? []), nextLeg],
+        legConfigs: {
+          ...(current.legConfigs ?? {}),
+          [nextLeg.id]: {
+            action: nextLeg.action,
+            optionType: nextLeg.optionType,
+            expiry: nextLeg.expiry,
+            strike: Number(nextLeg.strike),
+            bid: 0,
+            ask: 0,
+            bidSize: null,
+            askSize: null,
+            volume: null,
+            openInterest: null,
+            contractSymbol: "",
+            impliedVolatility: Number(nextLeg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
+            quoteSource: "Manual",
+            isLive: false,
+            hasRealBidAsk: false
+          }
+        },
+        legEdits: {
+          ...(current.legEdits ?? {}),
+          [nextLeg.id]: {
+            quantity: String(normalizeQuantityInput(nextLeg.quantity, 0)),
+            entryPrice: nextLeg.entryPrice
+          }
+        }
+      };
+    });
+  }
+
+  function handleAddPolymarketLeg() {
+    if (!removedPolymarketLeg) {
+      return;
+    }
+
+    const config = controls?.legConfigs?.[removedPolymarketLeg.id] ?? {};
+    const configuredOutcome =
+      String(config.outcome ?? removedPolymarketLeg.outcome).trim().toUpperCase() === "NO" ? "NO" : "YES";
+    handleSelectPolymarketLegOutcome(removedPolymarketLeg.id, configuredOutcome);
+  }
+
+  function handleRemoveOptionLeg(legId) {
+    setActiveLegId((current) => (current === legId ? "" : current));
+
+    setControls((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const manualLegs = current.manualOptionLegs ?? [];
+      const isManual = manualLegs.some((leg) => leg?.id === legId);
+      if (isManual) {
+        const nextManualLegs = manualLegs.filter((leg) => leg?.id !== legId);
+        const nextLegConfigs = { ...(current.legConfigs ?? {}) };
+        const nextLegEdits = { ...(current.legEdits ?? {}) };
+        delete nextLegConfigs[legId];
+        delete nextLegEdits[legId];
+
+        return {
+          ...current,
+          manualOptionLegs: nextManualLegs,
+          legConfigs: nextLegConfigs,
+          legEdits: nextLegEdits
+        };
+      }
+
+      const nextRemoved = new Set((current.removedLegIds ?? []).map((id) => String(id ?? "")).filter(Boolean));
+      nextRemoved.add(String(legId ?? ""));
+
+      return {
+        ...current,
+        removedLegIds: Array.from(nextRemoved)
+      };
+    });
+  }
+
+  function handleSelectPolymarketLegOutcome(legId, nextOutcome) {
+    if (!selectedRow || !legId) {
+      return;
+    }
+
+    const normalizedOutcome = String(nextOutcome ?? "").trim().toUpperCase() === "NO" ? "NO" : "YES";
+    const entryPrice = normalizedOutcome === "YES" ? marketReferenceYesPrice : marketReferenceNoPrice;
+    const seedLeg = (selectedRow?.legs ?? []).find(
+      (leg) => leg.kind === "binary" && String(leg.id ?? "") === String(legId)
+    );
+
+    if (!seedLeg || !Number.isFinite(entryPrice)) {
+      return;
+    }
+
+    setControls((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const currentEdits = current.legEdits?.[seedLeg.id] ?? {};
+      const currentConfig = current.legConfigs?.[seedLeg.id] ?? {};
+      const currentOutcome =
+        String(currentConfig.outcome ?? seedLeg.outcome).trim().toUpperCase() === "NO" ? "NO" : "YES";
+      const currentEntryPrice = Number(
+        currentEdits.entryPrice ?? (currentOutcome === "YES" ? marketReferenceYesPrice : marketReferenceNoPrice)
+      );
+      const currentQuantity = normalizeQuantityInput(
+        currentEdits.quantity ?? seedLeg.quantity,
+        normalizeQuantityInput(seedLeg.quantity, 0)
+      );
+      const impliedBudget = Number.isFinite(currentEntryPrice) ? currentQuantity * currentEntryPrice : 0;
+      const nextQuantity =
+        impliedBudget > 0 && entryPrice > 0
+          ? normalizeQuantityInput(impliedBudget / entryPrice, currentQuantity)
+          : currentQuantity;
+
+      const nextRemoved = new Set(
+        (current.removedLegIds ?? []).map((id) => String(id ?? "")).filter(Boolean)
+      );
+      nextRemoved.delete(String(seedLeg.id));
+
+      return {
+        ...current,
+        removedLegIds: Array.from(nextRemoved),
+        legConfigs: {
+          ...(current.legConfigs ?? {}),
+          [seedLeg.id]: {
+            ...currentConfig,
+            outcome: normalizedOutcome
+          }
+        },
+        legEdits: {
+          ...(current.legEdits ?? {}),
+          [seedLeg.id]: {
+            ...currentEdits,
+            entryPrice,
+            quantity: String(nextQuantity)
+          }
+        }
+      };
+    });
+  }
+
+  function handleToggleShowAllStrikes() {
+    if (chainShowAll) {
+      setChainShowAll(false);
+      return;
+    }
+
+    setChainShowAll(true);
+  }
+
+  function handleChainExpirationChange(nextExpiration) {
+    if (!activeOptionLeg || !nextExpiration) {
+      return;
+    }
+
+    updateLegConfig(activeOptionLeg.id, {
+      expiry: nextExpiration,
+      contractSymbol: "",
+      bidSize: null,
+      askSize: null,
+      volume: null,
+      openInterest: null,
+      hasRealBidAsk: false
+    });
+
+    const spot = Number(currentProxySpot ?? rawUnderlyingPrice ?? 0);
+    const resolvedStrikeHint =
+      Number.isFinite(spot) && spot > 0 ? spot : Number(activeOptionLeg?.strike ?? 0) || 0;
+    const requestLimit = chainShowAll ? 0 : 30;
+
+    loadOptionChain({
+      expiration: nextExpiration,
+      optionType: "call",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit,
+      force: true
+    });
+    loadOptionChain({
+      expiration: nextExpiration,
+      optionType: "put",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit,
+      force: true
     });
   }
 
@@ -3008,6 +4509,54 @@ export default function StrategyFinderWorkspace({
     strategyEditorOpen,
     optionRootSymbol,
     editorChainRequests.map((request) => `${request.expiration}:${request.optionType}`).join("|")
+  ]);
+
+  useEffect(() => {
+    if (!strategyEditorOpen) {
+      return;
+    }
+
+    const optionLegIds = effectiveOptionLegs.map((leg) => String(leg?.id ?? "")).filter(Boolean);
+    if (!optionLegIds.length) {
+      setActiveLegId("");
+      return;
+    }
+
+    setActiveLegId((current) =>
+      current && optionLegIds.includes(current) ? current : optionLegIds[optionLegIds.length - 1]
+    );
+  }, [strategyEditorOpen, effectiveOptionLegs.map((leg) => String(leg?.id ?? "")).join("|")]);
+
+  useEffect(() => {
+    if (!strategyEditorOpen || !optionRootSymbol || !activeChainExpiration) {
+      return;
+    }
+
+    const spot = Number(currentProxySpot ?? rawUnderlyingPrice ?? 0);
+    const resolvedStrikeHint =
+      Number.isFinite(spot) && spot > 0 ? spot : Number(activeOptionLeg?.strike ?? 0) || 0;
+    const requestLimit = chainShowAll ? 0 : 30;
+
+    loadOptionChain({
+      expiration: activeChainExpiration,
+      optionType: "call",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit
+    });
+    loadOptionChain({
+      expiration: activeChainExpiration,
+      optionType: "put",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit
+    });
+  }, [
+    activeChainExpiration,
+    activeOptionLeg?.strike,
+    chainShowAll,
+    currentProxySpot,
+    optionRootSymbol,
+    rawUnderlyingPrice,
+    strategyEditorOpen
   ]);
 
   const chartHeight = chartExpanded ? 1000 : 250;
@@ -3174,6 +4723,8 @@ export default function StrategyFinderWorkspace({
           </span>
         </div>
       </header>
+      <EntryResearchPanel initialSymbol={optionRootSymbol} threshold />
+      <p className="card-copy">Profitable scenario share is a chart-grid statistic, not a probability. Touch-event payoffs are conditional endpoint approximations; they do not model a touch followed by reversal.</p>
 
       {refreshNotice ? (
         <div className={`refresh-feedback refresh-feedback--${refreshNotice.tone ?? "info"}`}>
@@ -3227,9 +4778,76 @@ export default function StrategyFinderWorkspace({
           </div>
         </details>
 
-        <button type="button" className="finder-control finder-control--static">
-          Expected price range {finder.filters.priceRange}
-        </button>
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("expectedMove", node)}
+          onToggle={() => handleFilterMenuToggle("expectedMove")}
+        >
+          <summary className="finder-control">
+            <span>{expectedMoveSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Expected move</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => {
+                  setExpectedMoveMin("-20");
+                  setExpectedMoveMax("20");
+                }}
+              >
+                Reset
+              </button>
+            </div>
+
+            <div className="finder-menu__list">
+              {EXPECTED_PRICE_RANGE_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  className={`finder-menu__option ${
+                    activeExpectedMovePreset?.label === preset.label ? "finder-menu__option--active" : ""
+                  }`}
+                  onClick={() => {
+                    setExpectedMoveMin(String(preset.min));
+                    setExpectedMoveMax(String(preset.max));
+                  }}
+                >
+                  <span className="tv-finder__menu-title">{preset.label}</span>
+                  <span className="tv-finder__menu-copy">{preset.description}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="finder-menu__custom finder-menu__custom--metrics">
+              <label>
+                <span>Min %</span>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={expectedMoveMin}
+                  onChange={(event) => setExpectedMoveMin(event.target.value)}
+                  placeholder="-5"
+                />
+              </label>
+              <label>
+                <span>Max %</span>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={expectedMoveMax}
+                  onChange={(event) => setExpectedMoveMax(event.target.value)}
+                  placeholder="5"
+                />
+              </label>
+            </div>
+
+            <div className="finder-menu__notice">
+              Use negative values for bearish ranges (for example -10 to -5).
+            </div>
+          </div>
+        </details>
 
         <details
           className="finder-menu"
@@ -3242,9 +4860,14 @@ export default function StrategyFinderWorkspace({
           <div className="finder-menu__panel">
             <div className="finder-menu__header">
               <strong>Products</strong>
-              <button type="button" className="finder-menu__reset" onClick={() => setActiveAssets(availableAssets)}>
-                All
-              </button>
+              <div className="finder-menu__header-actions">
+                <button type="button" className="finder-menu__reset" onClick={() => setActiveAssets(availableAssets)}>
+                  All
+                </button>
+                <button type="button" className="finder-menu__reset" onClick={() => setActiveAssets([])}>
+                  Clear all
+                </button>
+              </div>
             </div>
             <div className="finder-menu__list">
               {availableAssets.map((assetLabel) => (
@@ -3274,13 +4897,18 @@ export default function StrategyFinderWorkspace({
           <div className="finder-menu__panel">
             <div className="finder-menu__header">
               <strong>Strategy types</strong>
-              <button
-                type="button"
-                className="finder-menu__reset"
-                onClick={() => setActiveStrategyTypes(availableStrategyTypes)}
-              >
-                All
-              </button>
+              <div className="finder-menu__header-actions">
+                <button
+                  type="button"
+                  className="finder-menu__reset"
+                  onClick={() => setActiveStrategyTypes(availableStrategyTypes)}
+                >
+                  All
+                </button>
+                <button type="button" className="finder-menu__reset" onClick={() => setActiveStrategyTypes([])}>
+                  Clear all
+                </button>
+              </div>
             </div>
             <div className="finder-menu__list">
               {availableStrategyTypes.map((strategyType) => (
@@ -3345,21 +4973,137 @@ export default function StrategyFinderWorkspace({
 
         <details
           className="finder-menu"
-          ref={(node) => setFilterMenuRef("pnl", node)}
-          onToggle={() => handleFilterMenuToggle("pnl")}
+          ref={(node) => setFilterMenuRef("bidAskSpread", node)}
+          onToggle={() => handleFilterMenuToggle("bidAskSpread")}
         >
           <summary className="finder-control">
-            <span>{pnlSummary}</span>
+            <span>{bidAskSpreadSummary}</span>
           </summary>
           <div className="finder-menu__panel">
             <div className="finder-menu__header">
-              <strong>P&amp;L filters</strong>
+              <strong>Bid-ask spread</strong>
               <button
                 type="button"
                 className="finder-menu__reset"
                 onClick={() => {
-                  setMaxProfitMin("");
-                  setMaxProfitMax("");
+                  setBidAskSpreadMin("");
+                  setBidAskSpreadMax("");
+                }}
+              >
+                Reset
+              </button>
+            </div>
+
+            <div className="finder-menu__list">
+              {BID_ASK_SPREAD_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  className={`finder-menu__option ${
+                    activeBidAskSpreadPreset?.label === preset.label ? "finder-menu__option--active" : ""
+                  }`}
+                  onClick={() => {
+                    setBidAskSpreadMin(preset.min != null ? String(preset.min) : "");
+                    setBidAskSpreadMax(preset.max != null ? String(preset.max) : "");
+                  }}
+                >
+                  <span className="tv-finder__menu-title">{preset.label}</span>
+                  <span className="tv-finder__menu-copy">{preset.description}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="finder-menu__custom finder-menu__custom--metrics">
+              <label>
+                <span>Min %</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={bidAskSpreadMin}
+                  onChange={(event) => setBidAskSpreadMin(event.target.value)}
+                  placeholder="1.0"
+                />
+              </label>
+              <label>
+                <span>Max %</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={bidAskSpreadMax}
+                  onChange={(event) => setBidAskSpreadMax(event.target.value)}
+                  placeholder="3.0"
+                />
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("normalizedOptionVolume", node)}
+          onToggle={() => handleFilterMenuToggle("normalizedOptionVolume")}
+        >
+          <summary className="finder-control">
+            <span>{normalizedOptionVolumeSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Opt vol (norm)</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => {
+                  setNormalizedOptionVolumeMin("");
+                  setNormalizedOptionVolumeMax("");
+                }}
+              >
+                Reset
+              </button>
+            </div>
+            <div className="finder-menu__custom finder-menu__custom--metrics">
+              <label>
+                <span>Min</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={normalizedOptionVolumeMin}
+                  onChange={(event) => setNormalizedOptionVolumeMin(event.target.value)}
+                  placeholder="0"
+                />
+              </label>
+              <label>
+                <span>Max</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={normalizedOptionVolumeMax}
+                  onChange={(event) => setNormalizedOptionVolumeMax(event.target.value)}
+                  placeholder="Any"
+                />
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("maxLoss", node)}
+          onToggle={() => handleFilterMenuToggle("maxLoss")}
+        >
+          <summary className="finder-control">
+            <span>{maxLossSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Max loss</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => {
                   setMaxLossMin(DEFAULT_MAX_LOSS_FLOOR);
                   setMaxLossMax("");
                 }}
@@ -3369,7 +5113,7 @@ export default function StrategyFinderWorkspace({
             </div>
             <div className="finder-menu__custom finder-menu__custom--metrics">
               <label>
-                <span>Max loss min</span>
+                <span>Min</span>
                 <input
                   type="number"
                   step="100"
@@ -3379,7 +5123,7 @@ export default function StrategyFinderWorkspace({
                 />
               </label>
               <label>
-                <span>Max loss max</span>
+                <span>Max</span>
                 <input
                   type="number"
                   step="100"
@@ -3388,8 +5132,82 @@ export default function StrategyFinderWorkspace({
                   placeholder="No cap"
                 />
               </label>
+            </div>
+          </div>
+        </details>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("midMinusTheo", node)}
+          onToggle={() => handleFilterMenuToggle("midMinusTheo")}
+        >
+          <summary className="finder-control">
+            <span>{midMinusTheoSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Avg B/A - Theo</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => {
+                  setMidMinusTheoMin("");
+                  setMidMinusTheoMax("");
+                }}
+              >
+                Reset
+              </button>
+            </div>
+            <div className="finder-menu__custom finder-menu__custom--metrics">
               <label>
-                <span>Max profit min</span>
+                <span>Min</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={midMinusTheoMin}
+                  onChange={(event) => setMidMinusTheoMin(event.target.value)}
+                  placeholder="-1.00"
+                />
+              </label>
+              <label>
+                <span>Max</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={midMinusTheoMax}
+                  onChange={(event) => setMidMinusTheoMax(event.target.value)}
+                  placeholder="1.00"
+                />
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("maxProfit", node)}
+          onToggle={() => handleFilterMenuToggle("maxProfit")}
+        >
+          <summary className="finder-control">
+            <span>{maxProfitSummary}</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Max profit</strong>
+              <button
+                type="button"
+                className="finder-menu__reset"
+                onClick={() => {
+                  setMaxProfitMin("");
+                  setMaxProfitMax("");
+                }}
+              >
+                Reset
+              </button>
+            </div>
+            <div className="finder-menu__custom finder-menu__custom--metrics">
+              <label>
+                <span>Min</span>
                 <input
                   type="number"
                   step="100"
@@ -3399,7 +5217,7 @@ export default function StrategyFinderWorkspace({
                 />
               </label>
               <label>
-                <span>Max profit max</span>
+                <span>Max</span>
                 <input
                   type="number"
                   step="100"
@@ -3423,13 +5241,18 @@ export default function StrategyFinderWorkspace({
           <div className="finder-menu__panel">
             <div className="finder-menu__header">
               <strong>Tags</strong>
-              <button
-                type="button"
-                className="finder-menu__reset"
-                onClick={() => setActiveBiasTags(availableBiasTags)}
-              >
-                All
-              </button>
+              <div className="finder-menu__header-actions">
+                <button
+                  type="button"
+                  className="finder-menu__reset"
+                  onClick={() => setActiveBiasTags(availableBiasTags)}
+                >
+                  All
+                </button>
+                <button type="button" className="finder-menu__reset" onClick={() => setActiveBiasTags([])}>
+                  Clear all
+                </button>
+              </div>
             </div>
             <div className="finder-menu__list">
               {availableBiasTags.map((marketBias) => (
@@ -3442,38 +5265,6 @@ export default function StrategyFinderWorkspace({
                   onClick={() => toggleBiasTag(marketBias)}
                 >
                   {marketBias}
-                </button>
-              ))}
-            </div>
-          </div>
-        </details>
-
-        <details
-          className="finder-menu"
-          ref={(node) => setFilterMenuRef("source", node)}
-          onToggle={() => handleFilterMenuToggle("source")}
-        >
-          <summary className="finder-control">
-            <span>{sourceSummary}</span>
-          </summary>
-          <div className="finder-menu__panel">
-            <div className="finder-menu__header">
-              <strong>Polymarket source</strong>
-              <button type="button" className="finder-menu__reset" onClick={() => setSourceFilter("all")}>
-                All
-              </button>
-            </div>
-            <div className="finder-menu__list">
-              {SOURCE_FILTER_OPTIONS.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={`finder-menu__option ${
-                    sourceFilter === option.id ? "finder-menu__option--active" : ""
-                  }`}
-                  onClick={() => setSourceFilter(option.id)}
-                >
-                  {option.label}
                 </button>
               ))}
             </div>
@@ -3499,11 +5290,64 @@ export default function StrategyFinderWorkspace({
         >
           {showSeedData ? "Seed data shown" : `Show seed data${seedHiddenCount ? ` (${seedHiddenCount})` : ""}`}
         </button>
+
+        <button
+          type="button"
+          className="chart-toggle chart-toggle--compact"
+          onClick={saveFilters}
+        >
+          Save filters
+        </button>
+
+        <details
+          className="finder-menu"
+          ref={(node) => setFilterMenuRef("columns", node)}
+          onToggle={() => handleFilterMenuToggle("columns")}
+        >
+          <summary className="finder-control">
+            <span>Columns</span>
+          </summary>
+          <div className="finder-menu__panel">
+            <div className="finder-menu__header">
+              <strong>Visible columns</strong>
+              <div className="finder-menu__header-actions">
+                <button type="button" className="finder-menu__reset" onClick={resetVisibleColumns}>
+                  All
+                </button>
+                <button type="button" className="finder-menu__reset" onClick={applyCompactVisibleColumns}>
+                  Compact
+                </button>
+              </div>
+            </div>
+            <div className="finder-menu__list">
+              {columns.map((column) => {
+                const isActive = visibleFinderColumnKeys.includes(column.key);
+                const isOnlyVisibleColumn = isActive && visibleFinderColumnKeys.length === 1;
+
+                return (
+                  <button
+                    key={column.key}
+                    type="button"
+                    className={`finder-menu__option ${isActive ? "finder-menu__option--active" : ""}`}
+                    onClick={() => toggleVisibleColumn(column.key)}
+                    disabled={isOnlyVisibleColumn}
+                    aria-pressed={isActive}
+                  >
+                    {column.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="finder-menu__notice">
+              Smaller screens start in compact mode. Turn columns on here when you need the full table.
+            </p>
+          </div>
+        </details>
       </section>
 
       {selectedRowSummary && detailOpen ? (
         <>
-          <section ref={detailRef} className="selection-banner">
+	          <section ref={detailRef} className="selection-banner">
             <div className="selection-banner__title">
               <span className="brand__eyebrow">Selected combination</span>
               <strong>
@@ -3514,7 +5358,25 @@ export default function StrategyFinderWorkspace({
               <div className="detail-badges">
                 {selectedRow ? <span className="pill pill--ghost">{strategyCloseDays} DTE</span> : null}
                 <span className="pill pill--live">{selectedRowDisplaySource}</span>
-              </div>
+	                {liveOptionComboQuote ? (
+	                  <span
+	                    className="pill pill--ghost"
+	                    title={
+	                      liveOptionComboQuote.ready
+	                        ? `Bid ${formatQuotePrice(liveOptionComboQuote.bid)} · Ask ${formatQuotePrice(liveOptionComboQuote.ask)}`
+	                        : "Waiting for live option bid/ask quotes..."
+	                    }
+	                  >
+	                    Live mark {formatQuotePrice(liveOptionComboQuote.mid)}
+	                  </span>
+	                ) : null}
+	                {liveOptionLegQuotesUpdatedAt ? (
+	                  <span className="pill pill--ghost">Updated {formatShortTime(liveOptionLegQuotesUpdatedAt)}</span>
+	                ) : null}
+	                <span className="pill pill--ghost">
+	                  Live theo {formatNumber(liveTheoPrice ?? selectedRow?.theoPrice ?? selectedRowSummary?.theoPrice, 2)}
+	                </span>
+	              </div>
               <button
                 type="button"
                 className={`chart-toggle ${!detailCollapsed ? "chart-toggle--active" : ""}`}
@@ -3541,7 +5403,7 @@ export default function StrategyFinderWorkspace({
                 <article className="detail-card">
                   <div className="detail-card__title">
                     <div>
-                      <h3>{selectedRow.strategyType}</h3>
+                      <h3>{strategyTypeLabel}</h3>
                       <div className="detail-badges">
                         <span className="pill pill--ghost">{selectedRow.assetLabel}</span>
                         <span className="pill pill--ghost">{strategyCloseDate}</span>
@@ -3554,7 +5416,21 @@ export default function StrategyFinderWorkspace({
                         className={`chart-toggle ${strategyEditorOpen ? "chart-toggle--active" : ""}`}
                         onClick={() => setStrategyEditorOpen((current) => !current)}
                       >
-                        {strategyEditorOpen ? "Close editor" : "Edit strategy"}
+                        {strategyEditorOpen ? "Close builder" : "Add to strategy builder"}
+                      </button>
+                      <button
+                        type="button"
+                        className={`chart-toggle ${isSelectedInSetupWatchlist ? "chart-toggle--active" : ""}`}
+                        onClick={handleToggleSetupWatchlist}
+                        disabled={!selectedRow || watchlistSaving || !canMutateSetupWatchlist}
+                      >
+                        {watchlistSaving
+                          ? isSelectedInSetupWatchlist
+                            ? "Removing..."
+                            : "Adding..."
+                          : isSelectedInSetupWatchlist
+                            ? "Remove from watchlist"
+                            : "Add to watchlist"}
                       </button>
                       {selectedPolymarketEventUrl ? (
                         <a href={selectedPolymarketEventUrl} target="_blank" rel="noreferrer" className="pill pill--ghost">
@@ -3564,11 +5440,17 @@ export default function StrategyFinderWorkspace({
                     </div>
                   </div>
 
+                  {watchlistNotice ? (
+                    <div className="refresh-feedback refresh-feedback--error">
+                      <span>{watchlistNotice}</span>
+                    </div>
+                  ) : null}
+
                   {strategyEditorOpen ? (
                     <section className="strategy-editor">
                       <div className="strategy-editor__header">
                         <div>
-                          <span className="brand__eyebrow">Strategy editor</span>
+                          <span className="brand__eyebrow">Strategy builder</span>
                           <p className="detail-chart__copy">
                             Change each option leg to long or short and replace it from the option chain.
                           </p>
@@ -3577,10 +5459,313 @@ export default function StrategyFinderWorkspace({
                           <span className={`pill ${editorHasLiveQuotes ? "pill--live" : "pill--ghost"}`}>
                             {editorHasLiveQuotes ? "Live chain" : "Synthetic chain"}
                           </span>
+                          <button
+                            type="button"
+                            className="chart-toggle chart-toggle--compact"
+                            onClick={handleAddManualLeg}
+                            disabled={!selectedRow}
+                          >
+                            Add Option Leg
+                          </button>
+                          {polymarketSeedLegs.length ? (
+                            <button
+                              type="button"
+                              className="chart-toggle chart-toggle--compact"
+                              onClick={handleAddPolymarketLeg}
+                              disabled={!removedPolymarketLeg}
+                              title={
+                                removedPolymarketLeg
+                                  ? "Restore the Polymarket leg for this setup"
+                                  : "Polymarket leg already included"
+                              }
+                            >
+                              Add Polymarket Leg
+                            </button>
+                          ) : null}
                           <button type="button" className="chart-toggle" onClick={refreshVisibleOptionChains}>
                             Refresh chain
                           </button>
                         </div>
+                      </div>
+
+                      <div className="strategy-editor__chain">
+                        <div className="strategy-editor__chain-head">
+                          <div className="strategy-editor__chain-title">
+                            <span className="brand__eyebrow">Option chain</span>
+                            <strong>
+                              {optionRootSymbol || selectedRow?.assetLabel || "Chain"}
+                              {activeChainExpiration ? ` · ${activeChainExpiration}` : ""}
+                            </strong>
+                          </div>
+                          <div className="strategy-editor__chain-actions">
+                            <button
+                              type="button"
+                              className={`chart-toggle chart-toggle--compact ${chainShowAll ? "chart-toggle--active" : ""}`}
+                              onClick={handleToggleShowAllStrikes}
+                              disabled={!optionRootSymbol || !activeChainExpiration}
+                            >
+                              {chainShowAll ? "Show 30 strikes" : "Show all strikes"}
+                            </button>
+                          </div>
+                        </div>
+
+                        {activeExpiryTabs.length ? (
+                          <div className="strategy-editor__expiry-tabs">
+                            {activeExpiryTabs.map((expiry) => {
+                              const dte = differenceInDays(currentDate || "", expiry);
+                              const dteLabel = `${dte >= 0 ? dte : `-${Math.abs(dte)}`}D`;
+
+                              return (
+                                <button
+                                  key={`expiry-tab:${expiry}`}
+                                  type="button"
+                                  className={`expiry-tab ${expiry === activeChainExpiration ? "expiry-tab--active" : ""}`}
+                                  onClick={() => handleChainExpirationChange(expiry)}
+                                  disabled={!activeOptionLeg}
+                                >
+                                  <span className="expiry-tab__date">{formatShortDate(expiry)}</span>
+                                  <span className="expiry-tab__dte">{dteLabel}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+
+                        <div className="strategy-editor__chain-status">
+                          <span>
+                            Spot:{" "}
+                            {Number.isFinite(currentProxySpot) && currentProxySpot > 0
+                              ? formatCurrency(currentProxySpot)
+                              : formatCurrency(rawUnderlyingPrice)}
+                          </span>
+                          <span>
+                            Chain:{" "}
+                            {activeCallChainStatus?.loading || activePutChainStatus?.loading
+                              ? "Loading..."
+                              : activeCallChainStatus?.error || activePutChainStatus?.error
+                                ? activeCallChainStatus?.error || activePutChainStatus?.error
+                                : activeCallChain?.warning ||
+                                  activePutChain?.warning ||
+                                  (activeCallChain?.isLive || activePutChain?.isLive
+                                    ? "Live quotes"
+                                    : "Synthetic quotes")}
+                          </span>
+                        </div>
+
+                        {activeChainRows.length ? (
+                          <div className="strategy-editor__chain-table-wrap">
+                            <table className="strategy-editor__chain-table">
+                              <thead>
+                                <tr>
+                                  <th colSpan={OPTION_CHAIN_SIDE_COLUMNS.length} className="chain-group chain-group--call">
+                                    Calls
+                                  </th>
+                                  <th rowSpan={2} className="chain-strike-head">
+                                    Strike
+                                  </th>
+                                  <th colSpan={OPTION_CHAIN_SIDE_COLUMNS.length} className="chain-group chain-group--put">
+                                    Puts
+                                  </th>
+                                </tr>
+                                <tr>
+                                  {OPTION_CHAIN_CALL_COLUMNS.map((column) => (
+                                    <th key={`call:${column.key}`}>{column.label}</th>
+                                  ))}
+                                  {OPTION_CHAIN_SIDE_COLUMNS.map((column) => (
+                                    <th key={`put:${column.key}`}>{column.label}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(() => {
+                                  const chainSpot = Number(currentProxySpot ?? rawUnderlyingPrice ?? 0);
+                                  const spotSeparatorLabel =
+                                    chainSpot > 0 ? `Spot ${formatNumber(chainSpot, proxySpotDigits)}` : "";
+                                  let spotSeparatorInserted = false;
+                                  const activeStrike = Number(activeOptionLeg?.strike ?? NaN);
+                                  const activeType = String(activeOptionLeg?.optionType ?? "").toLowerCase();
+                                  const activeContractSymbol = String(activeOptionLeg?.contractSymbol ?? "");
+                                  const chainColumnSpan = OPTION_CHAIN_SIDE_COLUMNS.length * 2 + 1;
+
+                                  const formatPercentLabel = (value, digits = 2) => {
+                                    const numericValue = Number(value);
+                                    if (!Number.isFinite(numericValue)) {
+                                      return "—";
+                                    }
+
+                                    return `${numericValue.toFixed(digits)}%`;
+                                  };
+
+                                  const formatSignedPercentLabel = (value, digits = 2) => {
+                                    const numericValue = Number(value);
+                                    if (!Number.isFinite(numericValue)) {
+                                      return "—";
+                                    }
+
+                                    return `${numericValue > 0 ? "+" : ""}${numericValue.toFixed(digits)}%`;
+                                  };
+
+                                  const formatMetric = (contract, column) => {
+                                    if (!contract) {
+                                      return "—";
+                                    }
+
+                                    const rawValue = contract[column.key];
+                                    if (rawValue == null) {
+                                      return "—";
+                                    }
+
+                                    const numericValue = Number(rawValue);
+                                    if (!Number.isFinite(numericValue)) {
+                                      return "—";
+                                    }
+
+                                    if (column.kind === "count") {
+                                      return formatCompactCount(numericValue);
+                                    }
+
+                                    if (column.kind === "price") {
+                                      return formatNumber(numericValue, 2);
+                                    }
+
+                                    if (column.kind === "number") {
+                                      return formatNumber(numericValue, column.digits ?? 3);
+                                    }
+
+                                    if (column.kind === "percent") {
+                                      const scaledValue = numericValue * (column.scale ?? 1);
+                                      if (!Number.isFinite(scaledValue)) {
+                                        return "—";
+                                      }
+
+                                      if (column.key === "impliedVolatility") {
+                                        return formatPercentLabel(scaledValue, column.digits ?? 2);
+                                      }
+
+                                      return formatSignedPercentLabel(scaledValue, column.digits ?? 2);
+                                    }
+
+                                    return String(rawValue);
+                                  };
+
+                                  const renderSideCells = (side, contract, isActiveStrike, columns) =>
+                                    columns.map((column) => {
+                                      if (column.kind === "select") {
+                                        const markValue = Number(contract?.mark ?? contract?.mid ?? NaN);
+                                        const markLabel = Number.isFinite(markValue) ? formatNumber(markValue, 2) : "—";
+                                        const contractSymbol = String(contract?.contractSymbol ?? "");
+                                        const isSelected =
+                                          (activeContractSymbol &&
+                                            contractSymbol &&
+                                            contractSymbol === activeContractSymbol) ||
+                                          (!activeContractSymbol && isActiveStrike && activeType === side);
+
+                                        return (
+                                          <td key={`${side}:${column.key}`} className="chain-metric">
+                                            <button
+                                              type="button"
+                                              className={`chain-quote chain-quote--${side} ${
+                                                isSelected ? "chain-quote--active" : ""
+                                              }`}
+                                              onClick={() =>
+                                                activeOptionLeg?.id ? applyChainContractToLeg(activeOptionLeg.id, contract) : null
+                                              }
+                                              disabled={!contract || !activeOptionLeg?.id}
+                                            >
+                                              {markLabel}
+                                            </button>
+                                          </td>
+                                        );
+                                      }
+
+                                      const changeValue =
+                                        column.key === "changePercent" ? Number(contract?.changePercent ?? NaN) : NaN;
+                                      const volumeValue = column.key === "volume" ? Number(contract?.volume ?? NaN) : NaN;
+                                      const volumeStrength =
+                                        Number.isFinite(volumeValue) && volumeValue > 500
+                                          ? Math.min(Math.max((volumeValue - 500) / (10000 - 500), 0), 1)
+                                          : 0;
+                                      const metricLabel = formatMetric(contract, column);
+                                      const metricToneClass =
+                                        column.key === "changePercent" && Number.isFinite(changeValue)
+                                          ? changeValue > 0
+                                            ? "chain-metric__value--pos"
+                                            : changeValue < 0
+                                              ? "chain-metric__value--neg"
+                                              : ""
+                                          : "";
+                                      const isVolumeHot = column.key === "volume" && volumeStrength > 0;
+
+                                      return (
+                                        <td key={`${side}:${column.key}`} className="chain-metric">
+                                          {column.key === "volume" ? (
+                                            <span
+                                              className={`chain-volume ${isVolumeHot ? "chain-volume--hot" : ""}`}
+                                              style={
+                                                isVolumeHot ? { "--volume-strength": volumeStrength.toFixed(3) } : undefined
+                                              }
+                                            >
+                                              {metricLabel}
+                                            </span>
+                                          ) : (
+                                            <span className={`chain-metric__value ${metricToneClass}`}>{metricLabel}</span>
+                                          )}
+                                        </td>
+                                      );
+                                    });
+
+                                  return [
+                                    ...activeChainRows.flatMap((row) => {
+                                      const strike = Number(row?.strike ?? NaN);
+                                      const isActiveStrike =
+                                        Number.isFinite(activeStrike) &&
+                                        Number.isFinite(strike) &&
+                                        Math.abs(activeStrike - strike) < 0.001;
+                                      const shouldInsertSpotSeparator =
+                                        !spotSeparatorInserted &&
+                                        spotSeparatorLabel &&
+                                        Number.isFinite(strike) &&
+                                        strike >= chainSpot;
+
+                                      if (shouldInsertSpotSeparator) {
+                                        spotSeparatorInserted = true;
+                                      }
+
+                                      return [
+                                        shouldInsertSpotSeparator ? (
+                                          <tr key={`spot:${activeChainExpiration}`} className="chain-spot-row">
+                                            <td colSpan={chainColumnSpan}>{spotSeparatorLabel}</td>
+                                          </tr>
+                                        ) : null,
+                                        <tr
+                                          key={`strike:${strike}`}
+                                          className={isActiveStrike ? "chain-row chain-row--active" : "chain-row"}
+                                        >
+                                          {renderSideCells("call", row.call, isActiveStrike, OPTION_CHAIN_CALL_COLUMNS)}
+                                          <td className="chain-strike">{formatNumber(strike, 1)}</td>
+                                          {renderSideCells("put", row.put, isActiveStrike, OPTION_CHAIN_SIDE_COLUMNS)}
+                                        </tr>
+                                      ].filter(Boolean);
+                                    }),
+                                    spotSeparatorLabel && activeChainRows.length && !spotSeparatorInserted ? (
+                                      <tr key={`spot:${activeChainExpiration}:tail`} className="chain-spot-row">
+                                        <td colSpan={chainColumnSpan}>{spotSeparatorLabel}</td>
+                                      </tr>
+                                    ) : null
+                                  ].filter(Boolean);
+                                })()}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="strategy-editor__chain-empty">
+                            {activeCallChainStatus?.loading || activePutChainStatus?.loading
+                              ? "Loading option chain..."
+                              : activeCallChainStatus?.error || activePutChainStatus?.error
+                                ? activeCallChainStatus?.error || activePutChainStatus?.error
+                                : "No option contracts returned for this expiry."}
+                          </div>
+                        )}
                       </div>
 
                       <div className="strategy-editor__grid">
@@ -3594,14 +5779,48 @@ export default function StrategyFinderWorkspace({
                           )
                             ? leg.contractSymbol
                             : "";
+                          const selectedChainContract = selectedContractValue
+                            ? chainContracts.find((contract) => contract.contractSymbol === selectedContractValue) ?? null
+                            : null;
+                          const chainBid = selectedChainContract?.bid ?? leg.bid;
+                          const chainAsk = selectedChainContract?.ask ?? leg.ask;
+                          const chainQuoteSize = formatQuoteSizePair(
+                            selectedChainContract?.bidSize ?? leg.bidSize,
+                            selectedChainContract?.askSize ?? leg.askSize
+                          );
+                          const chainSpot = currentProxySpot > 0 ? currentProxySpot : 0;
+                          const spotSeparatorLabel =
+                            chainSpot > 0
+                              ? `---------- Spot ${formatNumber(chainSpot, proxySpotDigits)} ----------`
+                              : "";
+                          let spotSeparatorInserted = false;
 
                           return (
-                            <article key={leg.id} className="strategy-editor__card">
+                            <article
+                              key={leg.id}
+                              className={`strategy-editor__card ${
+                                leg.id === activeLegId ? "strategy-editor__card--active" : ""
+                              }`}
+                              onClick={() => setActiveLegId(leg.id)}
+                              onFocusCapture={() => setActiveLegId(leg.id)}
+                            >
                               <div className="strategy-editor__card-head">
                                 <strong>Leg {index + 1}</strong>
-                                <span className="pill pill--ghost">
-                                  {leg.quoteSource === "polygon" ? "Polygon.io" : chainPayload?.sourceLabel ?? "Seeded"}
-                                </span>
+                                <div className="strategy-editor__card-actions">
+                                  <span className="pill pill--ghost">
+                                    {chainPayload?.sourceLabel ?? "Seeded"}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="chart-toggle chart-toggle--compact"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleRemoveOptionLeg(leg.id);
+                                    }}
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
                               </div>
 
                               <div className="strategy-editor__row">
@@ -3668,11 +5887,34 @@ export default function StrategyFinderWorkspace({
                                     }}
                                   >
                                     <option value="">Select contract</option>
-                                    {chainContracts.map((contract) => (
-                                      <option key={contract.contractSymbol} value={contract.contractSymbol}>
-                                        {formatContractChoiceLabel(contract)}
+                                    {chainContracts.map((contract) => {
+                                      const contractStrike = Number(contract?.strike ?? 0);
+                                      const shouldInsertSpotSeparator =
+                                        !spotSeparatorInserted &&
+                                        spotSeparatorLabel &&
+                                        Number.isFinite(contractStrike) &&
+                                        contractStrike >= chainSpot;
+
+                                      if (shouldInsertSpotSeparator) {
+                                        spotSeparatorInserted = true;
+                                      }
+
+                                      return [
+                                        shouldInsertSpotSeparator ? (
+                                          <option key={`spot:${requestKey}`} value="__spot__" disabled>
+                                            {spotSeparatorLabel}
+                                          </option>
+                                        ) : null,
+                                        <option key={contract.contractSymbol} value={contract.contractSymbol}>
+                                          {formatContractChoiceLabel(contract)}
+                                        </option>
+                                      ];
+                                    })}
+                                    {spotSeparatorLabel && chainContracts.length && !spotSeparatorInserted ? (
+                                      <option key={`spot:${requestKey}`} value="__spot__" disabled>
+                                        {spotSeparatorLabel}
                                       </option>
-                                    ))}
+                                    ) : null}
                                   </select>
                                 </label>
                               </div>
@@ -3689,7 +5931,9 @@ export default function StrategyFinderWorkspace({
                                 </span>
                                 <strong>
                                   {formatNumber(leg.strike, 1)}
-                                  {leg.optionType === "put" ? "P" : "C"} · {formatNumber(leg.bid, 2)} / {formatNumber(leg.ask, 2)}
+                                  {leg.optionType === "put" ? "P" : "C"} · {formatNumber(chainBid, 2)} /{" "}
+                                  {formatNumber(chainAsk, 2)}
+                                  {chainQuoteSize ? ` · size ${chainQuoteSize}` : ""}
                                 </strong>
                               </div>
                             </article>
@@ -3700,25 +5944,26 @@ export default function StrategyFinderWorkspace({
                   ) : null}
 
                   <div className="detail-panels">
-                    <div className="detail-panel">
-                      <h4>Strategy overview</h4>
-                      <div className="detail-panel__section">
-                        <span className="detail-panel__section-heading">Overview</span>
-                        <dl>
-                          <div><dt>Underlying price</dt><dd>{formatCurrency(underlyingPrice)}</dd></div>
-                          <div><dt>Theo price</dt><dd>{formatNumber(effectiveTheoPrice, 2)}</dd></div>
-                          <div><dt>Bid</dt><dd>{formatNumber(effectiveNetBid, 2)}</dd></div>
-                          <div><dt>Ask</dt><dd>{formatNumber(effectiveNetAsk, 2)}</dd></div>
-                          <div><dt>Opt vol (norm)</dt><dd>{formatExactCount(selectedRow?.normalizedOptionVolume)}</dd></div>
-                          <div><dt>Poly volume</dt><dd>{formatExactUsd(selectedRow?.polymarketVolume)}</dd></div>
-                          <div><dt>Breakevens</dt><dd>{effectiveBreakevens.join("/") || "n/a"}</dd></div>
-                          <div><dt>Prob. of profit</dt><dd>{formatNumber(effectiveProbabilityOfProfit, 2)}%</dd></div>
-                        </dl>
-                      </div>
+	                    <div className="detail-panel">
+	                      <h4>Strategy overview</h4>
+	                      <div className="detail-panel__section">
+	                        <span className="detail-panel__section-heading">Overview</span>
+	                        <dl>
+	                          <div><dt>Underlying price</dt><dd>{formatCurrency(underlyingPrice)}</dd></div>
+	                          <div><dt>Theo price</dt><dd>{formatNumber(effectiveTheoPrice, 2)}</dd></div>
+	                          <div><dt>Bid</dt><dd>{formatQuotePrice(displayedNetBid)}</dd></div>
+	                          <div><dt>Ask</dt><dd>{formatQuotePrice(displayedNetAsk)}</dd></div>
+	                          <div><dt>Mark</dt><dd>{formatQuotePrice(displayedNetMark)}</dd></div>
+	                          <div><dt>Opt vol (norm)</dt><dd>{formatExactCount(selectedRow?.normalizedOptionVolume)}</dd></div>
+	                          <div><dt>Poly volume</dt><dd>{formatExactUsd(selectedRow?.polymarketVolume)}</dd></div>
+	                          <div><dt>Breakevens</dt><dd>{effectiveBreakevens.join("/") || "n/a"}</dd></div>
+	                          <div><dt>Profitable scenario share</dt><dd>{formatNumber(effectiveProbabilityOfProfit, 2)}%</dd></div>
+	                        </dl>
+	                      </div>
                       <div className="detail-panel__section">
                         <span className="detail-panel__section-heading">Risk analysis</span>
                         <dl>
-                          <div><dt>Exp payoff</dt><dd>{formatCurrency(effectiveExpPayoff)}</dd></div>
+                          <div><dt>Payoff at target</dt><dd>{formatCurrency(effectiveExpPayoff)}</dd></div>
                           <div>
                             <dt>Max profit</dt>
                             <dd>
@@ -3745,53 +5990,92 @@ export default function StrategyFinderWorkspace({
                       </div>
                     </div>
 
-                    <div className="detail-panel detail-panel--contracts">
-                      <h4>Contract details</h4>
-                      <div className="legs-table">
-                        <div className="legs-table__head">
-                          <span>Action</span>
-                          <span>Qty</span>
-                          <span>Strike</span>
-                          <span>Bid</span>
-                          <span>Ask</span>
-                          <span>Spread</span>
-                          <span>Code / Link</span>
-                        </div>
-                        {detailLegRows.map((leg) => (
-                          <div key={leg.id} className="legs-table__row">
-                            <span className={`legs-action legs-action--${leg.action.toLowerCase()}`}>{leg.action}</span>
-                            <span>{formatNumber(leg.quantity, 0)}</span>
-                            <span>
-                              {typeof leg.strike === "string"
-                                ? leg.strike
-                                : `${formatNumber(leg.strike, 1)}${leg.optionType === "put" ? "P" : "C"}`}
-                            </span>
-                            <span>{formatNumber(leg.bid, 2)}</span>
-                            <span>{formatNumber(leg.ask, 2)}</span>
-                            <span>{leg.spread != null ? `${formatNumber(leg.spread, 2)}%` : ""}</span>
-                            <span className="leg-reference">
-                              {leg.kind === "binary" && leg.referenceUrl ? (
-                                <a href={leg.referenceUrl} target="_blank" rel="noreferrer">
-                                  {leg.referenceLabel}
-                                </a>
-                              ) : leg.kind === "binary" ? (
-                                <span>{leg.referenceLabel}</span>
-                              ) : leg.isLive === true ? (
-                                <code>{leg.referenceLabel}</code>
-                              ) : (
-                                <span>{leg.referenceLabel}</span>
-                              )}
-                              <small>{leg.referenceMeta}</small>
-                              {leg.liquidityMeta ? <small>{leg.liquidityMeta}</small> : null}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+	                    <div className="detail-panel detail-panel--contracts">
+	                      <h4>Contract details</h4>
+	                      {liveOptionLegQuotesUpdatedAt || liveOptionLegQuotesError ? (
+	                        <div className="detail-badges">
+	                          {liveOptionLegQuotesUpdatedAt ? (
+	                            <span className="pill pill--ghost">
+	                              Updated {formatShortTime(liveOptionLegQuotesUpdatedAt)}
+	                            </span>
+	                          ) : null}
+	                          {liveOptionLegQuotesError ? (
+	                            <span className="pill pill--warning" title={liveOptionLegQuotesError}>
+	                              Live quotes stalled
+	                            </span>
+	                          ) : null}
+	                        </div>
+	                      ) : null}
+	                      <div className="legs-table">
+	                        <div className="legs-table__head">
+	                          <span>Action</span>
+	                          <span>Qty</span>
+	                          <span>Strike</span>
+	                          <span>Bid</span>
+	                          <span>Ask</span>
+	                          <span>Mark</span>
+	                          <span>Vol</span>
+	                          <span>OI</span>
+	                          <span>Spread</span>
+	                          <span>Code / Link</span>
+	                        </div>
+	                        {detailLegRows.map((leg) => {
+	                          const liveQuote = leg.kind === "option" ? liveOptionLegQuotes?.[leg.id] ?? null : null;
+	                          const bid = liveQuote?.bid ?? leg.bid;
+	                          const ask = liveQuote?.ask ?? leg.ask;
+	                          const mark =
+	                            liveQuote?.mark ??
+	                            (() => {
+	                              const bidValue = Number(bid);
+	                              const askValue = Number(ask);
+	                              return Number.isFinite(bidValue) && Number.isFinite(askValue)
+	                                ? (bidValue + askValue) / 2
+	                                : null;
+	                            })();
+	                          const volume = liveQuote?.volume ?? leg.volume;
+	                          const openInterest = liveQuote?.openInterest ?? leg.openInterest;
+	                          const spread =
+	                            leg.kind === "option" ? calculateSpreadPercent(bid, ask) : leg.spread;
 
-                    <div className="detail-panel detail-panel--controls">
-                      <h4>Scenario controls</h4>
-                      <div className="detail-mini-controls">
+	                          return (
+	                            <div key={leg.id} className="legs-table__row">
+	                              <span className={`legs-action legs-action--${leg.action.toLowerCase()}`}>{leg.action}</span>
+	                              <span>{formatNumber(leg.quantity, 0)}</span>
+	                              <span>
+	                                {typeof leg.strike === "string"
+	                                  ? leg.strike
+	                                  : `${formatNumber(leg.strike, 1)}${leg.optionType === "put" ? "P" : "C"}`}
+	                              </span>
+	                              <span>{formatQuotePrice(bid)}</span>
+	                              <span>{formatQuotePrice(ask)}</span>
+	                              <span>{formatQuotePrice(mark)}</span>
+	                              <span>{leg.kind === "option" ? formatCompactCount(volume) : ""}</span>
+	                              <span>{leg.kind === "option" ? formatCompactCount(openInterest) : ""}</span>
+	                              <span>{spread != null ? `${formatNumber(spread, 2)}%` : ""}</span>
+	                              <span className="leg-reference">
+	                                {leg.kind === "binary" && leg.referenceUrl ? (
+	                                  <a href={leg.referenceUrl} target="_blank" rel="noreferrer">
+	                                    {leg.referenceLabel}
+	                                  </a>
+	                                ) : leg.kind === "binary" ? (
+	                                  <span>{leg.referenceLabel}</span>
+	                                ) : leg.isLive === true ? (
+	                                  <code>{leg.referenceLabel}</code>
+	                                ) : (
+	                                  <span>{leg.referenceLabel}</span>
+	                                )}
+	                                <small>{liveQuote?.sourceLabel ?? leg.referenceMeta}</small>
+	                                {leg.liquidityMeta ? <small>{leg.liquidityMeta}</small> : null}
+	                              </span>
+	                            </div>
+	                          );
+	                        })}
+	                      </div>
+	                    </div>
+
+	                    <div className="detail-panel detail-panel--controls">
+	                      <h4>Scenario controls</h4>
+	                      <div className="detail-mini-controls">
                         <div className="detail-mini-slider">
                           <div className="detail-mini-slider__header">
                             <span>Date</span>
@@ -3874,107 +6158,80 @@ export default function StrategyFinderWorkspace({
                             <span>150%</span>
                           </div>
                         </div>
-                      </div>
-                    </div>
+
+                        <div className="detail-mini-slider">
+                          <div className="detail-mini-slider__header">
+                            <span>Put IV</span>
+                            <strong>{formatNumber(putVolatility * 100, 2)}%</strong>
+                          </div>
+                          <input
+                            className="detail-mini-slider__range"
+                            type="range"
+                            min="5"
+                            max="150"
+                            step="0.5"
+                            value={clamp(Number(controls?.ivPut ?? 30), 5, 150)}
+                            onChange={(event) =>
+                              setControls((current) => ({ ...current, ivPut: event.target.value }))
+                            }
+                          />
+                          <div className="detail-mini-slider__scale">
+                            <span>5%</span>
+                            <span>150%</span>
+                          </div>
+                        </div>
+
+	                        <div className="detail-mini-slider">
+	                          <div className="detail-mini-slider__header">
+	                            <span>Call IV</span>
+	                            <strong>{formatNumber(callVolatility * 100, 2)}%</strong>
+	                          </div>
+	                          <input
+	                            className="detail-mini-slider__range"
+	                            type="range"
+	                            min="5"
+	                            max="150"
+	                            step="0.5"
+	                            value={clamp(Number(controls?.ivCall ?? 20), 5, 150)}
+	                            onChange={(event) =>
+	                              setControls((current) => ({ ...current, ivCall: event.target.value }))
+	                            }
+	                          />
+	                          <div className="detail-mini-slider__scale">
+	                            <span>5%</span>
+	                            <span>150%</span>
+	                          </div>
+	                        </div>
+
+                          {polymarketLegs.length ? (
+                            <div className="detail-mini-slider">
+                              <div className="detail-mini-slider__header">
+                                <span>Polymarket YES</span>
+                                <strong>{formatNumber(polymarketYesPrice, 2)}</strong>
+                              </div>
+                              <input
+                                className="detail-mini-slider__range"
+                                type="range"
+                                min="0"
+                                max="1"
+                                step="0.01"
+                                value={clamp(polymarketYesPrice, 0, 1)}
+                                onChange={(event) =>
+                                  setControls((current) => ({ ...current, polymarketYesPrice: event.target.value }))
+                                }
+                              />
+                              <div className="detail-mini-slider__scale">
+                                <span>Auto {formatNumber(estimatedYesPrice, 2)}</span>
+                                <span>1</span>
+                              </div>
+                            </div>
+                          ) : null}
+	                      </div>
+	                    </div>
 
                   </div>
                 </article>
               </section>
-
-                  <ScenarioHeatmap
-                    className="calculator-section"
-                    title="Time series heat map"
-                    description="P/L across dates and proxy price levels, centered on the current proxy spot. The default view shows a 1x implied-vol range, with quick 2x and 3x range filters available."
-                    startDate={valuationMinDate}
-                    endDate={valuationMaxDate}
-                    currentPrice={currentProxySpot || underlyingPrice}
-                    volatility={impliedVolatility}
-                    spotLabel={proxySpotLabel}
-                    priceDigits={proxySpotDigits}
-                    secondarySpotLabel={converterRatio > 0 ? actualSpotLabel : ""}
-                    secondaryPriceDigits={actualSpotDigits}
-                    getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
-                    getCellPnL={calculateHeatmapPnL}
-                    rangeMultiplier={heatmapRangeMultiplier}
-                    onRangeMultiplierChange={setHeatmapRangeMultiplier}
-                    theme={theme}
-                  />
-
-                  <section className="detail-chart calculator-section">
-                    <div className="detail-chart__header">
-                      <div>
-                        <span className="brand__eyebrow">Strategy chart</span>
-                        <p className="detail-chart__copy">
-                          {chartMode === "date"
-                            ? "Date P&L holds the current proxy spot and volatility constant while repricing time decay."
-                            : "Expiry payoff shows how P&L changes across proxy spot levels at resolution."}
-                        </p>
-                      </div>
-                      <div className="chart-toggle-group">
-                        <button
-                          type="button"
-                          className={`chart-toggle ${chartExpanded ? "chart-toggle--active" : ""}`}
-                          onClick={() => setChartExpanded((current) => !current)}
-                        >
-                          {chartExpanded ? "Normal size" : "Expand 4x"}
-                        </button>
-                        <button
-                          type="button"
-                          className={`chart-toggle ${chartMode === "date" ? "chart-toggle--active" : ""}`}
-                          onClick={() => setChartMode("date")}
-                        >
-                          Date P&amp;L
-                        </button>
-                        <button
-                          type="button"
-                          className={`chart-toggle ${chartMode === "spot" ? "chart-toggle--active" : ""}`}
-                          onClick={() => setChartMode("spot")}
-                        >
-                          Expiry payoff
-                        </button>
-                      </div>
-                    </div>
-                    <ResponsiveContainer width="100%" height={chartHeight}>
-                      <ComposedChart data={chartData}>
-                        <CartesianGrid stroke={chartTheme.grid} />
-                        <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
-                        <YAxis
-                          domain={chartDomain}
-                          tickCount={chartTickCount}
-                          tick={{ fill: chartTheme.axis, fontSize: 11 }}
-                        />
-                        <Tooltip
-                          formatter={(value) => formatCurrency(value)}
-                          labelFormatter={(label, payload) =>
-                            chartMode === "date"
-                              ? payload?.[0]?.payload?.date
-                                ? formatDateLabel(payload[0].payload.date)
-                                : label
-                              : `Proxy spot ${label}`
-                          }
-                          contentStyle={{
-                            background: chartTheme.tooltipBackground,
-                            border: `1px solid ${chartTheme.tooltipBorder}`,
-                            borderRadius: "14px"
-                          }}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="totalPnL"
-                          stroke={chartTheme.strategyAreaStroke}
-                          fill={chartTheme.strategyAreaFill}
-                          strokeWidth={2.2}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="totalPnL"
-                          stroke={chartTheme.strategyLineStroke}
-                          dot={false}
-                          strokeWidth={1.5}
-                        />
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                  </section>
 
 		              <section className="calculator-section">
 		                <div className="section-heading">
@@ -3984,62 +6241,16 @@ export default function StrategyFinderWorkspace({
 
 			                <div className="calculator-studio">
                     <div className="paper-order-ticket">
-                      <div>
-                        <span className="brand__eyebrow">Paper-trade this setup</span>
-                        <strong className="paper-order-ticket__title">
-                          {selectedRow.assetLabel} · {selectedRow.strategyType}
-                        </strong>
-                        <p className="card-copy">
-                          Save the current edited leg prices and contract amounts as a new paper order, or route the
-                          option legs to your IBKR paper gateway or TWS paper session.
-                        </p>
-                        <div className="paper-order-ticket__status">
-                          <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
-                            {paperExecutionRoute === "ibkr-paper"
-                              ? "IBKR paper route"
-                              : paperExecutionRoute === "tws-paper"
-                                ? "TWS paper route"
-                                : "Local paper route"}
-                          </span>
-                          {paperExecutionRoute === "ibkr-paper" ? (
-                            <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
-                              {ibkrReady
-                                ? `Gateway ready${ibkrStatus?.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
-                                : "Gateway not ready"}
-                            </span>
-                          ) : paperExecutionRoute === "tws-paper" ? (
-                            <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
-                              {twsReady
-                                ? `TWS ready${twsStatus?.selectedAccount ? ` · ${twsStatus.selectedAccount}` : ""}`
-                                : "TWS not ready"}
-                            </span>
-                          ) : null}
+                      <div className="paper-order-ticket__copy">
+                        <div className="paper-order-ticket__headline">
+                          <span className="brand__eyebrow">Trade this setup</span>
+                          <strong className="paper-order-ticket__title">
+                            {selectedRow.assetLabel} · {strategyTypeLabel}
+                          </strong>
                         </div>
-                        {paperExecutionRoute === "ibkr-paper" ? (
-                          <p className="paper-order-ticket__note">
-                            {ibkrReady
-                              ? "HedgeHub will submit the option legs to the connected IBKR paper session and keep the local portfolio synced to broker status."
-                              : ibkrReloginNeeded
-                                ? (
-                                    <>
-                                      IBKR session expired or was signed out. Re-login at{" "}
-                                      <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
-                                        {ibkrLoginUrl}
-                                      </a>{" "}
-                                      and wait a few seconds before routing this order.
-                                    </>
-                                  )
-                                : ibkrStatus?.error || "Start the IBKR Client Portal Gateway in paper mode before routing this order."}
-                          </p>
-                        ) : null}
-                        {paperExecutionRoute === "tws-paper" ? (
-                          <p className="paper-order-ticket__note">
-                            {twsReady
-                              ? "HedgeHub will submit the option legs to the connected TWS paper session and keep order status synced. Update/cancel/close orders manually inside TWS."
-                              : twsStatus?.error ||
-                                "Connect TWS in paper mode and enable API socket clients, then enter the IP/port in the sidebar and connect."}
-                          </p>
-                        ) : null}
+                        <div className="paper-order-ticket__status">
+                          <span className="pill pill--ghost">Local route</span>
+                        </div>
                       </div>
                       <div className="paper-order-ticket__actions">
                         <label>
@@ -4051,14 +6262,13 @@ export default function StrategyFinderWorkspace({
                           />
                         </label>
                         <label>
-                          <span>Execution</span>
+                          <span>Direction</span>
                           <select
-                            value={paperExecutionRoute}
-                            onChange={(event) => setPaperExecutionRoute(event.target.value)}
+                            value={strategyDirection}
+                            onChange={(event) => handleStrategyDirectionChange(event.target.value)}
                           >
-                            <option value="local-paper">Local paper</option>
-                            <option value="ibkr-paper">IBKR paper</option>
-                            <option value="tws-paper">TWS paper</option>
+                            <option value="LONG">Long</option>
+                            <option value="SHORT">Short</option>
                           </select>
                         </label>
                         <label className="paper-order-ticket__quantity">
@@ -4086,89 +6296,34 @@ export default function StrategyFinderWorkspace({
                             />
                           </div>
                         </label>
-                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                          <label>
-                            <span>Order type</span>
-                            <select
-                              value={paperIbkrOrderType}
-                              onChange={(event) => setPaperIbkrOrderType(event.target.value)}
-                            >
-                              <option value="LMT">Limit</option>
-                              <option value="MKT">Market</option>
-                            </select>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                          <label>
-                            <span>IBKR limit</span>
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={paperIbkrLimitPrice}
-                              onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                            />
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
-                          <label>
-                            <span>TWS limit</span>
-                            <select
-                              value={paperIbkrLimitPrice}
-                              onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                            >
-                              {twsLimitPriceWindow.map((option) => (
-                                <option key={`tws-limit:${option}`} value={option}>
-                                  {option}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                          <label>
-                            <span>TIF</span>
-                            <select value={paperIbkrTif} onChange={(event) => setPaperIbkrTif(event.target.value)}>
-                              <option value="DAY">DAY</option>
-                              <option value="GTC">GTC</option>
-                            </select>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                          <label className="paper-order-ticket__toggle">
-                            <span>Outside RTH</span>
-                            <span className="paper-order-ticket__toggle-control">
-                              <input
-                                type="checkbox"
-                                checked={paperIbkrOutsideRth}
-                                onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
-                              />
-                            </span>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                          <label className="paper-order-ticket__toggle">
-                            <span>Smart entry</span>
-                            <span className="paper-order-ticket__toggle-control">
-                              <input
-                                type="checkbox"
-                                checked={paperIbkrSmartEnabled}
-                                onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
-                              />
-                            </span>
-                          </label>
-                        ) : null}
                         <button
                           type="button"
                           className={`chart-toggle ${paperOrderSaving ? "chart-toggle--active" : ""}`}
                           onClick={handleCreatePaperTrade}
-                          disabled={
-                            paperOrderSaving ||
-                            !onCreatePaperOrder ||
-                            (paperExecutionRoute === "ibkr-paper" && !ibkrReady) ||
-                            (paperExecutionRoute === "tws-paper" && !twsReady)
-                          }
+                          disabled={paperOrderSaving || !onCreatePaperOrder}
                         >
                           {paperOrderSaving ? "Saving..." : "Start new order"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`chart-toggle ${strategyEditorOpen ? "chart-toggle--active" : ""}`}
+                          onClick={() => setStrategyEditorOpen((current) => !current)}
+                        >
+                          {strategyEditorOpen ? "Close builder" : "Add to strategy builder"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`chart-toggle ${isSelectedInSetupWatchlist ? "chart-toggle--active" : ""}`}
+                          onClick={handleToggleSetupWatchlist}
+                          disabled={!selectedRow || watchlistSaving || !canMutateSetupWatchlist}
+                        >
+                          {watchlistSaving
+                            ? isSelectedInSetupWatchlist
+                              ? "Removing..."
+                              : "Adding..."
+                            : isSelectedInSetupWatchlist
+                              ? "Remove from watchlist"
+                              : "Add to watchlist"}
                         </button>
                         {onOpenPaperTrading ? (
                           <button type="button" className="chart-toggle" onClick={onOpenPaperTrading}>
@@ -4290,7 +6445,7 @@ export default function StrategyFinderWorkspace({
                           <div className="calculator-line__meta">
                             <span>{leg.action === "SHORT" ? "Sell" : "Buy"} {formatNumber(leg.entryPrice, 2)}</span>
                             <span>
-                              Market {formatNumber(leg.outcome === "YES" ? marketReferenceYesPrice : 1 - marketReferenceYesPrice, 2)}
+                              Market {formatNumber(leg.outcome === "YES" ? marketReferenceYesPrice : marketReferenceNoPrice, 2)}
                             </span>
                             <span>
                               {selectedRow.assetLabel} equiv {formatCurrency(equivalentUnderlyingSpot)}
@@ -4315,15 +6470,29 @@ export default function StrategyFinderWorkspace({
                         </div>
                         <div className="calculator-line__editor">
                           <label>
-                            <span>{leg.action === "SHORT" ? "Sell price" : "Buy price"}</span>
-                            <input
-                              type="number"
-                              min="0"
-                              max="1"
-                              step="0.01"
-                              value={controls?.legEdits?.[leg.id]?.entryPrice ?? leg.entryPrice}
-                              onChange={(event) => updateLegEdit(leg.id, "entryPrice", event.target.value)}
-                            />
+                            <span>Polymarket leg</span>
+                            <select
+                              value={leg.outcome}
+                              onChange={(event) => handleSelectPolymarketLegOutcome(leg.id, event.target.value)}
+                            >
+                              <optgroup label={polymarketResolutionDate || "Resolution"}>
+                                <option value="YES">
+                                  YES · Strike {formatCurrency(targetUnderlyingValue)} · YES {formatNumber(marketReferenceYesPrice, 2)} · NO{" "}
+                                  {formatNumber(marketReferenceNoPrice, 2)}
+                                </option>
+                                <option value="NO">
+                                  NO · Strike {formatCurrency(targetUnderlyingValue)} · YES {formatNumber(marketReferenceYesPrice, 2)} · NO{" "}
+                                  {formatNumber(marketReferenceNoPrice, 2)}
+                                </option>
+                              </optgroup>
+                            </select>
+                            <button
+                              type="button"
+                              className="chart-toggle chart-toggle--compact"
+                              onClick={() => handleRemoveOptionLeg(leg.id)}
+                            >
+                              Remove
+                            </button>
                           </label>
                           <label>
                             <span>Contracts</span>
@@ -4353,6 +6522,63 @@ export default function StrategyFinderWorkspace({
                         </div>
                       </div>
                     ))}
+
+                    {!repricedPolymarketLegs.length
+                      ? ((selectedRow?.legs ?? []).find((leg) => leg.kind === "binary") ? (
+                          <div className="calculator-line calculator-line--market">
+                            <div className="calculator-line__body">
+                              <p>Polymarket leg removed</p>
+                              <div className="calculator-line__meta">
+                                <span>
+                                  Strike {formatCurrency(targetUnderlyingValue)} · YES {formatNumber(marketReferenceYesPrice, 2)} · NO{" "}
+                                  {formatNumber(marketReferenceNoPrice, 2)}
+                                </span>
+                                <span>{polymarketResolutionDate || "Resolution date"}</span>
+                              </div>
+                            </div>
+                            <div className="calculator-line__editor">
+                              <label>
+                                <span>Add Polymarket leg</span>
+                                <select
+                                  value=""
+                                  onChange={(event) =>
+                                    handleSelectPolymarketLegOutcome(
+                                      (selectedRow?.legs ?? []).find((leg) => leg.kind === "binary")?.id ?? "",
+                                      event.target.value
+                                    )
+                                  }
+                                >
+                                  <option value="" disabled>
+                                    Select YES / NO
+                                  </option>
+                                  <optgroup label={polymarketResolutionDate || "Resolution"}>
+                                    <option value="YES">
+                                      YES · Strike {formatCurrency(targetUnderlyingValue)} · YES {formatNumber(marketReferenceYesPrice, 2)} · NO{" "}
+                                      {formatNumber(marketReferenceNoPrice, 2)}
+                                    </option>
+                                    <option value="NO">
+                                      NO · Strike {formatCurrency(targetUnderlyingValue)} · YES {formatNumber(marketReferenceYesPrice, 2)} · NO{" "}
+                                      {formatNumber(marketReferenceNoPrice, 2)}
+                                    </option>
+                                  </optgroup>
+                                </select>
+                              </label>
+                              <div className="calculator-line__value">
+                                <span>Contracts</span>
+                                <strong>0</strong>
+                              </div>
+                              <div className="calculator-line__value">
+                                <span>Entry cost</span>
+                                <strong>{formatCurrency(0)}</strong>
+                              </div>
+                              <div className="calculator-line__value">
+                                <span>Marked value</span>
+                                <strong>{formatCurrency(0)}</strong>
+                              </div>
+                            </div>
+                          </div>
+                        ) : null)
+                      : null}
 	                  </div>
 
 			                  <div className="calculator-summary calculator-summary--studio">
@@ -4386,7 +6612,7 @@ export default function StrategyFinderWorkspace({
 	                    </article>
 	                  </div>
 
-			                  <div className="calculator-slider-stack">
+			                  <div className="calculator-slider-stack" style={{ display: "none" }}>
 	                    <div className="calculator-slider">
                       <div className="calculator-slider__header">
                         <div>
@@ -4509,29 +6735,237 @@ export default function StrategyFinderWorkspace({
                     <div className="calculator-slider">
                       <div className="calculator-slider__header">
                         <div>
-                          <span>Estimated Poly YES</span>
-                          <strong>{formatNumber(estimatedYesPrice, 2)}</strong>
+                          <span>Put IV (below spot)</span>
+                          <strong>{formatNumber(putVolatility * 100, 2)}%</strong>
                         </div>
-                        <div className="calculator-slider__hint">BTCETFCalc-style ratio + time decay</div>
+                        <input
+                          className="calculator-slider__number"
+                          type="number"
+                          min="5"
+                          max="150"
+                          step="0.5"
+                          value={controls?.ivPut ?? ""}
+                          onChange={(event) =>
+                            setControls((current) => ({ ...current, ivPut: event.target.value }))
+                          }
+                        />
                       </div>
                       <input
                         className="calculator-slider__range"
                         type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        value={clamp(estimatedYesPrice, 0, 1)}
-                        readOnly
-                        disabled
+                        min="5"
+                        max="150"
+                        step="0.5"
+                        value={clamp(Number(controls?.ivPut ?? 30), 5, 150)}
+                        onChange={(event) =>
+                          setControls((current) => ({ ...current, ivPut: event.target.value }))
+                        }
                       />
                       <div className="calculator-slider__scale">
-                        <span>Threshold {formatCurrency(targetUnderlyingValue)}</span>
-                        <span>{polymarketResolutionDate}</span>
+                        <span>5%</span>
+                        <span>150%</span>
                       </div>
                     </div>
-                  </div>
-	                </div>
-              </section>
+
+                    <div className="calculator-slider">
+                      <div className="calculator-slider__header">
+                        <div>
+                          <span>Call IV (above spot)</span>
+                          <strong>{formatNumber(callVolatility * 100, 2)}%</strong>
+                        </div>
+                        <input
+                          className="calculator-slider__number"
+                          type="number"
+                          min="5"
+                          max="150"
+                          step="0.5"
+                          value={controls?.ivCall ?? ""}
+                          onChange={(event) =>
+                            setControls((current) => ({ ...current, ivCall: event.target.value }))
+                          }
+                        />
+                      </div>
+                      <input
+                        className="calculator-slider__range"
+                        type="range"
+                        min="5"
+                        max="150"
+                        step="0.5"
+                        value={clamp(Number(controls?.ivCall ?? 20), 5, 150)}
+                        onChange={(event) =>
+                          setControls((current) => ({ ...current, ivCall: event.target.value }))
+                        }
+                      />
+                      <div className="calculator-slider__scale">
+                        <span>5%</span>
+                        <span>150%</span>
+                      </div>
+                    </div>
+
+	                    <div className="calculator-slider">
+	                      <div className="calculator-slider__header">
+	                        <div>
+	                          <span>Estimated Poly YES</span>
+	                          <strong>{formatNumber(estimatedYesPrice, 2)}</strong>
+	                        </div>
+	                        <div className="calculator-slider__hint">BTCETFCalc-style ratio + time decay</div>
+	                      </div>
+	                      <input
+	                        className="calculator-slider__range"
+	                        type="range"
+	                        min="0"
+	                        max="1"
+	                        step="0.01"
+	                        value={clamp(estimatedYesPrice, 0, 1)}
+	                        readOnly
+	                        disabled
+	                      />
+	                      <div className="calculator-slider__scale">
+	                        <span>Threshold {formatCurrency(targetUnderlyingValue)}</span>
+	                        <span>{polymarketResolutionDate}</span>
+	                      </div>
+	                    </div>
+
+                      {polymarketLegs.length ? (
+                        <div className="calculator-slider">
+                          <div className="calculator-slider__header">
+                            <div>
+                              <span>Polymarket YES estimate</span>
+                              <strong>{formatNumber(polymarketYesPrice, 2)}</strong>
+                            </div>
+                            <input
+                              className="calculator-slider__number"
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                              value={controls?.polymarketYesPrice ?? ""}
+                              placeholder={formatNumber(estimatedYesPrice, 2)}
+                              onChange={(event) =>
+                                setControls((current) => ({ ...current, polymarketYesPrice: event.target.value }))
+                              }
+                            />
+                          </div>
+                          <input
+                            className="calculator-slider__range"
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={clamp(polymarketYesPrice, 0, 1)}
+                            onChange={(event) =>
+                              setControls((current) => ({ ...current, polymarketYesPrice: event.target.value }))
+                            }
+                          />
+                          <div className="calculator-slider__scale">
+                            <span>0</span>
+                            <span>1</span>
+                          </div>
+                        </div>
+                      ) : null}
+	                  </div>
+		                </div>
+	              </section>
+
+                  <ScenarioHeatmap
+                    className="calculator-section"
+                    title="Time series heat map"
+                    description="P/L across dates and proxy price levels, centered on the current proxy spot. The default view shows a 1x implied-vol range, with quick 2x and 3x range filters available."
+                    startDate={valuationMinDate}
+                    endDate={valuationMaxDate}
+                    currentPrice={currentProxySpot || underlyingPrice}
+                    volatility={impliedVolatility}
+                    ivAtm={impliedVolatility}
+                    ivPut={putVolatility}
+                    ivCall={callVolatility}
+                    spotLabel={proxySpotLabel}
+                    priceDigits={proxySpotDigits}
+                    secondarySpotLabel={converterRatio > 0 ? actualSpotLabel : ""}
+                    secondaryPriceDigits={actualSpotDigits}
+                    getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
+                    rowCount={heatmapRowCount}
+                    onRowCountChange={setHeatmapRowCount}
+                    getCellPnL={calculateHeatmapPnL}
+                    rangeMultiplier={heatmapRangeMultiplier}
+                    onRangeMultiplierChange={setHeatmapRangeMultiplier}
+                    theme={theme}
+                  />
+
+                  <section className="detail-chart calculator-section">
+                    <div className="detail-chart__header">
+                      <div>
+                        <span className="brand__eyebrow">Strategy chart</span>
+                        <p className="detail-chart__copy">
+                          {chartMode === "date"
+                            ? "Date P&L holds the current proxy spot and volatility constant while repricing time decay."
+                            : "Expiry payoff shows how P&L changes across proxy spot levels at resolution."}
+                        </p>
+                      </div>
+                      <div className="chart-toggle-group">
+                        <button
+                          type="button"
+                          className={`chart-toggle ${chartExpanded ? "chart-toggle--active" : ""}`}
+                          onClick={() => setChartExpanded((current) => !current)}
+                        >
+                          {chartExpanded ? "Normal size" : "Expand 4x"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`chart-toggle ${chartMode === "date" ? "chart-toggle--active" : ""}`}
+                          onClick={() => setChartMode("date")}
+                        >
+                          Date P&amp;L
+                        </button>
+                        <button
+                          type="button"
+                          className={`chart-toggle ${chartMode === "spot" ? "chart-toggle--active" : ""}`}
+                          onClick={() => setChartMode("spot")}
+                        >
+                          Expiry payoff
+                        </button>
+                      </div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={chartHeight}>
+                      <ComposedChart data={chartData}>
+                        <CartesianGrid stroke={chartTheme.grid} />
+                        <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
+                        <YAxis
+                          domain={chartDomain}
+                          tickCount={chartTickCount}
+                          tick={{ fill: chartTheme.axis, fontSize: 11 }}
+                        />
+                        <Tooltip
+                          formatter={(value) => formatCurrency(value)}
+                          labelFormatter={(label, payload) =>
+                            chartMode === "date"
+                              ? payload?.[0]?.payload?.date
+                                ? formatDateLabel(payload[0].payload.date)
+                                : label
+                              : `Proxy spot ${label}`
+                          }
+                          contentStyle={{
+                            background: chartTheme.tooltipBackground,
+                            border: `1px solid ${chartTheme.tooltipBorder}`,
+                            borderRadius: "14px"
+                          }}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="totalPnL"
+                          stroke={chartTheme.strategyAreaStroke}
+                          fill={chartTheme.strategyAreaFill}
+                          strokeWidth={2.2}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="totalPnL"
+                          stroke={chartTheme.strategyLineStroke}
+                          dot={false}
+                          strokeWidth={1.5}
+                        />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </section>
               </>
             ) : null
           ) : null}
@@ -4539,13 +6973,13 @@ export default function StrategyFinderWorkspace({
       ) : null}
 
       <section className="finder-table-card">
-        <div className="finder-table">
+        <div className="finder-table" style={{ "--finder-grid-columns": finderGridTemplateColumns }}>
           <div className="finder-table__head">
-            {columns.map((column) => (
+            {visibleColumns.map((column) => (
               <button
                 key={column.key}
                 type="button"
-                className={`finder-sort ${column.mobileHidden ? "finder-sort--mobile-hidden" : ""}`}
+                className="finder-sort"
                 title="Click to sort. Shift-click (or Ctrl/⌘-click) to add up to 4 sort priorities."
                 onClick={(event) =>
                   toggleSort(column.key, {
@@ -4587,65 +7021,9 @@ export default function StrategyFinderWorkspace({
                 className={`finder-row ${selectedRowSummary?.id === row.id ? "finder-row--active" : ""}`}
                 onClick={() => handleRowSelect(row.id)}
               >
-                <span>{row.expiration}</span>
-                <span className="finder-cell--mobile-hidden">{row.days}</span>
-                <span className="finder-asset-cell">
-                  <span>{row.assetLabel}</span>
-                  {String(row.polymarketSource ?? "").toLowerCase() === "seed" ? (
-                    <span className="source-pill source-pill--seed">Seed</span>
-                  ) : null}
-                </span>
-                <span className="finder-cell--mobile-hidden">{row.strategyType}</span>
-                <span className="finder-cell--mobile-hidden">
-                  <span className={`bias-pill bias-pill--${row.marketBiasTone ?? "neutral"}`}>
-                    {row.marketBias ?? "Neutral"}
-                  </span>
-                </span>
-                <span className="formula-cell finder-cell--mobile-hidden">
-                  {row.formula.map((item) => (
-                    <span key={`${row.id}-${item.label}`} className={`formula-pill formula-pill--${item.tone}`}>
-                      {item.label}
-                    </span>
-                  ))}
-                </span>
-                <span className="finder-cell--mobile-hidden">
-                  {`${row.polymarketPriceSide === "NO" ? "N" : "Y"} ${formatNumber(row.polymarketPrice, 2)}`}
-                </span>
-                <span>{formatCompactCount(row.normalizedOptionVolume)}</span>
-                <span>{formatCompactUsd(row.polymarketVolume)}</span>
-                <span className="finder-metric-cell">
-                  <span
-                    className={
-                      row.maxProfitUnbounded === true ? "" : Number(row.maxProfit) >= 0 ? "positive" : "negative"
-                    }
-                  >
-                    {formatExtrema(row.maxProfit, {
-                      unbounded: row.maxProfitUnbounded === true,
-                      kind: "profit"
-                    })}
-                  </span>
-                  {row.maxProfitRangeTag ? <span className="finder-range-tag">{row.maxProfitRangeTag}</span> : null}
-                </span>
-                <span className="finder-metric-cell">
-                  <span
-                    className={
-                      row.maxLossUnbounded === true ? "" : Number(row.maxLoss) >= 0 ? "positive" : "negative"
-                    }
-                  >
-                    {formatExtrema(row.maxLoss, {
-                      unbounded: row.maxLossUnbounded === true,
-                      kind: "loss"
-                    })}
-                  </span>
-                  {row.maxLossRangeTag ? <span className="finder-range-tag">{row.maxLossRangeTag}</span> : null}
-                </span>
-                <span className="finder-cell--mobile-hidden">{formatNumber(row.rewardRisk, 2)}</span>
-                <span className="finder-cell--mobile-hidden">{row.breakevens.join("/") || "n/a"}</span>
-                <span className="finder-cell--mobile-hidden">{formatNumber(row.theoPrice, 2)}</span>
-                <span>{formatNumber(row.bid, 2)}</span>
-                <span className="finder-cell--mobile-hidden">{formatNumber(row.ask, 2)}</span>
-                <span className="negative">{row.bidAskSpread != null ? `${formatNumber(row.bidAskSpread, 2)}%` : ""}</span>
-                <span className="finder-cell--mobile-hidden">{formatCurrency(row.expPayoff)}</span>
+                {visibleColumns.map((column) => (
+                  <Fragment key={`${row.id}:${column.key}`}>{renderFinderCell(row, column.key)}</Fragment>
+                ))}
               </button>
             ))
           )}

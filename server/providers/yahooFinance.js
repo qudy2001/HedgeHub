@@ -1,6 +1,6 @@
+import { normalCdf, optionPrice as blackScholesOptionPrice } from "../../shared/optionMath.js";
 const STOOQ_BASE_URL = "https://stooq.com/q/l/?f=sd2t2ohlcvn&e=csv&s=";
 const COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3/simple/price";
-const POLYGON_OPTIONS_SNAPSHOT_URL = "https://api.polygon.io/v3/snapshot/options";
 
 async function fetchText(url) {
   const controller = new AbortController();
@@ -50,24 +50,11 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-function normalCdf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  const absX = Math.abs(x);
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-  const t = 1 / (1 + p * absX);
-  const y =
-    1 -
-    (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX));
-
-  return 0.5 * (1 + sign * y);
+function normalPdf(x) {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 }
 
-function blackScholesOptionPrice({
+function blackScholesGreeks({
   type,
   spot,
   strike,
@@ -75,22 +62,64 @@ function blackScholesOptionPrice({
   volatility,
   riskFreeRate
 }) {
-  if (timeYears <= 0) {
-    return type === "put" ? Math.max(strike - spot, 0) : Math.max(spot - strike, 0);
+  const normalizedSpot = Number(spot ?? 0);
+  const normalizedStrike = Number(strike ?? 0);
+  const normalizedT = Number(timeYears ?? 0);
+  const normalizedVol = Number(volatility ?? 0);
+  const normalizedRate = Number(riskFreeRate ?? 0);
+
+  if (
+    !Number.isFinite(normalizedSpot) ||
+    normalizedSpot <= 0 ||
+    !Number.isFinite(normalizedStrike) ||
+    normalizedStrike <= 0 ||
+    !Number.isFinite(normalizedT) ||
+    normalizedT <= 0 ||
+    !Number.isFinite(normalizedVol) ||
+    normalizedVol <= 0
+  ) {
+    return {
+      delta: null,
+      gamma: null,
+      theta: null,
+      vega: null,
+      rho: null
+    };
   }
 
-  const sqrtT = Math.sqrt(timeYears);
+  const sqrtT = Math.sqrt(normalizedT);
   const d1 =
-    (Math.log(spot / strike) + (riskFreeRate + 0.5 * volatility * volatility) * timeYears) /
-    (volatility * sqrtT);
-  const d2 = d1 - volatility * sqrtT;
-  const discountedStrike = strike * Math.exp(-riskFreeRate * timeYears);
+    (Math.log(normalizedSpot / normalizedStrike) +
+      (normalizedRate + 0.5 * normalizedVol * normalizedVol) * normalizedT) /
+    (normalizedVol * sqrtT);
+  const d2 = d1 - normalizedVol * sqrtT;
+  const pdfD1 = normalPdf(d1);
+  const discountedStrike = normalizedStrike * Math.exp(-normalizedRate * normalizedT);
+  const cdfD1 = normalCdf(d1);
+  const cdfD2 = normalCdf(d2);
+  const cdfMinusD2 = normalCdf(-d2);
 
-  if (type === "put") {
-    return discountedStrike * normalCdf(-d2) - spot * normalCdf(-d1);
-  }
+  const delta = type === "put" ? cdfD1 - 1 : cdfD1;
+  const gamma = pdfD1 / (normalizedSpot * normalizedVol * sqrtT);
 
-  return spot * normalCdf(d1) - discountedStrike * normalCdf(d2);
+  const yearlyTheta =
+    type === "put"
+      ? (-normalizedSpot * pdfD1 * normalizedVol) / (2 * sqrtT) + normalizedRate * discountedStrike * cdfMinusD2
+      : (-normalizedSpot * pdfD1 * normalizedVol) / (2 * sqrtT) - normalizedRate * discountedStrike * cdfD2;
+
+  const vega = normalizedSpot * pdfD1 * sqrtT;
+  const rho =
+    type === "put"
+      ? -normalizedStrike * normalizedT * Math.exp(-normalizedRate * normalizedT) * cdfMinusD2
+      : normalizedStrike * normalizedT * Math.exp(-normalizedRate * normalizedT) * cdfD2;
+
+  return {
+    delta,
+    gamma,
+    theta: yearlyTheta,
+    vega,
+    rho
+  };
 }
 
 function estimateBidAsk(midPrice) {
@@ -102,11 +131,6 @@ function estimateBidAsk(midPrice) {
     ask: Number((mid + spread / 2).toFixed(4)),
     mark: Number(mid.toFixed(4))
   };
-}
-
-function toQuoteSize(value) {
-  const numericValue = Number(value);
-  return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : null;
 }
 
 function roundToIncrement(value, increment) {
@@ -202,59 +226,6 @@ function buildSyntheticOptionChain({
   );
 }
 
-function normalizePolygonContract(item, fallbackType) {
-  const strike = Number(item?.details?.strike_price ?? 0);
-  if (!Number.isFinite(strike) || strike <= 0) {
-    return null;
-  }
-
-  const bid = Number(item?.last_quote?.bid);
-  const ask = Number(item?.last_quote?.ask);
-  const bidSize = toQuoteSize(item?.last_quote?.bid_size);
-  const askSize = toQuoteSize(item?.last_quote?.ask_size);
-  const trade = Number(item?.last_trade?.price);
-  const dayClose = Number(item?.day?.close);
-  const hasBid = Number.isFinite(bid) && bid > 0;
-  const hasAsk = Number.isFinite(ask) && ask > 0;
-  const hasRealBidAsk = hasBid && hasAsk;
-  const midpoint =
-    hasRealBidAsk ? (bid + ask) / 2
-    : hasBid ? bid
-    : hasAsk ? ask
-    : Number.isFinite(trade) && trade > 0 ? trade
-    : Number.isFinite(dayClose) && dayClose > 0 ? dayClose
-    : null;
-  const fallbackQuotes = Number.isFinite(midpoint) && midpoint > 0 ? estimateBidAsk(midpoint) : null;
-
-  return {
-    contractSymbol:
-      item?.details?.ticker ||
-      `${item?.details?.underlying_ticker ?? "OPT"}-${item?.details?.expiration_date}-${strike}`,
-    strike,
-    expiration: item?.details?.expiration_date,
-    optionType: item?.details?.contract_type ?? fallbackType,
-    bid: hasBid ? bid : fallbackQuotes?.bid ?? null,
-    ask: hasAsk ? ask : fallbackQuotes?.ask ?? null,
-    bidSize,
-    askSize,
-    mark: Number.isFinite(midpoint) ? midpoint : null,
-    lastPrice:
-      Number.isFinite(trade) && trade > 0
-        ? trade
-        : Number.isFinite(midpoint)
-          ? midpoint
-          : null,
-    impliedVolatility: Number(item?.implied_volatility ?? 0) || null,
-    volume: Number(item?.day?.volume ?? 0) || null,
-    openInterest: Number(item?.open_interest ?? 0) || null,
-    exerciseStyle: String(item?.details?.exercise_style ?? "").trim().toLowerCase() || null,
-    source: "polygon",
-    sourceLabel: "Polygon.io",
-    isLive: true,
-    hasRealBidAsk
-  };
-}
-
 function timeToExpiryYears(expiration) {
   if (!expiration) {
     return 1 / 365;
@@ -297,65 +268,70 @@ function enrichContractWithFallbackQuotes(contract, currentSpot = 0) {
     mark: Number.isFinite(contract.mark) && contract.mark > 0 ? contract.mark : fallbackQuotes.mark,
     lastPrice:
       Number.isFinite(contract.lastPrice) && contract.lastPrice > 0 ? contract.lastPrice : fallbackQuotes.mark,
-    hasRealBidAsk: contract.hasRealBidAsk === true
+    isLive: false,
+    hasRealBidAsk: false
   };
 }
 
-async function fetchPolygonOptionChain({
-  symbol,
-  expiration,
-  expirationFrom,
-  expirationTo,
-  optionType,
-  strikeMin,
-  strikeMax,
-  limit = 80
-}) {
-  if (!process.env.POLYGON_API_KEY) {
-    return null;
-  }
+function enrichContractWithDerivedMetrics(contract, currentSpot = 0) {
+  const withQuotes = enrichContractWithFallbackQuotes(contract, currentSpot);
+  const spot = Number(currentSpot ?? 0);
+  const strike = Number(withQuotes.strike ?? 0);
 
-  const url = new URL(`${POLYGON_OPTIONS_SNAPSHOT_URL}/${encodeURIComponent(symbol)}`);
-  if (expiration) {
-    url.searchParams.set("expiration_date", expiration);
-  } else {
-    if (expirationFrom) {
-      url.searchParams.set("expiration_date.gte", expirationFrom);
-    }
+  const mid =
+    Number.isFinite(withQuotes.bid) &&
+    withQuotes.bid > 0 &&
+    Number.isFinite(withQuotes.ask) &&
+    withQuotes.ask > 0
+      ? (withQuotes.bid + withQuotes.ask) / 2
+      : Number(withQuotes.mark ?? withQuotes.lastPrice ?? NaN);
+  const mark = Number(withQuotes.mark ?? mid ?? NaN);
 
-    if (expirationTo) {
-      url.searchParams.set("expiration_date.lte", expirationTo);
-    }
-  }
+  const dayOpen = Number(withQuotes.dayOpen ?? NaN);
+  const changePercent =
+    Number.isFinite(dayOpen) && dayOpen > 0 && Number.isFinite(mark)
+      ? ((mark - dayOpen) / dayOpen) * 100
+      : null;
 
-  url.searchParams.set("contract_type", optionType);
-  url.searchParams.set("limit", String(Math.max(limit, 20)));
-  url.searchParams.set("sort", "strike_price");
-  url.searchParams.set("order", "asc");
+  const defaultVolatility = spot > 200 ? 0.22 : spot > 50 ? 0.28 : 0.36;
+  const volatility = clamp(Number(withQuotes.impliedVolatility ?? 0) || defaultVolatility, 0.05, 3);
+  const greeks = blackScholesGreeks({
+    type: withQuotes.optionType,
+    spot,
+    strike,
+    timeYears: timeToExpiryYears(withQuotes.expiration),
+    volatility,
+    riskFreeRate: 0.0425
+  });
 
-  if (Number.isFinite(strikeMin) && strikeMin > 0) {
-    url.searchParams.set("strike_price.gte", String(strikeMin));
-  }
-
-  if (Number.isFinite(strikeMax) && strikeMax > 0) {
-    url.searchParams.set("strike_price.lte", String(strikeMax));
-  }
-
-  url.searchParams.set("apiKey", process.env.POLYGON_API_KEY);
-
-  const payload = await fetchJson(url.toString());
-  const contracts = (payload?.results ?? [])
-    .map((item) => normalizePolygonContract(item, optionType))
-    .filter(Boolean);
+  const intrinsicValue =
+    Number.isFinite(spot) && spot > 0 && Number.isFinite(strike) && strike > 0
+      ? withQuotes.optionType === "put"
+        ? Math.max(strike - spot, 0)
+        : Math.max(spot - strike, 0)
+      : null;
+  const timeValue =
+    Number.isFinite(mark) && Number.isFinite(intrinsicValue)
+      ? mark - intrinsicValue
+      : null;
+  const premiumPercent =
+    Number.isFinite(timeValue) && Number.isFinite(spot) && spot > 0
+      ? (timeValue / spot) * 100
+      : null;
 
   return {
-    symbol,
-    expiration,
-    optionType,
-    source: "polygon",
-    sourceLabel: "Polygon.io",
-    isLive: true,
-    contracts
+    ...withQuotes,
+    mid: Number.isFinite(mid) ? mid : null,
+    mark: Number.isFinite(mark) ? mark : withQuotes.mark ?? null,
+    changePercent,
+    intrinsicValue,
+    timeValue,
+    premiumPercent,
+    delta: Number.isFinite(greeks.delta) ? greeks.delta : null,
+    gamma: Number.isFinite(greeks.gamma) ? greeks.gamma : null,
+    theta: Number.isFinite(greeks.theta) ? greeks.theta / 365 : null,
+    vega: Number.isFinite(greeks.vega) ? greeks.vega / 100 : null,
+    rho: Number.isFinite(greeks.rho) ? greeks.rho / 100 : null
   };
 }
 
@@ -485,54 +461,8 @@ export async function fetchOptionChain({
   optionType = "call",
   currentSpot = 0,
   strikeHint = 0,
-  strikeMin,
-  strikeMax,
   limit = 60
 }) {
-  try {
-    const polygonResult = await fetchPolygonOptionChain({
-      symbol,
-      expiration,
-      expirationFrom,
-      expirationTo,
-      optionType,
-      strikeMin,
-      strikeMax,
-      limit
-    });
-
-    if (polygonResult?.contracts?.length) {
-      return {
-        ...polygonResult,
-        contracts: polygonResult.contracts.map((contract) =>
-          enrichContractWithFallbackQuotes(contract, currentSpot)
-        )
-      };
-    }
-  } catch (error) {
-    return {
-      symbol,
-      expiration,
-      expirationFrom,
-      expirationTo,
-      optionType,
-      source: "modeled",
-      sourceLabel: "Synthetic chain",
-      isLive: false,
-      warning: `Polygon option chain unavailable: ${error.message}`,
-      contracts: buildSyntheticOptionChain({
-        symbol,
-        expiration,
-        expirationFrom,
-        expirationTo,
-        optionType,
-        currentSpot,
-        strikeHint,
-        limit
-      })
-    };
-  }
-
   return {
     symbol,
     expiration,
@@ -542,11 +472,6 @@ export async function fetchOptionChain({
     source: "modeled",
     sourceLabel: "Synthetic chain",
     isLive: false,
-    warning: process.env.POLYGON_API_KEY
-      ? expirationFrom || expirationTo
-        ? "No live contracts returned for this search window."
-        : "No live contracts returned for this expiry."
-      : "POLYGON_API_KEY not configured.",
     contracts: buildSyntheticOptionChain({
       symbol,
       expiration,
@@ -556,7 +481,7 @@ export async function fetchOptionChain({
       currentSpot,
       strikeHint,
       limit
-    })
+    }).map((contract) => enrichContractWithDerivedMetrics(contract, currentSpot))
   };
 }
 
@@ -590,6 +515,7 @@ export async function fetchNearestCalls(symbol, targetStrike, desiredExpiry, lim
       askSize: contract.askSize ?? null,
       source: contract.source,
       isLive: contract.isLive,
-      hasRealBidAsk: contract.hasRealBidAsk === true
+      isLive: false,
+    hasRealBidAsk: false
     }));
 }

@@ -1,0 +1,653 @@
+- generic [ref=f1e735]:
+  - banner [ref=f1e736]:
+    - link "HedgeHub" [ref=f1e737] [cursor=pointer]:
+      - /url: /builder?demo=1
+    - navigation [ref=f1e740]:
+      - button "Workspace" [active] [ref=f1e741] [cursor=pointer]
+      - button "Scanner" [ref=f1e742] [cursor=pointer]
+      - button "Backtests" [ref=f1e743] [cursor=pointer]
+    - generic [ref=f1e744]: Interactive demo · Sample data
+    - link "Classic UI ↗" [ref=f1e745] [cursor=pointer]:
+      - /url: /
+    - button "Toggle theme" [ref=f1e746] [cursor=pointer]
+    - button "DE" [ref=f1e749] [cursor=pointer]
+  - generic [ref=f1e750]:
+    - complementary [ref=f1e751]:
+      - generic [ref=f1e752]: YOUR WORKSPACE
+      - button "Profit & loss" [ref=f1e753] [cursor=pointer]
+      - button "Hedge choices" [ref=f1e756] [cursor=pointer]
+      - button "Stock technicals" [ref=f1e759] [cursor=pointer]
+      - button "Options analytics" [ref=f1e762] [cursor=pointer]
+      - button "Agent valuation" [ref=f1e765] [cursor=pointer]
+      - button "Past events" [ref=f1e768] [cursor=pointer]
+      - button "Upcoming events" [ref=f1e771] [cursor=pointer]
+      - button "AI tracking" [ref=f1e774] [cursor=pointer]
+      - button "Scan results" [ref=f1e777] [cursor=pointer]
+      - generic [ref=f1e780]:
+        - button "Add panel" [ref=f1e781] [cursor=pointer]
+        - button "Reset layout" [ref=f1e784] [cursor=pointer]
+        - paragraph [ref=f1e785]: Make it yours.Add metrics, rearrange panels, save your workspace.
+    - main [ref=f1e786]:
+      - generic [ref=f1e787]:
+        - combobox "Selected stock" [ref=f1e788]:
+          - option "AAPL"
+          - option "MSFT" [selected]
+          - option "SPY"
+        - strong [ref=f1e789]: $420.00
+        - generic [ref=f1e790]: Strategy
+        - button "My protected portfolio ⌄" [ref=f1e791] [cursor=pointer]:
+          - text: My protected portfolio
+          - generic [ref=f1e792]: ⌄
+        - button "Customize" [ref=f1e793] [cursor=pointer]
+        - button "Save layout" [ref=f1e796] [cursor=pointer]
+        - button "Scan stocks" [ref=f1e797] [cursor=pointer]
+      - generic [ref=f1e800]:
+        - text: Illustrative data only. Changes are local to this demo.
+        - link "Use live data →" [ref=f1e801] [cursor=pointer]:
+          - /url: /builder
+      - generic [ref=f1e2035]:
+        - strong [ref=f1e2036]:
+          - text: Strategy score
+          - generic [ref=f1e2037]: 65/100
+        - generic [ref=f1e2038]: Base 65
+        - generic [ref=f1e2039]: Catalysts 0
+        - generic [ref=f1e2040]: Explainable quality score
+        - button "View breakdown →" [ref=f1e2041] [cursor=pointer]
+      - generic [ref=f1e2042]:
+        - generic [ref=f1e2043]:
+          - generic [ref=f1e2044]:
+            - heading "Profit & loss" [level=2] [ref=f1e2045]
+            - generic [ref=f1e2048]:
+              - button "Customize Profit & loss" [ref=f1e2049] [cursor=pointer]: + Item
+              - button "Move or hide Profit & loss" [ref=f1e2050]: ⠿
+              - button "Collapse Profit & loss" [ref=f1e2051] [cursor=pointer]: −
+          - generic [ref=f1e2052]:
+            - generic [ref=f1e2053]:
+              - generic [ref=f1e2054]: Net option cost
+              - strong [ref=f1e2055]: $0.00
+            - generic [ref=f1e2056]:
+              - generic [ref=f1e2057]: Max loss
+              - strong [ref=f1e2058]: "-$42,000"
+            - generic [ref=f1e2059]:
+              - generic [ref=f1e2060]: Max gain
+              - strong [ref=f1e2061]: Unlimited
+            - generic [ref=f1e2062]:
+              - generic [ref=f1e2063]: Breakeven
+              - strong [ref=f1e2064]: $420.00
+          - generic [ref=f1e2065]:
+            - generic [ref=f1e2066]:
+              - generic [ref=f1e2067]:
+                - text: Option payoff heatmap
+                - paragraph [ref=f1e2068]: Stock price × date · modeled P&L
+              - generic [ref=f1e2070]:
+                - button "P&L" [ref=f1e2071] [cursor=pointer]
+                - button "EV" [ref=f1e2072] [cursor=pointer]
+                - button "Prob" [ref=f1e2073] [cursor=pointer]
+            - table "Option payoff heatmap showing profit and loss by date and price" [ref=f1e2075]:
+              - rowgroup [ref=f1e2076]:
+                - row [ref=f1e2077]:
+                  - columnheader "Price Date" [ref=f1e2078]:
+                    - generic [ref=f1e2079]:
+                      - strong [ref=f1e2080]: Price
+                      - generic [ref=f1e2081]: Date
+                  - columnheader "12 Oct Today" [ref=f1e2082]:
+                    - generic [ref=f1e2083]:
+                      - strong [ref=f1e2084]: 12 Oct
+                      - generic [ref=f1e2085]: Today
+                  - columnheader "19 Oct +5d" [ref=f1e2086]:
+                    - generic [ref=f1e2087]:
+                      - strong [ref=f1e2088]: 19 Oct
+                      - generic [ref=f1e2089]: +5d
+                  - columnheader "26 Oct +10d" [ref=f1e2090]:
+                    - generic [ref=f1e2091]:
+                      - strong [ref=f1e2092]: 26 Oct
+                      - generic [ref=f1e2093]: +10d
+                  - columnheader "30 Oct +14d" [ref=f1e2094]:
+                    - generic [ref=f1e2095]:
+                      - strong [ref=f1e2096]: 30 Oct
+                      - generic [ref=f1e2097]: +14d
+                  - columnheader "6 Nov +19d" [ref=f1e2098]:
+                    - generic [ref=f1e2099]:
+                      - strong [ref=f1e2100]: 6 Nov
+                      - generic [ref=f1e2101]: +19d
+                  - columnheader "13 Nov End" [ref=f1e2102]:
+                    - generic [ref=f1e2103]:
+                      - strong [ref=f1e2104]: 13 Nov
+                      - generic [ref=f1e2105]: End
+              - rowgroup [ref=f1e2106]:
+                - row [ref=f1e2107]:
+                  - rowheader [ref=f1e2108]:
+                    - strong [ref=f1e2111]: US$436.80
+                  - cell "US$1,680 0%" [ref=f1e2112]:
+                    - generic [ref=f1e2113]:
+                      - generic [ref=f1e2114]: US$1,680
+                      - generic [ref=f1e2115]: 0%
+                  - cell "US$1,680 0%" [ref=f1e2116]:
+                    - generic [ref=f1e2117]:
+                      - generic [ref=f1e2118]: US$1,680
+                      - generic [ref=f1e2119]: 0%
+                  - cell "US$1,680 1%" [ref=f1e2120]:
+                    - generic [ref=f1e2121]:
+                      - generic [ref=f1e2122]: US$1,680
+                      - generic [ref=f1e2123]: 1%
+                  - cell "US$1,680 3%" [ref=f1e2124]:
+                    - generic [ref=f1e2125]:
+                      - generic [ref=f1e2126]: US$1,680
+                      - generic [ref=f1e2127]: 3%
+                  - cell "US$1,680 7%" [ref=f1e2128]:
+                    - generic [ref=f1e2129]:
+                      - generic [ref=f1e2130]: US$1,680
+                      - generic [ref=f1e2131]: 7%
+                  - cell "US$1,680 11%" [ref=f1e2132]:
+                    - generic [ref=f1e2133]:
+                      - generic [ref=f1e2134]: US$1,680
+                      - generic [ref=f1e2135]: 11%
+                - row [ref=f1e2136]:
+                  - rowheader [ref=f1e2137]:
+                    - strong [ref=f1e2140]: US$431.20
+                  - cell "US$1,120 0%" [ref=f1e2141]:
+                    - generic [ref=f1e2142]:
+                      - generic [ref=f1e2143]: US$1,120
+                      - generic [ref=f1e2144]: 0%
+                  - cell "US$1,120 2%" [ref=f1e2145]:
+                    - generic [ref=f1e2146]:
+                      - generic [ref=f1e2147]: US$1,120
+                      - generic [ref=f1e2148]: 2%
+                  - cell "US$1,120 9%" [ref=f1e2149]:
+                    - generic [ref=f1e2150]:
+                      - generic [ref=f1e2151]: US$1,120
+                      - generic [ref=f1e2152]: 9%
+                  - cell "US$1,120 15%" [ref=f1e2153]:
+                    - generic [ref=f1e2154]:
+                      - generic [ref=f1e2155]: US$1,120
+                      - generic [ref=f1e2156]: 15%
+                  - cell "US$1,120 22%" [ref=f1e2157]:
+                    - generic [ref=f1e2158]:
+                      - generic [ref=f1e2159]: US$1,120
+                      - generic [ref=f1e2160]: 22%
+                  - cell "US$1,120 28%" [ref=f1e2161]:
+                    - generic [ref=f1e2162]:
+                      - generic [ref=f1e2163]: US$1,120
+                      - generic [ref=f1e2164]: 28%
+                - row [ref=f1e2165]:
+                  - rowheader [ref=f1e2166]:
+                    - strong [ref=f1e2169]: US$425.60
+                  - cell "US$560 0%" [ref=f1e2170]:
+                    - generic [ref=f1e2171]:
+                      - generic [ref=f1e2172]: US$560
+                      - generic [ref=f1e2173]: 0%
+                  - cell "US$560 20%" [ref=f1e2174]:
+                    - generic [ref=f1e2175]:
+                      - generic [ref=f1e2176]: US$560
+                      - generic [ref=f1e2177]: 20%
+                  - cell "US$560 38%" [ref=f1e2178]:
+                    - generic [ref=f1e2179]:
+                      - generic [ref=f1e2180]: US$560
+                      - generic [ref=f1e2181]: 38%
+                  - cell "US$560 47%" [ref=f1e2182]:
+                    - generic [ref=f1e2183]:
+                      - generic [ref=f1e2184]: US$560
+                      - generic [ref=f1e2185]: 47%
+                  - cell "US$560 54%" [ref=f1e2186]:
+                    - generic [ref=f1e2187]:
+                      - generic [ref=f1e2188]: US$560
+                      - generic [ref=f1e2189]: 54%
+                  - cell "US$560 59%" [ref=f1e2190]:
+                    - generic [ref=f1e2191]:
+                      - generic [ref=f1e2192]: US$560
+                      - generic [ref=f1e2193]: 59%
+                - row [ref=f1e2194]:
+                  - rowheader [ref=f1e2195]:
+                    - strong [ref=f1e2198]: US$420.00
+                  - cell "US$0 100%" [ref=f1e2199]:
+                    - generic [ref=f1e2200]:
+                      - generic [ref=f1e2201]: US$0
+                      - generic [ref=f1e2202]: 100%
+                  - cell "US$0 100%" [ref=f1e2203]:
+                    - generic [ref=f1e2204]:
+                      - generic [ref=f1e2205]: US$0
+                      - generic [ref=f1e2206]: 100%
+                  - cell "US$0 100%" [ref=f1e2207]:
+                    - generic [ref=f1e2208]:
+                      - generic [ref=f1e2209]: US$0
+                      - generic [ref=f1e2210]: 100%
+                  - cell "US$0 100%" [ref=f1e2211]:
+                    - generic [ref=f1e2212]:
+                      - generic [ref=f1e2213]: US$0
+                      - generic [ref=f1e2214]: 100%
+                  - cell "US$0 100%" [ref=f1e2215]:
+                    - generic [ref=f1e2216]:
+                      - generic [ref=f1e2217]: US$0
+                      - generic [ref=f1e2218]: 100%
+                  - cell "US$0 100%" [ref=f1e2219]:
+                    - generic [ref=f1e2220]:
+                      - generic [ref=f1e2221]: US$0
+                      - generic [ref=f1e2222]: 100%
+                - row [ref=f1e2223]:
+                  - rowheader [ref=f1e2224]:
+                    - strong [ref=f1e2227]: US$414.40
+                  - cell "-US$560 0%" [ref=f1e2228]:
+                    - generic [ref=f1e2229]:
+                      - generic [ref=f1e2230]: "-US$560"
+                      - generic [ref=f1e2231]: 0%
+                  - cell "-US$560 22%" [ref=f1e2232]:
+                    - generic [ref=f1e2233]:
+                      - generic [ref=f1e2234]: "-US$560"
+                      - generic [ref=f1e2235]: 22%
+                  - cell "-US$560 37%" [ref=f1e2236]:
+                    - generic [ref=f1e2237]:
+                      - generic [ref=f1e2238]: "-US$560"
+                      - generic [ref=f1e2239]: 37%
+                  - cell "-US$560 44%" [ref=f1e2240]:
+                    - generic [ref=f1e2241]:
+                      - generic [ref=f1e2242]: "-US$560"
+                      - generic [ref=f1e2243]: 44%
+                  - cell "-US$560 50%" [ref=f1e2244]:
+                    - generic [ref=f1e2245]:
+                      - generic [ref=f1e2246]: "-US$560"
+                      - generic [ref=f1e2247]: 50%
+                  - cell "-US$560 54%" [ref=f1e2248]:
+                    - generic [ref=f1e2249]:
+                      - generic [ref=f1e2250]: "-US$560"
+                      - generic [ref=f1e2251]: 54%
+                - row [ref=f1e2252]:
+                  - rowheader [ref=f1e2253]:
+                    - strong [ref=f1e2256]: US$408.80
+                  - cell "-US$1,120 0%" [ref=f1e2257]:
+                    - generic [ref=f1e2258]:
+                      - generic [ref=f1e2259]: "-US$1,120"
+                      - generic [ref=f1e2260]: 0%
+                  - cell "-US$1,120 4%" [ref=f1e2261]:
+                    - generic [ref=f1e2262]:
+                      - generic [ref=f1e2263]: "-US$1,120"
+                      - generic [ref=f1e2264]: 4%
+                  - cell "-US$1,120 13%" [ref=f1e2265]:
+                    - generic [ref=f1e2266]:
+                      - generic [ref=f1e2267]: "-US$1,120"
+                      - generic [ref=f1e2268]: 13%
+                  - cell "-US$1,120 20%" [ref=f1e2269]:
+                    - generic [ref=f1e2270]:
+                      - generic [ref=f1e2271]: "-US$1,120"
+                      - generic [ref=f1e2272]: 20%
+                  - cell "-US$1,120 26%" [ref=f1e2273]:
+                    - generic [ref=f1e2274]:
+                      - generic [ref=f1e2275]: "-US$1,120"
+                      - generic [ref=f1e2276]: 26%
+                  - cell "-US$1,120 31%" [ref=f1e2277]:
+                    - generic [ref=f1e2278]:
+                      - generic [ref=f1e2279]: "-US$1,120"
+                      - generic [ref=f1e2280]: 31%
+                - row [ref=f1e2281]:
+                  - rowheader [ref=f1e2282]:
+                    - strong [ref=f1e2285]: US$403.20
+                  - cell "-US$1,680 0%" [ref=f1e2286]:
+                    - generic [ref=f1e2287]:
+                      - generic [ref=f1e2288]: "-US$1,680"
+                      - generic [ref=f1e2289]: 0%
+                  - cell "-US$1,680 0%" [ref=f1e2290]:
+                    - generic [ref=f1e2291]:
+                      - generic [ref=f1e2292]: "-US$1,680"
+                      - generic [ref=f1e2293]: 0%
+                  - cell "-US$1,680 3%" [ref=f1e2294]:
+                    - generic [ref=f1e2295]:
+                      - generic [ref=f1e2296]: "-US$1,680"
+                      - generic [ref=f1e2297]: 3%
+                  - cell "-US$1,680 7%" [ref=f1e2298]:
+                    - generic [ref=f1e2299]:
+                      - generic [ref=f1e2300]: "-US$1,680"
+                      - generic [ref=f1e2301]: 7%
+                  - cell "-US$1,680 12%" [ref=f1e2302]:
+                    - generic [ref=f1e2303]:
+                      - generic [ref=f1e2304]: "-US$1,680"
+                      - generic [ref=f1e2305]: 12%
+                  - cell "-US$1,680 16%" [ref=f1e2306]:
+                    - generic [ref=f1e2307]:
+                      - generic [ref=f1e2308]: "-US$1,680"
+                      - generic [ref=f1e2309]: 16%
+          - paragraph [ref=f1e2310]: European reference pricing; fees included. Catalysts affect ratings, not contractual payoffs.
+        - generic [ref=f1e2311]:
+          - generic [ref=f1e2312]:
+            - heading "Hedge choices" [level=2] [ref=f1e2313]
+            - generic [ref=f1e2316]:
+              - button "Customize Hedge choices" [ref=f1e2317] [cursor=pointer]: + Item
+              - button "Move or hide Hedge choices" [ref=f1e2318]: ⠿
+              - button "Collapse Hedge choices" [ref=f1e2319] [cursor=pointer]: −
+          - generic [ref=f1e2320]:
+            - button "Protective put Keep upside · Pay for protection" [ref=f1e2321] [cursor=pointer]:
+              - generic [ref=f1e2324]:
+                - strong [ref=f1e2325]: Protective put
+                - generic [ref=f1e2326]: Keep upside · Pay for protection
+            - button "Collar Lower hedge cost · Cap upside" [ref=f1e2327] [cursor=pointer]:
+              - generic [ref=f1e2330]:
+                - strong [ref=f1e2331]: Collar
+                - generic [ref=f1e2332]: Lower hedge cost · Cap upside
+            - button "Covered call Earn premium · Keep stock risk" [ref=f1e2333] [cursor=pointer]:
+              - generic [ref=f1e2336]:
+                - strong [ref=f1e2337]: Covered call
+                - generic [ref=f1e2338]: Earn premium · Keep stock risk
+            - button "Put credit spread Defined risk · Earn premium" [ref=f1e2339] [cursor=pointer]:
+              - generic [ref=f1e2342]:
+                - strong [ref=f1e2343]: Put credit spread
+                - generic [ref=f1e2344]: Defined risk · Earn premium
+          - generic [ref=f1e2345]:
+            - strong [ref=f1e2346]: Selected position
+            - generic [ref=f1e2347]: 2026-11-14
+            - paragraph [ref=f1e2348]: 100 MSFT shares
+            - button "Edit strategy parameters →" [ref=f1e2349] [cursor=pointer]
+        - generic [ref=f1e2350]:
+          - generic [ref=f1e2351]:
+            - heading "Stock technicals" [level=2] [ref=f1e2352]
+            - generic [ref=f1e2355]:
+              - button "Customize Stock technicals" [ref=f1e2356] [cursor=pointer]: + Item
+              - button "Move or hide Stock technicals" [ref=f1e2357]: ⠿
+              - button "Collapse Stock technicals" [ref=f1e2358] [cursor=pointer]: −
+          - generic [ref=f1e2359]:
+            - img "MSFT price" [ref=f1e2360]
+            - generic [ref=f1e2362]: — MSFT price
+          - generic [ref=f1e2364]:
+            - generic [ref=f1e2365]:
+              - generic [ref=f1e2366]: RSI
+              - strong [ref=f1e2367]: "79.3"
+            - generic [ref=f1e2368]:
+              - generic [ref=f1e2369]: 50-day average
+              - strong [ref=f1e2370]: $416.71
+            - generic [ref=f1e2371]:
+              - generic [ref=f1e2372]: Support
+              - strong [ref=f1e2373]: $395.05
+            - generic [ref=f1e2374]:
+              - generic [ref=f1e2375]: Resistance
+              - strong [ref=f1e2376]: $434.41
+          - generic [ref=f1e2377]: Illustrative sample · 60-session price range
+        - generic [ref=f1e2378]:
+          - generic [ref=f1e2379]:
+            - heading "Options analytics" [level=2] [ref=f1e2380]
+            - generic [ref=f1e2383]:
+              - button "Customize Options analytics" [ref=f1e2384] [cursor=pointer]: + Item
+              - button "Move or hide Options analytics" [ref=f1e2385]: ⠿
+              - button "Collapse Options analytics" [ref=f1e2386] [cursor=pointer]: −
+          - generic [ref=f1e2387]:
+            - generic [ref=f1e2388]: Volatility history
+            - generic [ref=f1e2389]:
+              - button "30D" [ref=f1e2390] [cursor=pointer]
+              - button "60D" [ref=f1e2391] [cursor=pointer]
+              - button "180D" [ref=f1e2392] [cursor=pointer]
+              - button "365D" [ref=f1e2393] [cursor=pointer]
+          - generic [ref=f1e2394]:
+            - img "Realized volatility history" [ref=f1e2395]
+            - generic [ref=f1e2397]: — Realized volatility history
+          - generic [ref=f1e2399]:
+            - generic [ref=f1e2400]:
+              - generic [ref=f1e2401]: IV
+              - strong [ref=f1e2402]: 9%
+            - generic [ref=f1e2403]:
+              - generic [ref=f1e2404]: HV
+              - strong [ref=f1e2405]: 9%
+            - generic [ref=f1e2406]:
+              - generic [ref=f1e2407]: IV rank
+              - strong [ref=f1e2408]: —
+            - generic [ref=f1e2409]:
+              - generic [ref=f1e2410]: Min OI
+              - strong [ref=f1e2411]: —
+          - text: Option volatility uses historical volatility; not market IV.
+        - generic [ref=f1e2412]:
+          - generic [ref=f1e2413]:
+            - heading "Agent valuation" [level=2] [ref=f1e2414]
+            - generic [ref=f1e2417]:
+              - button "Customize Agent valuation" [ref=f1e2418] [cursor=pointer]: + Item
+              - button "Move or hide Agent valuation" [ref=f1e2419]: ⠿
+              - button "Collapse Agent valuation" [ref=f1e2420] [cursor=pointer]: −
+          - generic [ref=f1e2421]:
+            - heading "Research with TradingAgents" [level=3] [ref=f1e2422]
+            - paragraph [ref=f1e2423]: Connect the optional TradingAgents service to see price targets and evidence.
+            - button "Run AI research" [ref=f1e2424] [cursor=pointer]
+        - generic [ref=f1e2425]:
+          - generic [ref=f1e2426]:
+            - heading "Past events" [level=2] [ref=f1e2427]
+            - generic [ref=f1e2430]:
+              - button "Customize Past events" [ref=f1e2431] [cursor=pointer]: + Item
+              - button "Move or hide Past events" [ref=f1e2432]: ⠿
+              - button "Collapse Past events" [ref=f1e2433] [cursor=pointer]: −
+          - generic [ref=f1e2434]:
+            - generic [ref=f1e2435]: Observed price reactions
+            - generic [ref=f1e2436]:
+              - button "30D" [ref=f1e2437] [cursor=pointer]
+              - button "60D" [ref=f1e2438] [cursor=pointer]
+              - button "180D" [ref=f1e2439] [cursor=pointer]
+              - button "365D" [ref=f1e2440] [cursor=pointer]
+          - paragraph [ref=f1e2441]: No historical event claims in demo mode.
+          - button "View calendar & coverage →" [ref=f1e2442] [cursor=pointer]
+        - generic [ref=f1e2443]:
+          - generic [ref=f1e2444]:
+            - heading "Upcoming events" [level=2] [ref=f1e2445]
+            - generic [ref=f1e2448]:
+              - button "Customize Upcoming events" [ref=f1e2449] [cursor=pointer]: + Item
+              - button "Move or hide Upcoming events" [ref=f1e2450]: ⠿
+              - button "Collapse Upcoming events" [ref=f1e2451] [cursor=pointer]: −
+          - generic [ref=f1e2452]:
+            - generic [ref=f1e2453]: Scheduled events · scenario context
+            - generic [ref=f1e2454]:
+              - button "30D" [ref=f1e2455] [cursor=pointer]
+              - button "60D" [ref=f1e2456] [cursor=pointer]
+              - button "180D" [ref=f1e2457] [cursor=pointer]
+              - button "365D" [ref=f1e2458] [cursor=pointer]
+          - paragraph [ref=f1e2459]: No historical event claims in demo mode.
+          - button "View calendar & coverage →" [ref=f1e2460] [cursor=pointer]
+        - generic [ref=f1e2461]:
+          - heading "AI tracking" [level=2] [ref=f1e2463]
+          - generic [ref=f1e2467]:
+            - generic [ref=f1e2468]: 6 saved
+            - generic [ref=f1e2469]: Net 0
+            - button "+ Add" [ref=f1e2470] [cursor=pointer]
+            - button "0 suggestions" [ref=f1e2471] [cursor=pointer]
+            - button "Open tracker ↗" [ref=f1e2472] [cursor=pointer]
+        - generic [ref=f1e2475]:
+          - generic [ref=f1e2476]:
+            - strong [ref=f1e2477]:
+              - text: Scanned option results
+              - generic [ref=f1e2478]: 21 matches
+            - textbox "Search results" [ref=f1e2479]:
+              - /placeholder: Search stock or strategy…
+            - combobox "Filter strategy" [ref=f1e2480]:
+              - option "All strategies" [selected]
+              - option "Collar"
+              - option "Protective put"
+              - option "Covered call"
+              - option "Cash-secured put"
+              - option "Put credit spread"
+              - option "Put debit spread"
+              - option "Stock only"
+            - combobox "Filter expiry" [ref=f1e2481]:
+              - option "All expiries" [selected]
+              - option "2026-11-14"
+            - spinbutton "Minimum rating" [ref=f1e2482]
+            - generic [ref=f1e2483]:
+              - checkbox "Catalysts" [checked] [ref=f1e2484]
+              - text: Catalysts
+            - button "Columns" [ref=f1e2485] [cursor=pointer]
+            - button "Export" [ref=f1e2486] [cursor=pointer]
+            - button "Expand" [ref=f1e2487] [cursor=pointer]
+          - table [ref=f1e2489]:
+            - rowgroup [ref=f1e2490]:
+              - row [ref=f1e2491] [cursor=pointer]:
+                - columnheader [ref=f1e2492]
+                - columnheader [ref=f1e2493]:
+                  - button "Stock / Strategy" [ref=f1e2494]
+                - columnheader "Option legs" [ref=f1e2495]
+                - columnheader "Expiry" [ref=f1e2496]
+                - columnheader [ref=f1e2497]:
+                  - button "Net debit / credit" [ref=f1e2498]
+                - columnheader "Max profit" [ref=f1e2499]
+                - columnheader "Max loss" [ref=f1e2500]
+                - columnheader "Breakeven" [ref=f1e2501]
+                - columnheader "IV" [ref=f1e2502]
+                - columnheader "Min OI" [ref=f1e2503]
+                - columnheader "Data" [ref=f1e2504]
+                - columnheader [ref=f1e2505]:
+                  - button "Rating ↓" [ref=f1e2506]
+            - rowgroup [ref=f1e2507]:
+              - row [ref=f1e2508] [cursor=pointer]:
+                - cell [ref=f1e2509]:
+                  - radio "Select AAPL Stock only 2026-11-14" [ref=f1e2510]
+                - cell "AAPL · Stock only" [ref=f1e2511]:
+                  - text: AAPL
+                  - generic [ref=f1e2512]: · Stock only
+                - cell [ref=f1e2513]:
+                  - button "100 shares" [ref=f1e2514]
+                - cell "2026-11-14" [ref=f1e2515]
+                - cell "$0 debit" [ref=f1e2516]
+                - cell "Unlimited" [ref=f1e2517]
+                - cell "-$22,000" [ref=f1e2518]
+                - cell "$220.00" [ref=f1e2519]
+                - cell "9%" [ref=f1e2520]
+                - cell "—" [ref=f1e2521]
+                - cell "Sample" [ref=f1e2522]
+                - cell [ref=f1e2523]:
+                  - button "65 (0)" [ref=f1e2524]:
+                    - text: "65"
+                    - generic [ref=f1e2525]: (0)
+              - row [ref=f1e2526] [cursor=pointer]:
+                - cell [ref=f1e2527]:
+                  - radio "Select MSFT Stock only 2026-11-14" [checked] [ref=f1e2528]
+                - cell "MSFT · Stock only" [ref=f1e2529]:
+                  - text: MSFT
+                  - generic [ref=f1e2530]: · Stock only
+                - cell [ref=f1e2531]:
+                  - button "100 shares" [ref=f1e2532]
+                - cell "2026-11-14" [ref=f1e2533]
+                - cell "$0 debit" [ref=f1e2534]
+                - cell "Unlimited" [ref=f1e2535]
+                - cell "-$42,000" [ref=f1e2536]
+                - cell "$420.00" [ref=f1e2537]
+                - cell "9%" [ref=f1e2538]
+                - cell "—" [ref=f1e2539]
+                - cell "Sample" [ref=f1e2540]
+                - cell [ref=f1e2541]:
+                  - button "65 (0)" [ref=f1e2542]:
+                    - text: "65"
+                    - generic [ref=f1e2543]: (0)
+              - row [ref=f1e2544] [cursor=pointer]:
+                - cell [ref=f1e2545]:
+                  - radio "Select SPY Stock only 2026-11-14" [ref=f1e2546]
+                - cell "SPY · Stock only" [ref=f1e2547]:
+                  - text: SPY
+                  - generic [ref=f1e2548]: · Stock only
+                - cell [ref=f1e2549]:
+                  - button "100 shares" [ref=f1e2550]
+                - cell "2026-11-14" [ref=f1e2551]
+                - cell "$0 debit" [ref=f1e2552]
+                - cell "Unlimited" [ref=f1e2553]
+                - cell "-$59,000" [ref=f1e2554]
+                - cell "$590.00" [ref=f1e2555]
+                - cell "9%" [ref=f1e2556]
+                - cell "—" [ref=f1e2557]
+                - cell "Sample" [ref=f1e2558]
+                - cell [ref=f1e2559]:
+                  - button "65 (0)" [ref=f1e2560]:
+                    - text: "65"
+                    - generic [ref=f1e2561]: (0)
+              - row [ref=f1e2562] [cursor=pointer]:
+                - cell [ref=f1e2563]:
+                  - radio "Select AAPL Collar 2026-11-14" [ref=f1e2564]
+                - cell "AAPL · Collar" [ref=f1e2565]:
+                  - text: AAPL
+                  - generic [ref=f1e2566]: · Collar
+                - cell [ref=f1e2567]:
+                  - button "Buy 209P · Sell 231C" [ref=f1e2568]
+                - cell "2026-11-14" [ref=f1e2569]
+                - cell "$83 credit" [ref=f1e2570]
+                - cell "$1,181" [ref=f1e2571]
+                - cell "-$1,019" [ref=f1e2572]
+                - cell "$219.19" [ref=f1e2573]
+                - cell "28%" [ref=f1e2574]
+                - cell "—" [ref=f1e2575]
+                - cell "Sample" [ref=f1e2576]
+                - cell [ref=f1e2577]:
+                  - button "57–77 (-8)" [ref=f1e2578]:
+                    - text: 57–77
+                    - generic [ref=f1e2579]: (-8)
+              - row [ref=f1e2580] [cursor=pointer]:
+                - cell [ref=f1e2581]:
+                  - radio "Select AAPL Protective put 2026-11-14" [ref=f1e2582]
+                - cell "AAPL · Protective put" [ref=f1e2583]:
+                  - text: AAPL
+                  - generic [ref=f1e2584]: · Protective put
+                - cell [ref=f1e2585]:
+                  - button "Buy 209P" [ref=f1e2586]
+                - cell "2026-11-14" [ref=f1e2587]
+                - cell "$294 debit" [ref=f1e2588]
+                - cell "Unlimited" [ref=f1e2589]
+                - cell "-$1,394" [ref=f1e2590]
+                - cell "$222.94" [ref=f1e2591]
+                - cell "28%" [ref=f1e2592]
+                - cell "—" [ref=f1e2593]
+                - cell "Sample" [ref=f1e2594]
+                - cell [ref=f1e2595]:
+                  - button "63–83 (0)" [ref=f1e2596]:
+                    - text: 63–83
+                    - generic [ref=f1e2597]: (0)
+              - row [ref=f1e2598] [cursor=pointer]:
+                - cell [ref=f1e2599]:
+                  - radio "Select AAPL Covered call 2026-11-14" [ref=f1e2600]
+                - cell "AAPL · Covered call" [ref=f1e2601]:
+                  - text: AAPL
+                  - generic [ref=f1e2602]: · Covered call
+                - cell [ref=f1e2603]:
+                  - button "Sell 231C" [ref=f1e2604]
+                - cell "2026-11-14" [ref=f1e2605]
+                - cell "$376 credit" [ref=f1e2606]
+                - cell "$1,476" [ref=f1e2607]
+                - cell "-$21,624" [ref=f1e2608]
+                - cell "$216.24" [ref=f1e2609]
+                - cell "28%" [ref=f1e2610]
+                - cell "—" [ref=f1e2611]
+                - cell "Sample" [ref=f1e2612]
+                - cell [ref=f1e2613]:
+                  - button "40–60 (0)" [ref=f1e2614]:
+                    - text: 40–60
+                    - generic [ref=f1e2615]: (0)
+              - row [ref=f1e2616] [cursor=pointer]:
+                - cell [ref=f1e2617]:
+                  - radio "Select AAPL Cash-secured put 2026-11-14" [ref=f1e2618]
+                - cell "AAPL · Cash-secured put" [ref=f1e2619]:
+                  - text: AAPL
+                  - generic [ref=f1e2620]: · Cash-secured put
+                - cell [ref=f1e2621]:
+                  - button "Sell 209P" [ref=f1e2622]
+                - cell "2026-11-14" [ref=f1e2623]
+                - cell "$294 credit" [ref=f1e2624]
+                - cell "$293" [ref=f1e2625]
+                - cell "-$20,607" [ref=f1e2626]
+                - cell "$206.07" [ref=f1e2627]
+                - cell "28%" [ref=f1e2628]
+                - cell "—" [ref=f1e2629]
+                - cell "Sample" [ref=f1e2630]
+                - cell [ref=f1e2631]:
+                  - button "35–55 (0)" [ref=f1e2632]:
+                    - text: 35–55
+                    - generic [ref=f1e2633]: (0)
+              - row [ref=f1e2634] [cursor=pointer]:
+                - cell [ref=f1e2635]:
+                  - radio "Select AAPL Put credit spread 2026-11-14" [ref=f1e2636]
+                - cell "AAPL · Put credit spread" [ref=f1e2637]:
+                  - text: AAPL
+                  - generic [ref=f1e2638]: · Put credit spread
+                - cell [ref=f1e2639]:
+                  - button "Sell 209P · Buy 198P" [ref=f1e2640]
+                - cell "2026-11-14" [ref=f1e2641]
+                - cell "$205 credit" [ref=f1e2642]
+                - cell "$203" [ref=f1e2643]
+                - cell "-$897" [ref=f1e2644]
+                - cell "$206.97" [ref=f1e2645]
+                - cell "28%" [ref=f1e2646]
+                - cell "—" [ref=f1e2647]
+                - cell "Sample" [ref=f1e2648]
+                - cell [ref=f1e2649]:
+                  - button "57–77 (0)" [ref=f1e2650]:
+                    - text: 57–77
+                    - generic [ref=f1e2651]: (0)
+          - generic [ref=f1e2652]:
+            - generic [ref=f1e2653]: Selected result drives the heatmap. Synthetic options; no market quote or OI is implied.
+            - generic [ref=f1e2654]:
+              - button "‹" [disabled] [ref=f1e2655]
+              - generic [ref=f1e2656]: 1–8 of 21
+              - button "›" [ref=f1e2657] [cursor=pointer]

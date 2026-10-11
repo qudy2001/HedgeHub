@@ -1,0 +1,965 @@
+{
+  "info": {
+    "_postman_id": "9fd51544-5392-4b47-889f-9dbec911b3eb",
+    "name": "HedgeHub TigerTrade",
+    "description": "Postman collection for validating a TigerTrade bridge first, then validating HedgeHub integration endpoints once TigerTrade is wired in as an option market-data source.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "activeOptionProvider",
+      "value": "polygon"
+    }
+  ],
+  "item": [
+    {
+      "name": "Tiger Validation",
+      "description": "Validates Tiger bridge health, permissions, expirations, chain data, briefs, depth, and stream readiness. These requests assume a local HTTP bridge in front of the Tiger Python SDK.",
+      "item": [
+        {
+          "name": "Tiger Bridge Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger bridge health is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "let body = {};",
+                  "try {",
+                  "  body = pm.response.json();",
+                  "} catch (error) {",
+                  "  pm.test('Tiger bridge returns JSON', function () {",
+                  "    throw error;",
+                  "  });",
+                  "}",
+                  "",
+                  "pm.test('Tiger bridge exposes readiness details', function () {",
+                  "  pm.expect(body).to.be.an('object');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/health",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Verifies the Tiger bridge is up and reports configuration readiness."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Quote Permissions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger permissions request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const permissions = body.permissions || body.data || body.result || body;",
+                  "const serialized = JSON.stringify(permissions);",
+                  "",
+                  "pm.test('Tiger option permission is present', function () {",
+                  "  pm.expect(serialized, 'Expected usOptionQuote permission in the response').to.include('usOptionQuote');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/permissions",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "permissions"
+              ]
+            },
+            "description": "Returns Tiger quote permissions and confirms the account has the usOptionQuote permission."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Option Expirations",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger option expirations request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const rows = body.expirations || body.data || body.result || [];",
+                  "",
+                  "pm.test('Tiger expirations returns at least one row', function () {",
+                  "  pm.expect(rows).to.be.an('array').that.is.not.empty;",
+                  "});",
+                  "",
+                  "if (!pm.environment.get('expiry') && rows.length) {",
+                  "  const first = rows[0];",
+                  "  const expiry = first.date || first.expiry || first.expiry_date || first.expiration || '';",
+                  "  if (expiry) {",
+                  "    pm.environment.set('expiry', expiry);",
+                  "  }",
+                  "}",
+                  "",
+                  "pm.test('Expiry variable is populated', function () {",
+                  "  pm.expect(pm.environment.get('expiry'), 'Expected expiry variable to be set').to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/options/expirations?symbol={{symbol}}",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "options",
+                "expirations"
+              ],
+              "query": [
+                {
+                  "key": "symbol",
+                  "value": "{{symbol}}"
+                }
+              ]
+            },
+            "description": "Fetches Tiger option expirations for the configured symbol and stores the first available expiry into the environment when expiry is unset."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Option Chain",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger option chain request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const contracts = body.contracts || body.data || body.result || [];",
+                  "",
+                  "pm.test('Tiger option chain returns contracts', function () {",
+                  "  pm.expect(contracts).to.be.an('array').that.is.not.empty;",
+                  "});",
+                  "",
+                  "const selected = contracts[0] || {};",
+                  "const contractSymbol = selected.contractSymbol || selected.identifier || selected.symbol || '';",
+                  "if (contractSymbol) {",
+                  "  pm.environment.set('contractSymbol', contractSymbol);",
+                  "}",
+                  "",
+                  "pm.test('Contract symbol is captured for later requests', function () {",
+                  "  pm.expect(pm.environment.get('contractSymbol'), 'Expected contractSymbol variable to be set').to.be.a('string').and.not.empty;",
+                  "});",
+                  "",
+                  "const bestBid = selected.bid ?? selected.bid_price;",
+                  "const bestAsk = selected.ask ?? selected.ask_price;",
+                  "if (bestBid !== undefined && bestBid !== null) {",
+                  "  pm.test('Tiger chain bid is numeric when present', function () {",
+                  "    pm.expect(Number(bestBid)).to.not.satisfy(Number.isNaN);",
+                  "  });",
+                  "}",
+                  "if (bestAsk !== undefined && bestAsk !== null) {",
+                  "  pm.test('Tiger chain ask is numeric when present', function () {",
+                  "    pm.expect(Number(bestAsk)).to.not.satisfy(Number.isNaN);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/options/chain?symbol={{symbol}}&expiry={{expiry}}&optionType={{optionType}}",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "options",
+                "chain"
+              ],
+              "query": [
+                {
+                  "key": "symbol",
+                  "value": "{{symbol}}"
+                },
+                {
+                  "key": "expiry",
+                  "value": "{{expiry}}"
+                },
+                {
+                  "key": "optionType",
+                  "value": "{{optionType}}"
+                }
+              ]
+            },
+            "description": "Fetches Tiger option-chain data, validates the payload, and stores one contract identifier into the environment for briefs, depth, and stream tests."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Option Briefs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger option briefs request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const rows = body.briefs || body.data || body.result || [];",
+                  "const first = Array.isArray(rows) ? (rows[0] || {}) : rows;",
+                  "const bid = first.bid ?? first.bid_price;",
+                  "const ask = first.ask ?? first.ask_price;",
+                  "",
+                  "pm.test('Tiger briefs returns a contract payload', function () {",
+                  "  pm.expect(first).to.be.an('object');",
+                  "});",
+                  "",
+                  "if (bid !== undefined && bid !== null) {",
+                  "  pm.test('Tiger briefs bid is numeric when present', function () {",
+                  "    pm.expect(Number(bid)).to.not.satisfy(Number.isNaN);",
+                  "  });",
+                  "}",
+                  "if (ask !== undefined && ask !== null) {",
+                  "  pm.test('Tiger briefs ask is numeric when present', function () {",
+                  "    pm.expect(Number(ask)).to.not.satisfy(Number.isNaN);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/options/briefs?identifiers={{contractSymbol}}",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "options",
+                "briefs"
+              ],
+              "query": [
+                {
+                  "key": "identifiers",
+                  "value": "{{contractSymbol}}"
+                }
+              ]
+            },
+            "description": "Fetches Tiger per-contract option quote fields for the captured contract symbol."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Option Depth",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger option depth request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const payload = body.depth || body.data || body.result || body;",
+                  "const asks = payload.asks || payload.ask || [];",
+                  "const bids = payload.bids || payload.bid || [];",
+                  "",
+                  "pm.test('Tiger option depth returns asks and bids arrays', function () {",
+                  "  pm.expect(asks).to.be.an('array');",
+                  "  pm.expect(bids).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/options/depth?identifiers={{contractSymbol}}",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "options",
+                "depth"
+              ],
+              "query": [
+                {
+                  "key": "identifiers",
+                  "value": "{{contractSymbol}}"
+                }
+              ]
+            },
+            "description": "Fetches Tiger full option depth for the captured contract symbol."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Stream Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger stream status request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const state = body.state || body.streamState || body.status || '';",
+                  "",
+                  "pm.test('Tiger stream status exposes a state', function () {",
+                  "  pm.expect(state, 'Expected a stream state field').to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/stream/status",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "stream",
+                "status"
+              ]
+            },
+            "description": "Checks whether the Tiger push client is connected and ready to manage subscriptions."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Stream Subscribe",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger stream subscribe request is successful', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201, 202]);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const state = body.state || body.streamState || body.status || '';",
+                  "const tracked = Number(body.trackedContracts ?? body.tracked ?? 0);",
+                  "const subscribed = Number(body.subscribedContracts ?? body.subscribed ?? 0);",
+                  "",
+                  "pm.test('Tiger stream reports tracked or subscribed contracts after subscribe', function () {",
+                  "  pm.expect(tracked > 0 || subscribed > 0 || state === 'subscribed' || state === 'live').to.equal(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"identifiers\": [\n    \"{{contractSymbol}}\"\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/stream/subscribe",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "stream",
+                "subscribe"
+              ]
+            },
+            "description": "Subscribes the Tiger push stream to the captured contract symbol."
+          },
+          "response": []
+        },
+        {
+          "name": "Tiger Stream Snapshot",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tiger stream snapshot request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const payload = body.snapshot || body.data || body.result || body;",
+                  "const bid = payload.bid ?? payload.bestBid;",
+                  "const ask = payload.ask ?? payload.bestAsk;",
+                  "",
+                  "if (bid !== undefined && bid !== null) {",
+                  "  pm.test('Tiger stream snapshot bid is numeric when present', function () {",
+                  "    pm.expect(Number(bid)).to.not.satisfy(Number.isNaN);",
+                  "  });",
+                  "}",
+                  "if (ask !== undefined && ask !== null) {",
+                  "  pm.test('Tiger stream snapshot ask is numeric when present', function () {",
+                  "    pm.expect(Number(ask)).to.not.satisfy(Number.isNaN);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{tigerBridgeUrl}}/stream/snapshot?identifier={{contractSymbol}}",
+              "host": [
+                "{{tigerBridgeUrl}}"
+              ],
+              "path": [
+                "stream",
+                "snapshot"
+              ],
+              "query": [
+                {
+                  "key": "identifier",
+                  "value": "{{contractSymbol}}"
+                }
+              ]
+            },
+            "description": "Retrieves the latest cached best bid/ask and optional depth snapshot from the Tiger push stream for the captured contract symbol."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "HedgeHub Integration",
+      "description": "Validates HedgeHub once TigerTrade has been integrated as a selectable option market-data provider. Protected requests require the sessionCookie environment variable.",
+      "item": [
+        {
+          "name": "HedgeHub Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HedgeHub health request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('HedgeHub health includes stream diagnostics', function () {",
+                  "  pm.expect(body).to.have.property('streamDiagnostics');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "health"
+              ]
+            },
+            "description": "Confirms HedgeHub health and current stream diagnostics."
+          },
+          "response": []
+        },
+        {
+          "name": "HedgeHub Stream Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HedgeHub stream status request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const options = body.options || {};",
+                  "",
+                  "pm.test('HedgeHub stream diagnostics include option provider details', function () {",
+                  "  pm.expect(options).to.be.an('object');",
+                  "  pm.expect(options.provider || options.sourceLabel || options.source || '', 'Expected option provider details').to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/stream-status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "stream-status"
+              ]
+            },
+            "description": "Reads HedgeHub stream diagnostics and confirms active option-provider metadata."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Market Data Setting",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Market-data settings request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const provider = body.optionProvider || body.settings?.optionProvider || '';",
+                  "if (provider) {",
+                  "  pm.collectionVariables.set('activeOptionProvider', provider);",
+                  "}",
+                  "",
+                  "pm.test('Market-data settings include optionProvider', function () {",
+                  "  pm.expect(provider, 'Expected optionProvider in the response').to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/settings/market-data",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings",
+                "market-data"
+              ]
+            },
+            "description": "Reads the current global option market-data provider. This endpoint is future-facing until TigerTrade integration is implemented."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Market Data Provider to TigerTrade",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Set TigerTrade market-data provider request is successful', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+                  "});",
+                  "",
+                  "let provider = 'tigertrade';",
+                  "if (pm.response.code !== 204) {",
+                  "  const body = pm.response.json();",
+                  "  provider = body.optionProvider || body.settings?.optionProvider || provider;",
+                  "}",
+                  "pm.collectionVariables.set('activeOptionProvider', provider);",
+                  "",
+                  "pm.test('TigerTrade provider was saved', function () {",
+                  "  pm.expect(pm.collectionVariables.get('activeOptionProvider')).to.eql('tigertrade');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"optionProvider\": \"tigertrade\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings/market-data",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings",
+                "market-data"
+              ]
+            },
+            "description": "Switches the global option market-data provider to TigerTrade."
+          },
+          "response": []
+        },
+        {
+          "name": "HedgeHub Option Chain",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HedgeHub option chain request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const contracts = body.contracts || [];",
+                  "const activeProvider = pm.collectionVariables.get('activeOptionProvider') || '';",
+                  "const source = body.source || '';",
+                  "const sourceLabel = body.sourceLabel || '';",
+                  "",
+                  "pm.test('HedgeHub option chain returns contracts', function () {",
+                  "  pm.expect(contracts).to.be.an('array');",
+                  "});",
+                  "",
+                  "pm.test('HedgeHub option chain source matches the selected provider', function () {",
+                  "  pm.expect(String(source).toLowerCase()).to.include(activeProvider.toLowerCase());",
+                  "});",
+                  "",
+                  "if (activeProvider === 'tigertrade') {",
+                  "  pm.test('TigerTrade source label is surfaced', function () {",
+                  "    pm.expect(String(sourceLabel).toLowerCase()).to.include('tiger');",
+                  "  });",
+                  "}",
+                  "",
+                  "const first = contracts[0] || {};",
+                  "const contractSymbol = first.contractSymbol || first.identifier || '';",
+                  "if (contractSymbol) {",
+                  "  pm.environment.set('contractSymbol', contractSymbol);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/options/chain?symbol={{symbol}}&expiration={{expiry}}&optionType={{optionType}}&strikeHint={{strikeHint}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "options",
+                "chain"
+              ],
+              "query": [
+                {
+                  "key": "symbol",
+                  "value": "{{symbol}}"
+                },
+                {
+                  "key": "expiration",
+                  "value": "{{expiry}}"
+                },
+                {
+                  "key": "optionType",
+                  "value": "{{optionType}}"
+                },
+                {
+                  "key": "strikeHint",
+                  "value": "{{strikeHint}}"
+                }
+              ]
+            },
+            "description": "Validates normalized HedgeHub option-chain payloads after the provider is switched."
+          },
+          "response": []
+        },
+        {
+          "name": "HedgeHub Option Depth",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HedgeHub option depth endpoint is available', function () {",
+                  "  pm.expect(pm.response.code, 'Expected the future /api/options/depth endpoint').to.not.equal(404);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  const asks = body.asks || body.depth?.asks || [];",
+                  "  const bids = body.bids || body.depth?.bids || [];",
+                  "  pm.test('HedgeHub option depth returns asks and bids arrays', function () {",
+                  "    pm.expect(asks).to.be.an('array');",
+                  "    pm.expect(bids).to.be.an('array');",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/options/depth?contractSymbol={{contractSymbol}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "options",
+                "depth"
+              ],
+              "query": [
+                {
+                  "key": "contractSymbol",
+                  "value": "{{contractSymbol}}"
+                }
+              ]
+            },
+            "description": "Future-facing endpoint for normalized option depth from HedgeHub."
+          },
+          "response": []
+        },
+        {
+          "name": "HedgeHub Dashboard",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HedgeHub dashboard request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const activeProvider = pm.collectionVariables.get('activeOptionProvider') || '';",
+                  "const options = body.streamDiagnostics?.options || {};",
+                  "const providerText = String(options.provider || options.sourceLabel || options.source || '').toLowerCase();",
+                  "",
+                  "pm.test('Dashboard includes option stream diagnostics', function () {",
+                  "  pm.expect(options).to.be.an('object');",
+                  "});",
+                  "",
+                  "if (activeProvider === 'tigertrade') {",
+                  "  pm.test('TigerTrade diagnostics are surfaced in the dashboard', function () {",
+                  "    pm.expect(providerText).to.include('tiger');",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/dashboard",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "dashboard"
+              ]
+            },
+            "description": "Confirms dashboard diagnostics reflect the active option provider and stream state."
+          },
+          "response": []
+        },
+        {
+          "name": "HedgeHub Paper Portfolio",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HedgeHub paper portfolio request is successful', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "",
+                  "pm.test('HedgeHub paper portfolio returns JSON', function () {",
+                  "  pm.expect(body).to.be.an('object');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/paper-portfolio",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "paper-portfolio"
+              ]
+            },
+            "description": "Validates paper-portfolio responses after provider switching, especially for live option quote source labels on open paper positions."
+          },
+          "response": []
+        },
+        {
+          "name": "Set Market Data Provider to Polygon",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Set Polygon market-data provider request is successful', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('activeOptionProvider', 'polygon');",
+                  "",
+                  "pm.test('Polygon provider was restored', function () {",
+                  "  pm.expect(pm.collectionVariables.get('activeOptionProvider')).to.eql('polygon');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "hedgehub_session={{sessionCookie}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"optionProvider\": \"polygon\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings/market-data",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings",
+                "market-data"
+              ]
+            },
+            "description": "Switches the global option market-data provider back to Polygon for regression validation."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

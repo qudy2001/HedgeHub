@@ -1,4 +1,5 @@
 import { pickOptionReferencePrice } from "./optionPricing.js";
+import { buildDynamicHedgePlan } from "../shared/hedgeEngine.js";
 
 const DEFAULT_RISK_FREE_RATE = 0.0425;
 const DEFAULT_BATCH_SIZE = 4;
@@ -135,8 +136,9 @@ function getQuotePrice(quote) {
 }
 
 function normalCdf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  const absX = Math.abs(x);
+  const scaledX = x / Math.SQRT2;
+  const sign = scaledX >= 0 ? 1 : -1;
+  const absX = Math.abs(scaledX);
   const a1 = 0.254829592;
   const a2 = -0.284496736;
   const a3 = 1.421413741;
@@ -320,6 +322,41 @@ function pickAtmPair(calls, puts, spot) {
   };
 }
 
+function pickStraddlePairs(calls, puts, spot, maxPairs = 8) {
+  const sortedCalls = sortByStrike(calls);
+  const sortedPuts = sortByStrike(puts);
+  if (!sortedCalls.length || !sortedPuts.length) {
+    return [];
+  }
+
+  const callsByStrike = new Map(sortedCalls.map((contract) => [Number(contract.strike).toFixed(4), contract]));
+  const putsByStrike = new Map(sortedPuts.map((contract) => [Number(contract.strike).toFixed(4), contract]));
+  const sharedStrikes = [...callsByStrike.keys()].filter((strikeKey) => putsByStrike.has(strikeKey));
+
+  if (!sharedStrikes.length) {
+    const fallback = pickAtmPair(calls, puts, spot);
+    return fallback?.call && fallback?.put ? [fallback] : [];
+  }
+
+  const desiredPairs = Math.max(Math.round(Number(maxPairs ?? 0) || 0), 1);
+  const strikes = sharedStrikes
+    .map((strikeKey) => Number(strikeKey))
+    .sort((left, right) => {
+      const leftDistance = Math.abs(left - spot);
+      const rightDistance = Math.abs(right - spot);
+      return leftDistance === rightDistance ? left - right : leftDistance - rightDistance;
+    })
+    .slice(0, desiredPairs);
+
+  return strikes
+    .map((strike) => ({
+      call: callsByStrike.get(Number(strike).toFixed(4)),
+      put: putsByStrike.get(Number(strike).toFixed(4)),
+      strike
+    }))
+    .filter((pair) => pair.call && pair.put);
+}
+
 function buildQuoteQuality(call, put) {
   const hasRealBidAsk = call?.hasRealBidAsk === true && put?.hasRealBidAsk === true;
   const isLive = call?.isLive === true && put?.isLive === true;
@@ -409,135 +446,142 @@ function buildExpiryCandidate({
 }) {
   const spot = getQuotePrice(quote);
   if (!(spot > 0)) {
-    return null;
+    return [];
   }
 
-  const atmPair = pickAtmPair(calls, puts, spot);
-  if (!atmPair?.call || !atmPair?.put) {
-    return null;
-  }
-
-  const callMid = pickOptionReferencePrice(atmPair.call, 0);
-  const putMid = pickOptionReferencePrice(atmPair.put, 0);
-  if (!(callMid > 0) || !(putMid > 0)) {
-    return null;
+  const straddlePairs = pickStraddlePairs(calls, puts, spot, 10);
+  if (!straddlePairs.length) {
+    return [];
   }
 
   const daysToExpiry = daysUntil(expiration, now);
   if (!(daysToExpiry >= 0)) {
-    return null;
+    return [];
   }
 
   const timeToExpiryYears = Math.max(daysToExpiry / 365, 1 / 365);
-  const callVol = clamp(Number(atmPair.call?.impliedVolatility ?? 0) || 0.32, 0.05, 3);
-  const putVol = clamp(Number(atmPair.put?.impliedVolatility ?? 0) || callVol, 0.05, 3);
-  const callGreeks = computeCallGreeks({
-    spot,
-    strike: Number(atmPair.call.strike),
-    timeToExpiryYears,
-    volatility: callVol,
-    riskFreeRate
-  });
-  const putGreeks = computePutGreeks({
-    spot,
-    strike: Number(atmPair.put.strike),
-    timeToExpiryYears,
-    volatility: putVol,
-    riskFreeRate
-  });
+  const hedgePlan = buildDynamicHedgePlan();
 
-  const netDebitPerShare = callMid + putMid;
-  const netDebit = netDebitPerShare * 100;
-  const totalDeltaShares = (callGreeks.delta + putGreeks.delta) * 100;
-  const totalGamma = (callGreeks.gamma + putGreeks.gamma) * 100;
-  const totalVega = (callGreeks.vega + putGreeks.vega) * 100;
-  const totalThetaPerDay = (callGreeks.thetaPerDay + putGreeks.thetaPerDay) * 100;
-  const impliedMovePct = (netDebitPerShare / spot) * 100;
-  const impliedMoveUsd = netDebitPerShare;
-  const deltaChangeForOnePctMove = totalGamma * spot * 0.01;
-  const dailyBreakevenMoveUsd =
-    totalGamma > 0 && totalThetaPerDay < 0
-      ? Math.sqrt((2 * Math.abs(totalThetaPerDay)) / totalGamma)
-      : null;
-  const dailyBreakevenMovePct =
-    dailyBreakevenMoveUsd != null && spot > 0 ? (dailyBreakevenMoveUsd / spot) * 100 : null;
-  const rebalanceMoveForTenDeltaUsd = totalGamma > 0 ? 10 / totalGamma : null;
-  const rebalanceMoveForTenDeltaPct =
-    rebalanceMoveForTenDeltaUsd != null && spot > 0 ? (rebalanceMoveForTenDeltaUsd / spot) * 100 : null;
-  const thetaBurnPctPerDay = netDebit > 0 ? (Math.abs(totalThetaPerDay) / netDebit) * 100 : null;
-  const netBid = toNumber(atmPair.call?.bid, null) + toNumber(atmPair.put?.bid, null);
-  const netAsk = toNumber(atmPair.call?.ask, null) + toNumber(atmPair.put?.ask, null);
-  const spreadPct =
-    Number.isFinite(netBid) && Number.isFinite(netAsk) && netDebitPerShare > 0
-      ? ((netAsk - netBid) / netDebitPerShare) * 100
-      : null;
-  const minOpenInterest = Math.min(
-    Math.max(toNumber(atmPair.call?.openInterest, 0), 0),
-    Math.max(toNumber(atmPair.put?.openInterest, 0), 0)
-  );
-  const minVolume = Math.min(
-    Math.max(toNumber(atmPair.call?.volume, 0), 0),
-    Math.max(toNumber(atmPair.put?.volume, 0), 0)
-  );
-  const quoteQuality = buildQuoteQuality(atmPair.call, atmPair.put);
-  const liquidityScore = computeLiquidityScore({
-    minOpenInterest,
-    minVolume,
-    spreadPct,
-    quoteQuality
-  });
-  const compositeScore = computeCandidateScore({
-    liquidityScore,
-    deltaChangeForOnePctMove,
-    dailyBreakevenMovePct,
-    thetaBurnPctPerDay,
-    impliedMovePct
-  });
+  return straddlePairs
+    .map((pair) => {
+      const callMid = pickOptionReferencePrice(pair.call, 0);
+      const putMid = pickOptionReferencePrice(pair.put, 0);
+      if (!(callMid > 0) || !(putMid > 0)) {
+        return null;
+      }
 
-  return {
-    id: `${stock.symbol}:${expiration}:${Number(atmPair.strike).toFixed(2)}`,
-    symbol: stock.symbol,
-    companyName: stock.label,
-    strategyType: "Long ATM straddle",
-    expiration,
-    daysToExpiry,
-    strike: formatNumber(Number(atmPair.strike), 2),
-    underlyingPrice: formatNumber(spot, 2),
-    straddleCost: formatNumber(netDebit, 2),
-    straddleCostPerShare: formatNumber(netDebitPerShare, 4),
-    impliedMoveUsd: formatNumber(impliedMoveUsd, 2),
-    impliedMovePct: formatNumber(impliedMovePct, 2),
-    netDeltaShares: formatNumber(totalDeltaShares, 2),
-    gammaPerDollar: formatNumber(totalGamma, 4),
-    vegaPerVolPoint: formatNumber(totalVega / 100, 2),
-    thetaPerDay: formatNumber(totalThetaPerDay, 2),
-    thetaBurnPctPerDay: formatNumber(thetaBurnPctPerDay, 2),
-    deltaChangeForOnePctMove: formatNumber(deltaChangeForOnePctMove, 2),
-    dailyBreakevenMoveUsd: formatNumber(dailyBreakevenMoveUsd, 2),
-    dailyBreakevenMovePct: formatNumber(dailyBreakevenMovePct, 2),
-    rebalanceMoveForTenDeltaUsd: formatNumber(rebalanceMoveForTenDeltaUsd, 2),
-    rebalanceMoveForTenDeltaPct: formatNumber(rebalanceMoveForTenDeltaPct, 2),
-    spreadPct: formatNumber(spreadPct, 2),
-    minOpenInterest: formatNumber(minOpenInterest, 0),
-    minVolume: formatNumber(minVolume, 0),
-    liquidityScore,
-    compositeScore,
-    quoteQuality,
-    marketContext: {
-      proxySymbol: stock.symbol,
-      underlyingSymbol: stock.symbol,
-      currentProxySpot: formatNumber(spot, 4),
-      currentUnderlyingSpot: formatNumber(spot, 4),
-      conversionRatio: 1,
-      targetUnderlyingValue: formatNumber(spot, 4),
-      impliedVolatility: formatNumber((callVol + putVol) / 2, 4),
-      riskFreeRate: formatNumber(riskFreeRate, 4)
-    },
-    optionLegs: [
-      buildOptionLeg(atmPair.call, "LONG", stock.symbol),
-      buildOptionLeg(atmPair.put, "LONG", stock.symbol)
-    ]
-  };
+      const callVol = clamp(Number(pair.call?.impliedVolatility ?? 0) || 0.32, 0.05, 3);
+      const putVol = clamp(Number(pair.put?.impliedVolatility ?? 0) || callVol, 0.05, 3);
+      const callGreeks = computeCallGreeks({
+        spot,
+        strike: Number(pair.call.strike),
+        timeToExpiryYears,
+        volatility: callVol,
+        riskFreeRate
+      });
+      const putGreeks = computePutGreeks({
+        spot,
+        strike: Number(pair.put.strike),
+        timeToExpiryYears,
+        volatility: putVol,
+        riskFreeRate
+      });
+
+      const netDebitPerShare = callMid + putMid;
+      const netDebit = netDebitPerShare * 100;
+      const totalDeltaShares = (callGreeks.delta + putGreeks.delta) * 100;
+      const totalGamma = (callGreeks.gamma + putGreeks.gamma) * 100;
+      const totalVega = (callGreeks.vega + putGreeks.vega) * 100;
+      const totalThetaPerDay = (callGreeks.thetaPerDay + putGreeks.thetaPerDay) * 100;
+      const impliedMovePct = (netDebitPerShare / spot) * 100;
+      const impliedMoveUsd = netDebitPerShare;
+      const deltaChangeForOnePctMove = totalGamma * spot * 0.01;
+      const dailyBreakevenMoveUsd =
+        totalGamma > 0 && totalThetaPerDay < 0
+          ? Math.sqrt((2 * Math.abs(totalThetaPerDay)) / totalGamma)
+          : null;
+      const dailyBreakevenMovePct =
+        dailyBreakevenMoveUsd != null && spot > 0 ? (dailyBreakevenMoveUsd / spot) * 100 : null;
+      const rebalanceMoveForTenDeltaUsd = totalGamma > 0 ? 10 / totalGamma : null;
+      const rebalanceMoveForTenDeltaPct =
+        rebalanceMoveForTenDeltaUsd != null && spot > 0 ? (rebalanceMoveForTenDeltaUsd / spot) * 100 : null;
+      const thetaBurnPctPerDay = netDebit > 0 ? (Math.abs(totalThetaPerDay) / netDebit) * 100 : null;
+      const netBid = toNumber(pair.call?.bid, null) + toNumber(pair.put?.bid, null);
+      const netAsk = toNumber(pair.call?.ask, null) + toNumber(pair.put?.ask, null);
+      const spreadPct =
+        Number.isFinite(netBid) && Number.isFinite(netAsk) && netDebitPerShare > 0
+          ? ((netAsk - netBid) / netDebitPerShare) * 100
+          : null;
+      const minOpenInterest = Math.min(
+        Math.max(toNumber(pair.call?.openInterest, 0), 0),
+        Math.max(toNumber(pair.put?.openInterest, 0), 0)
+      );
+      const minVolume = Math.min(
+        Math.max(toNumber(pair.call?.volume, 0), 0),
+        Math.max(toNumber(pair.put?.volume, 0), 0)
+      );
+      const quoteQuality = buildQuoteQuality(pair.call, pair.put);
+      const liquidityScore = computeLiquidityScore({
+        minOpenInterest,
+        minVolume,
+        spreadPct,
+        quoteQuality
+      });
+      const compositeScore = computeCandidateScore({
+        liquidityScore,
+        deltaChangeForOnePctMove,
+        dailyBreakevenMovePct,
+        thetaBurnPctPerDay,
+        impliedMovePct
+      });
+
+      return {
+        id: `${stock.symbol}:${expiration}:${Number(pair.strike).toFixed(2)}`,
+        symbol: stock.symbol,
+        companyName: stock.label,
+        strategyType: "Long ATM straddle",
+        expiration,
+        daysToExpiry,
+        strike: formatNumber(Number(pair.strike), 2),
+        underlyingPrice: formatNumber(spot, 2),
+        straddleCost: formatNumber(netDebit, 2),
+        straddleCostPerShare: formatNumber(netDebitPerShare, 4),
+        impliedMoveUsd: formatNumber(impliedMoveUsd, 2),
+        impliedMovePct: formatNumber(impliedMovePct, 2),
+        netDeltaShares: formatNumber(totalDeltaShares, 2),
+        hedgePlan,
+        gammaPerDollar: formatNumber(totalGamma, 4),
+        vegaPerVolPoint: formatNumber(totalVega / 100, 2),
+        thetaPerDay: formatNumber(totalThetaPerDay, 2),
+        thetaBurnPctPerDay: formatNumber(thetaBurnPctPerDay, 2),
+        deltaChangeForOnePctMove: formatNumber(deltaChangeForOnePctMove, 2),
+        dailyBreakevenMoveUsd: formatNumber(dailyBreakevenMoveUsd, 2),
+        dailyBreakevenMovePct: formatNumber(dailyBreakevenMovePct, 2),
+        rebalanceMoveForTenDeltaUsd: formatNumber(rebalanceMoveForTenDeltaUsd, 2),
+        rebalanceMoveForTenDeltaPct: formatNumber(rebalanceMoveForTenDeltaPct, 2),
+        spreadPct: formatNumber(spreadPct, 2),
+        minOpenInterest: formatNumber(minOpenInterest, 0),
+        minVolume: formatNumber(minVolume, 0),
+        liquidityScore,
+        compositeScore,
+        quoteQuality,
+        marketContext: {
+          proxySymbol: stock.symbol,
+          underlyingSymbol: stock.symbol,
+          currentProxySpot: formatNumber(spot, 4),
+          currentUnderlyingSpot: formatNumber(spot, 4),
+          conversionRatio: 1,
+          targetUnderlyingValue: formatNumber(spot, 4),
+          impliedVolatility: formatNumber((callVol + putVol) / 2, 4),
+          riskFreeRate: formatNumber(riskFreeRate, 4)
+        },
+        optionLegs: [
+          buildOptionLeg(pair.call, "LONG", stock.symbol),
+          buildOptionLeg(pair.put, "LONG", stock.symbol)
+        ]
+      };
+    })
+    .filter(Boolean);
 }
 
 async function mapInBatches(items, batchSize, iteratee) {
@@ -625,7 +669,7 @@ export async function buildStockDeltaHedgeScan({
         .sort();
 
       const candidates = expirations
-        .map((expiration) =>
+        .flatMap((expiration) =>
           buildExpiryCandidate({
             stock,
             quote,
@@ -644,19 +688,31 @@ export async function buildStockDeltaHedgeScan({
           return (left.dailyBreakevenMovePct ?? Infinity) - (right.dailyBreakevenMovePct ?? Infinity);
         });
 
-      return candidates[0] ?? null;
+      if (!candidates.length) {
+        return null;
+      }
+      return [candidates[0]];
     }
   );
 
-  const rows = results
+  const universeRows = results
     .flatMap((result) => {
       if (result.status === "rejected") {
         warnings.push(result.reason?.message ?? "Stock delta hedge scan failed for one symbol.");
         return [];
       }
 
+      if (Array.isArray(result.value)) {
+        return result.value.filter(Boolean);
+      }
+
       return result.value ? [result.value] : [];
     })
+    .sort((left, right) => {
+      return String(left.symbol ?? "").localeCompare(String(right.symbol ?? ""));
+    });
+
+  const rows = [...universeRows]
     .sort((left, right) => {
       if ((right.compositeScore ?? -Infinity) !== (left.compositeScore ?? -Infinity)) {
         return (right.compositeScore ?? -Infinity) - (left.compositeScore ?? -Infinity);
@@ -685,7 +741,9 @@ export async function buildStockDeltaHedgeScan({
     assumptions: [
       "Scanner ranks long ATM straddles as delta-hedge candidates rather than predicting direction.",
       "Scores reward liquidity, strong gamma response for a 1% move, and a lower one-day theta break-even move.",
-      "Live Polygon chains are used when available; otherwise HedgeHub falls back to modeled option chains."
+      "Hedge plans are dynamic: no stock hedge is placed at entry. Instead, rebalancing is triggered when delta or price-move thresholds are hit.",
+      "If the underlying does not move, theta decay will reduce P&L. Dynamic hedging cannot eliminate this carry cost.",
+      "Live option chains are used when available; otherwise HedgeHub falls back to modeled option chains."
     ],
     summary: {
       symbolsScanned: stockUniverse.length,
@@ -704,6 +762,7 @@ export async function buildStockDeltaHedgeScan({
       }
     },
     selectedRowId: rows[0]?.id ?? null,
+    universeRows,
     rows
   };
 }

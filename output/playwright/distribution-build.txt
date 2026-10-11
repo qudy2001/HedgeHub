@@ -1,0 +1,37 @@
+
+> hedgehub@0.1.0 build
+> vite build
+
+vite v6.4.1 building for production...
+transforming...
+✓ 687 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                          0.48 kB │ gzip:   0.30 kB
+dist/assets/scenarioMonteCarloWorker-DIw_DN4e.js         3.07 kB
+dist/assets/BuilderApp-CcfM6Dmv.css                     27.71 kB │ gzip:   6.04 kB
+dist/assets/index-DyxUOyrM.css                         118.70 kB │ gzip:  19.89 kB
+dist/assets/twsStatus-DRBJIgiw.js                        0.21 kB │ gzip:   0.13 kB
+dist/assets/savedFilters-D0R0uT3U.js                     0.52 kB │ gzip:   0.29 kB
+dist/assets/AdminUsersWorkspace-Cuff3-m2.js              4.81 kB │ gzip:   1.77 kB
+dist/assets/theme-C5YXmlmo.js                            5.99 kB │ gzip:   2.11 kB
+dist/assets/StrategySettingsWorkspace-1MiomSjn.js       13.61 kB │ gzip:   3.30 kB
+dist/assets/MacroHeatmapDashboard-gh3525wK.js           18.75 kB │ gzip:   6.09 kB
+dist/assets/VolCrushEarningsWorkspace-DJkURaHp.js       21.03 kB │ gzip:   5.99 kB
+dist/assets/StrategyScreeningWorkspace-BbELfmtt.js      21.57 kB │ gzip:   5.95 kB
+dist/assets/EntryResearchPanel-WwIB1sq4.js              23.78 kB │ gzip:   7.59 kB
+dist/assets/ScenarioHeatmap-BVj0XeuF.js                 24.08 kB │ gzip:   8.42 kB
+dist/assets/polymarketSignals-DGEc-efq.js               25.01 kB │ gzip:   6.93 kB
+dist/assets/IbkrOrderManagementWorkspace-PZjjVmgX.js    26.79 kB │ gzip:   6.88 kB
+dist/assets/StrategyWatchlistWorkspace-UlVwlyAf.js      32.68 kB │ gzip:   8.43 kB
+dist/assets/CoveredIncomeScannerWorkspace-TSbjRc2X.js   38.85 kB │ gzip:   9.53 kB
+dist/assets/PaperTradeScenarioPanel-DzY9Tig1.js         44.73 kB │ gzip:  11.90 kB
+dist/assets/DeltaHedgeScannerWorkspace-Bar7XOt_.js      46.94 kB │ gzip:  12.33 kB
+dist/assets/App-BgZi_Pjl.js                             56.27 kB │ gzip:  14.87 kB
+dist/assets/PaperTradingWorkspace-CpVviHH2.js           57.40 kB │ gzip:  13.67 kB
+dist/assets/BuilderApp-D4uD2XPC.js                      75.40 kB │ gzip:  25.33 kB
+dist/assets/TradingViewStrategyWorkspace-IuMnr_16.js    91.20 kB │ gzip:  22.10 kB
+dist/assets/StrategyFinderWorkspace-DZZB-xbV.js        127.15 kB │ gzip:  31.51 kB
+dist/assets/index-CfjXLZ77.js                          145.59 kB │ gzip:  47.08 kB
+dist/assets/generateCategoricalChart--ViYpse_.js       393.63 kB │ gzip: 108.18 kB
+✓ built in 1.16s

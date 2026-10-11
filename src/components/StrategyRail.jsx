@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { buildMarketTimerModel, buildUnderlyingMarketMonitorModels } from "../marketTimers.js";
-import LiveMonitoringPanel from "./LiveMonitoringPanel.jsx";
 
 const OPTION_SESSION_ENTRY_KEYS = new Set(["option-pre", "option-open", "option-post"]);
 const PINNED_UNDERLYING_MARKETS = [
@@ -18,7 +17,7 @@ const PINNED_UNDERLYING_MARKETS = [
   },
   {
     source: "underlying-monitor-spy-spx",
-    label: "SPY / SPX",
+    label: "SPY",
     underlyingSymbol: "SPY",
     referenceSymbol: "NYSE:SPY"
   }
@@ -45,13 +44,15 @@ export default function StrategyRail({
   marketStatusPayload,
   marketTimerContext,
   onOpenDashboard,
+  onOpenWatchlist,
   onOpenSettings,
   onOpenScreening,
   onOpenPaperTrading,
-  onOpenOrderManagement,
+  onOpenAdminUsers,
   onSelect,
   paperPortfolio,
   screeningSummary,
+  isAdmin = false,
   isMobile = false,
   isOpen = true,
   onCloseMobile = null
@@ -60,6 +61,9 @@ export default function StrategyRail({
   const paperSummary = paperPortfolio?.summary ?? null;
   const paperPnL = Number(paperSummary?.profitLossValue ?? 0);
   const closedPaperPnL = Number(paperSummary?.totalClosedProfitLossValue ?? 0);
+  const screeningInsertAfterStrategyId = strategies.some((strategy) => strategy.id === "strategy-tv-finder")
+    ? "strategy-tv-finder"
+    : "strategy-1";
   const marketTimerModel = useMemo(
     () => buildMarketTimerModel(marketTimerContext, marketStatusPayload, nowMs),
     [marketStatusPayload, marketTimerContext, nowMs]
@@ -116,89 +120,94 @@ export default function StrategyRail({
 
       <div className="sidebar__section">
         <div className="sidebar-primary-nav">
-          <LiveMonitoringPanel
-            streamDiagnostics={streamDiagnostics}
-            brokerStatus={paperPortfolio?.brokerStatus ?? null}
-            className="sidebar-live-monitor"
-          />
-
-          {marketTimerModel ? (
-            <div className="macro-layout-diagnostics sidebar-market-timers">
-              <div className="sidebar-market-timers__header">
-                <span className="brand__eyebrow">Market timers</span>
-                <span
-                  className={`macro-layout-diagnostics__state ${getStateToneClassName(marketTimerModel.status?.tone)}`}
-                >
-                  {marketTimerModel.status?.label ?? "Focus"}
-                </span>
-              </div>
-              <strong className="sidebar-market-timers__title">{marketTimerModel.title}</strong>
-              {marketTimerModel.subtitle ? <span className="sidebar-market-timers__subtitle">{marketTimerModel.subtitle}</span> : null}
-
-              <div className="sidebar-market-timers__list">
-                {optionSessionEntries.length ? (
-                  <div
-                    className="macro-layout-diagnostics__row sidebar-market-timers__row sidebar-market-timers__row--combined"
-                  >
-                    <span className="macro-layout-diagnostics__label sidebar-market-timers__label">Option</span>
-                    <div className="sidebar-market-timers__combined-states">
-                      {optionSessionEntries.map((entry) => (
-                        <span key={entry.key} className="sidebar-market-timers__combined-state">
-                          <span className="sidebar-market-timers__combined-label">
-                            {entry.label.replace(/^Option\s+/u, "")}
-                          </span>
-                          <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
-                            {entry.countdown}
-                          </span>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {marketTimerEntries.map((entry) => (
-                  <div
-                    key={entry.key}
-                    className="macro-layout-diagnostics__row sidebar-market-timers__row"
-                  >
-                    <span className="macro-layout-diagnostics__label sidebar-market-timers__label">{entry.label}</span>
-                    <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
-                      {entry.countdown}
-                    </span>
-                    <span className="sidebar-market-timers__detail">{entry.detail}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {underlyingMarketMonitorModels.length ? (
+          {marketTimerModel || underlyingMarketMonitorModels.length ? (
             <div className="macro-layout-diagnostics sidebar-market-timers sidebar-underlying-monitor">
-              <div className="sidebar-market-timers__header">
-                <span className="brand__eyebrow">Underlying markets</span>
-                <span className="macro-layout-diagnostics__state macro-layout-diagnostics__state--idle">
-                  Tracked
-                </span>
-              </div>
-
-              <div className="sidebar-underlying-monitor__list">
-                {underlyingMarketMonitorModels.map((market) => (
-                  <div
-                    key={market.key}
-                    className="macro-layout-diagnostics__row sidebar-underlying-monitor__row"
-                  >
-                    <span className="macro-layout-diagnostics__label sidebar-underlying-monitor__label">
-                      {market.title}
-                    </span>
-                    <span className={`macro-layout-diagnostics__state ${getStateToneClassName(market.status?.tone)}`}>
-                      {market.status?.label ?? "Closed"}
-                    </span>
-                    <span className="sidebar-underlying-monitor__detail">
-                      Open {market.open?.countdown ?? "n/a"} · Close {market.close?.countdown ?? "n/a"}
-                    </span>
+              {marketTimerModel ? (
+                <>
+                  <div className="sidebar-market-timers__header">
+                    <span className="brand__eyebrow">Market timers</span>
                   </div>
-                ))}
-              </div>
+
+                  <div className="sidebar-market-timers__list">
+                    {optionSessionEntries.length ? (
+                      <div
+                        className="macro-layout-diagnostics__row sidebar-market-timers__row sidebar-market-timers__row--combined"
+                      >
+                        <span className="macro-layout-diagnostics__label sidebar-market-timers__label">Option</span>
+                        <div className="sidebar-market-timers__combined-states">
+                          {optionSessionEntries.map((entry) => (
+                            <span key={entry.key} className="sidebar-market-timers__combined-state">
+                              <span className="sidebar-market-timers__combined-label">
+                                {entry.label.replace(/^Option\s+/u, "")}
+                              </span>
+                              <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
+                                {entry.countdown}
+                              </span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {marketTimerEntries.map((entry) => (
+                      <div
+                        key={entry.key}
+                        className="macro-layout-diagnostics__row sidebar-market-timers__row"
+                      >
+                        <span className="macro-layout-diagnostics__label sidebar-market-timers__label">{entry.label}</span>
+                        <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
+                          {entry.countdown}
+                        </span>
+                        {entry.detail ? <span className="sidebar-market-timers__detail">{entry.detail}</span> : null}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+
+              {underlyingMarketMonitorModels.length ? (
+                <>
+                  {marketTimerModel ? <div className="sidebar-market-timers__divider" role="presentation" /> : null}
+                  <div className="sidebar-market-timers__header sidebar-market-timers__header--secondary">
+                    <span className="brand__eyebrow">Underlying markets</span>
+                  </div>
+
+                  <div className="sidebar-underlying-monitor__list">
+                    {underlyingMarketMonitorModels.map((market) => {
+                      const isOpenNow = String(market.status?.label ?? "").toLowerCase() === "open";
+
+                      return (
+                        <div
+                          key={market.key}
+                          className="macro-layout-diagnostics__row sidebar-underlying-monitor__row"
+                        >
+                          <span className="macro-layout-diagnostics__label sidebar-underlying-monitor__label">
+                            {market.title}
+                          </span>
+                          <div className="sidebar-market-timers__combined-states">
+                            {market.open ? (
+                              <span className="sidebar-market-timers__combined-state">
+                                <span
+                                  className={`macro-layout-diagnostics__state ${getStateToneClassName(isOpenNow ? "live" : market.open.tone)}`}
+                                >
+                                  {isOpenNow ? "OPEN" : market.open.countdown}
+                                </span>
+                              </span>
+                            ) : null}
+                            {market.close ? (
+                              <span className="sidebar-market-timers__combined-state">
+                                <span className={`macro-layout-diagnostics__state ${getStateToneClassName(market.close.tone)}`}>
+                                  {market.close.countdown}
+                                </span>
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : null}
             </div>
           ) : null}
 
@@ -211,18 +220,27 @@ export default function StrategyRail({
           </button>
           <button
             type="button"
+            className={`dashboard-button ${activeView === "watchlist" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenWatchlist}
+          >
+            Watchlist
+          </button>
+          <button
+            type="button"
             className={`dashboard-button ${activeView === "settings" ? "dashboard-button--active" : ""}`}
             onClick={onOpenSettings}
           >
             Strategy settings
           </button>
-          <button
-            type="button"
-            className={`dashboard-button ${activeView === "orders" ? "dashboard-button--active" : ""}`}
-            onClick={onOpenOrderManagement}
-          >
-            Order management
-          </button>
+          {isAdmin ? (
+            <button
+              type="button"
+              className={`dashboard-button ${activeView === "admin-users" ? "dashboard-button--active" : ""}`}
+              onClick={onOpenAdminUsers}
+            >
+              User admin
+            </button>
+          ) : null}
         </div>
 
         <div className="section-heading">
@@ -251,7 +269,7 @@ export default function StrategyRail({
               </button>
             ];
 
-            if (strategy.id === "strategy-1") {
+            if (strategy.id === screeningInsertAfterStrategyId) {
               cards.push(
                 <button
                   key="screening-v2"

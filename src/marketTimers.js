@@ -511,8 +511,8 @@ function buildUnderlyingEntries(context, entriesByExchange, now) {
   const nextClose = nextCloseDate ? getUsRegularSession(entriesByExchange, exchange, nextCloseDate)?.close ?? null : null;
 
   return [
-    buildCountdownEntry("underlying-open", "Underlying open", nextOpen, now, "regular session", "ghost"),
-    buildCountdownEntry("underlying-close", "Underlying close", nextClose, now, "regular close", "warning")
+    buildCountdownEntry("underlying-open", "Underlying open", nextOpen, now, null, "ghost"),
+    buildCountdownEntry("underlying-close", "Underlying close", nextClose, now, null, "warning")
   ];
 }
 
@@ -585,7 +585,7 @@ function buildExpiryEntry(context, entriesByExchange, now) {
 function buildSubtitle(context) {
   return [
     context.optionSymbol ? `${context.optionSymbol} options` : "",
-    context.underlyingSymbol ? `${context.underlyingSymbol} underlying` : ""
+    context.underlyingSymbol ? context.underlyingSymbol : ""
   ]
     .filter(Boolean)
     .join(" · ");

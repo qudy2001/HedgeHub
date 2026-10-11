@@ -19,6 +19,15 @@ function readOwn(source, key, fallback) {
   return hasOwn(source, key) ? source[key] : fallback;
 }
 
+function readOwnTextOrFallback(source, key, fallback = "") {
+  if (!hasOwn(source, key)) {
+    return fallback;
+  }
+
+  const normalized = normalizeText(source[key]);
+  return normalized || fallback;
+}
+
 function toOptionalNumber(value, fallback = null) {
   if (value == null || value === "") {
     return fallback;
@@ -260,23 +269,19 @@ export function normalizeStrategyAssetMapping(rawAsset = {}, defaults = {}) {
       defaults.compareMode ?? "price"
     ),
     optionQuoteProvider,
-    optionQuoteSourceSymbol: normalizeText(
-      readOwn(
-        rawAsset,
-        "optionQuoteSourceSymbol",
-        defaults.optionQuoteSourceSymbol ?? deriveDefaultQuoteSourceSymbol(optionSymbol, optionQuoteProvider)
-      )
+    optionQuoteSourceSymbol: readOwnTextOrFallback(
+      rawAsset,
+      "optionQuoteSourceSymbol",
+      defaults.optionQuoteSourceSymbol ?? deriveDefaultQuoteSourceSymbol(optionSymbol, optionQuoteProvider)
     ),
     underlyingQuoteProvider,
-    underlyingQuoteSourceSymbol: normalizeText(
-      readOwn(
-        rawAsset,
-        "underlyingQuoteSourceSymbol",
-        defaults.underlyingQuoteSourceSymbol ??
-          (underlyingSymbol === optionSymbol
-            ? deriveDefaultQuoteSourceSymbol(optionSymbol, optionQuoteProvider)
-            : "")
-      )
+    underlyingQuoteSourceSymbol: readOwnTextOrFallback(
+      rawAsset,
+      "underlyingQuoteSourceSymbol",
+      defaults.underlyingQuoteSourceSymbol ??
+        (underlyingSymbol === optionSymbol
+          ? deriveDefaultQuoteSourceSymbol(optionSymbol, optionQuoteProvider)
+          : "")
     ),
     quoteGroup: normalizeText(readOwn(rawAsset, "quoteGroup", defaults.quoteGroup ?? DEFAULT_QUOTE_GROUP)),
     finderEnabled: normalizeBoolean(

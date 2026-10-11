@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
 
 function formatCurrency(value) {
   const numericValue = Number(value);
@@ -251,6 +252,7 @@ const columns = [
 ];
 
 const MAX_SORT_PRIORITIES = 4;
+const SCREENING_V2_FILTERS_STORAGE_KEY = "hedgehub:filters:screening-v2";
 
 export default function StrategyScreeningWorkspace({
   screenerPayload,
@@ -269,6 +271,7 @@ export default function StrategyScreeningWorkspace({
   const defaultHedgeQualityMin = Number(screenerPayload?.filters?.hedgeQualityMin ?? 0);
   const settlementTypesKey = settlementTypes.join("|");
   const strategyClassesKey = strategyClasses.join("|");
+  const hasHydratedSavedFiltersRef = useRef(false);
   const [selectedSettlementTypes, setSelectedSettlementTypes] = useState(settlementTypes);
   const [selectedStrategyClasses, setSelectedStrategyClasses] = useState(strategyClasses);
   const [probabilityMismatchMin, setProbabilityMismatchMin] = useState("");
@@ -279,6 +282,68 @@ export default function StrategyScreeningWorkspace({
   const [expectedRangeMax, setExpectedRangeMax] = useState(String(defaultExpectedRange.max ?? 10));
   const [sortState, setSortState] = useState([{ key: "compositeScore", direction: "desc" }]);
   const [selectedRowId, setSelectedRowId] = useState(null);
+
+  useEffect(() => {
+    if (!screenerPayload || hasHydratedSavedFiltersRef.current) {
+      return;
+    }
+
+    const savedFilters = loadSavedFilters(SCREENING_V2_FILTERS_STORAGE_KEY);
+    if (savedFilters) {
+      if (Array.isArray(savedFilters.selectedSettlementTypes)) {
+        const nextSettlementTypes = savedFilters.selectedSettlementTypes.filter((type) => settlementTypes.includes(type));
+        setSelectedSettlementTypes(nextSettlementTypes.length ? nextSettlementTypes : settlementTypes);
+      } else {
+        setSelectedSettlementTypes(settlementTypes);
+      }
+
+      if (Array.isArray(savedFilters.selectedStrategyClasses)) {
+        const nextStrategyClasses = savedFilters.selectedStrategyClasses.filter((strategyClass) =>
+          strategyClasses.includes(strategyClass)
+        );
+        setSelectedStrategyClasses(nextStrategyClasses.length ? nextStrategyClasses : strategyClasses);
+      } else {
+        setSelectedStrategyClasses(strategyClasses);
+      }
+
+      setProbabilityMismatchMin(
+        typeof savedFilters.probabilityMismatchMin === "string" ? savedFilters.probabilityMismatchMin : ""
+      );
+      setExecutionRiskMax(typeof savedFilters.executionRiskMax === "string" ? savedFilters.executionRiskMax : "");
+      setExitLiquidityMin(typeof savedFilters.exitLiquidityMin === "string" ? savedFilters.exitLiquidityMin : "");
+      setHedgeQualityMin(typeof savedFilters.hedgeQualityMin === "string" ? savedFilters.hedgeQualityMin : "");
+      setExpectedRangeMin(
+        typeof savedFilters.expectedRangeMin === "string"
+          ? savedFilters.expectedRangeMin
+          : String(defaultExpectedRange.min ?? 5)
+      );
+      setExpectedRangeMax(
+        typeof savedFilters.expectedRangeMax === "string"
+          ? savedFilters.expectedRangeMax
+          : String(defaultExpectedRange.max ?? 10)
+      );
+    } else {
+      setSelectedSettlementTypes(settlementTypes);
+      setSelectedStrategyClasses(strategyClasses);
+      setProbabilityMismatchMin("");
+      setExecutionRiskMax("");
+      setExitLiquidityMin("");
+      setHedgeQualityMin(defaultHedgeQualityMin > 0 ? String(defaultHedgeQualityMin) : "");
+      setExpectedRangeMin(String(defaultExpectedRange.min ?? 5));
+      setExpectedRangeMax(String(defaultExpectedRange.max ?? 10));
+    }
+
+    hasHydratedSavedFiltersRef.current = true;
+  }, [
+    defaultExpectedRange.max,
+    defaultExpectedRange.min,
+    defaultHedgeQualityMin,
+    screenerPayload,
+    settlementTypes,
+    settlementTypesKey,
+    strategyClasses,
+    strategyClassesKey
+  ]);
 
   useEffect(() => {
     setSelectedSettlementTypes((current) => {
@@ -293,21 +358,6 @@ export default function StrategyScreeningWorkspace({
       return next.length ? next : strategyClasses;
     });
   }, [strategyClassesKey, strategyClasses]);
-
-  useEffect(() => {
-    setProbabilityMismatchMin("");
-    setExecutionRiskMax("");
-    setExitLiquidityMin("");
-    setHedgeQualityMin(defaultHedgeQualityMin > 0 ? String(defaultHedgeQualityMin) : "");
-    setExpectedRangeMin(String(defaultExpectedRange.min ?? 5));
-    setExpectedRangeMax(String(defaultExpectedRange.max ?? 10));
-  }, [
-    defaultExpectedRange.max,
-    defaultExpectedRange.min,
-    defaultExecutionRiskMax,
-    defaultExitLiquidityMin,
-    defaultHedgeQualityMin
-  ]);
 
   const probabilityThreshold = toOptionalNumber(probabilityMismatchMin, null);
   const executionRiskThreshold = toOptionalNumber(executionRiskMax, null);
@@ -474,6 +524,19 @@ export default function StrategyScreeningWorkspace({
     setExpectedRangeMax(String(defaultExpectedRange.max ?? 10));
   }
 
+  function saveFilters() {
+    persistSavedFilters(SCREENING_V2_FILTERS_STORAGE_KEY, {
+      selectedSettlementTypes,
+      selectedStrategyClasses,
+      probabilityMismatchMin,
+      executionRiskMax,
+      exitLiquidityMin,
+      hedgeQualityMin,
+      expectedRangeMin,
+      expectedRangeMax
+    });
+  }
+
   if (!screenerPayload) {
     return <div className="app-state">No V2 screening data yet.</div>;
   }
@@ -540,9 +603,14 @@ export default function StrategyScreeningWorkspace({
       <section className="insight-card screening-v2__filters">
         <div className="section-heading">
           <span>Filters</span>
-          <button type="button" className="finder-menu__reset" onClick={resetFilters}>
-            Reset
-          </button>
+          <div className="finder-menu__header-actions">
+            <button type="button" className="finder-menu__reset" onClick={saveFilters}>
+              Save
+            </button>
+            <button type="button" className="finder-menu__reset" onClick={resetFilters}>
+              Reset
+            </button>
+          </div>
         </div>
 
         <div className="screening-v2__filter-grid">

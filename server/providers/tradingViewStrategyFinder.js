@@ -5,8 +5,8 @@ const TRADING_VIEW_STRATEGY_FINDER_URL = "https://options-spread-explorer.tradin
 const TRADING_VIEW_STRATEGY_FINDER_PAGE_URL = "https://www.tradingview.com/options/strategy-finder/";
 const DEFAULT_SYMBOL = "AMEX:SPY";
 const DEFAULT_PRICE_RANGE = {
-  min: 5,
-  max: 10,
+  min: -20,
+  max: 20,
   type: "percent"
 };
 const DEFAULT_RISK_FREE_RATE = 0.0425;

@@ -244,23 +244,41 @@ export async function fetchEconomicCalendar({ from, to, importance = 1 }) {
   if (payload?.status !== "ok" || !Array.isArray(payload?.result)) {
     throw new Error("TradingView economic calendar returned an unexpected payload");
   }
+  if (payload.result.length >= 2000 && importance == null) {
+    throw new Error('Economic calendar reached its result cap; shorten the collection window');
+  }
 
   return payload.result
     .map(normalizeEconomicEvent)
-    .filter((event) => event.importance === importance)
+    .filter((event) => importance == null || event.importance === importance)
     .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
+}
+
+export async function fetchEconomicCalendarWindow({ from, to }) {
+  const events = new Map();
+  for (let start = from.getTime(); start <= to.getTime(); start += 7 * 86400_000) {
+    const end = Math.min(start + 7 * 86400_000 - 1, to.getTime());
+    const rows = await fetchEconomicCalendar({ from: new Date(start), to: new Date(end), importance: null });
+    for (const row of rows) {
+      const time = Date.parse(row.date);
+      if (time >= from.getTime() && time <= to.getTime()) events.set(`${row.id}:${row.date}:${row.title}:${row.country}`, row);
+    }
+  }
+  return [...events.values()].sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
 }
 
 export async function fetchCompanyEventsCalendar({
   from,
   to,
-  minMarketCapUsd = 30_000_000_000
+  minMarketCapUsd = 30_000_000_000,
+  symbols = []
 }) {
   const rangeStartMs = from.getTime();
   const rangeEndMs = to.getTime();
   const payload = {
     columns: COMPANY_EVENT_COLUMNS,
     filter: [
+      ...(symbols.length ? [{ left: "name", operation: "in_range", right: symbols }] : []),
       {
         left: "earnings_release_date,earnings_release_next_date",
         operation: "in_range",

@@ -6,7 +6,7 @@ function toNumber(value, fallback = null) {
 export function hasUsableBidAsk(contract) {
   const bid = toNumber(contract?.bid);
   const ask = toNumber(contract?.ask);
-  return bid != null && ask != null && bid > 0 && ask > 0;
+  return bid != null && ask != null && bid > 0 && ask >= bid;
 }
 
 export function pickOptionReferencePrice(contract, fallback = 0) {

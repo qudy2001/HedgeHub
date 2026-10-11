@@ -1,19 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AuthScreen from "./components/AuthScreen.jsx";
 import CompanyEventsPanel from "./components/CompanyEventsPanel.jsx";
-import DeltaHedgeScannerWorkspace from "./components/DeltaHedgeScannerWorkspace.jsx";
 import EconomicCalendarPanel from "./components/EconomicCalendarPanel.jsx";
-import IbkrOrderManagementWorkspace from "./components/IbkrOrderManagementWorkspace.jsx";
-import MacroHeatmapDashboard from "./components/MacroHeatmapDashboard.jsx";
-import PaperTradingWorkspace from "./components/PaperTradingWorkspace.jsx";
-import StrategyFinderWorkspace from "./components/StrategyFinderWorkspace.jsx";
 import StrategyRail from "./components/StrategyRail.jsx";
-import StrategySettingsWorkspace from "./components/StrategySettingsWorkspace.jsx";
-import StrategyScreeningWorkspace from "./components/StrategyScreeningWorkspace.jsx";
-import TradingViewStrategyWorkspace from "./components/TradingViewStrategyWorkspace.jsx";
 import TradingViewWidget from "./components/TradingViewWidget.jsx";
-import VolCrushEarningsWorkspace from "./components/VolCrushEarningsWorkspace.jsx";
 import { createMarketTimerContext } from "./marketTimers.js";
 import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
+
+const AdminUsersWorkspace = lazy(() => import("./components/AdminUsersWorkspace.jsx"));
+const DeltaHedgeScannerWorkspace = lazy(() => import("./components/DeltaHedgeScannerWorkspace.jsx"));
+const MacroHeatmapDashboard = lazy(() => import("./components/MacroHeatmapDashboard.jsx"));
+const PaperTradingWorkspace = lazy(() => import("./components/PaperTradingWorkspace.jsx"));
+const CoveredIncomeScannerWorkspace = lazy(() => import("./components/CoveredIncomeScannerWorkspace.jsx"));
+const StrategyFinderWorkspace = lazy(() => import("./components/StrategyFinderWorkspace.jsx"));
+const StrategySettingsWorkspace = lazy(() => import("./components/StrategySettingsWorkspace.jsx"));
+const StrategyWatchlistWorkspace = lazy(() => import("./components/StrategyWatchlistWorkspace.jsx"));
+const StrategyScreeningWorkspace = lazy(() => import("./components/StrategyScreeningWorkspace.jsx"));
+const TradingViewStrategyWorkspace = lazy(() => import("./components/TradingViewStrategyWorkspace.jsx"));
+const VolCrushEarningsWorkspace = lazy(() => import("./components/VolCrushEarningsWorkspace.jsx"));
 
 function readRoute() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
@@ -26,13 +30,6 @@ function readRoute() {
     };
   }
 
-  if (pathname === "/order-management") {
-    return {
-      activeView: "orders",
-      selectedStrategyId: "strategy-1"
-    };
-  }
-
   if (pathname === "/screening") {
     return {
       activeView: "screening",
@@ -40,9 +37,23 @@ function readRoute() {
     };
   }
 
+  if (pathname === "/watchlist") {
+    return {
+      activeView: "watchlist",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
   if (pathname === "/strategy-settings") {
     return {
       activeView: "settings",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
+  if (pathname === "/admin/users") {
+    return {
+      activeView: "admin-users",
       selectedStrategyId: "strategy-1"
     };
   }
@@ -65,16 +76,20 @@ function buildPath(activeView, strategyId) {
     return "/paper-trading";
   }
 
-  if (activeView === "orders") {
-    return "/order-management";
-  }
-
   if (activeView === "screening") {
     return "/screening";
   }
 
+  if (activeView === "watchlist") {
+    return "/watchlist";
+  }
+
   if (activeView === "settings") {
     return "/strategy-settings";
+  }
+
+  if (activeView === "admin-users") {
+    return "/admin/users";
   }
 
   if (activeView === "strategy" && strategyId) {
@@ -98,7 +113,7 @@ function isTimestampStale(timestamp, maxAgeMs) {
 }
 
 const ROUTE_REFRESH_STALE_MS = 6 * 60 * 1000;
-const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 900px)";
+const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 1920px)";
 
 function matchesMobileSidebarViewport() {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -152,9 +167,22 @@ function buildFallbackMarketTimerContext(strategyPayload) {
   return null;
 }
 
+function WorkspaceLoadingFallback() {
+  return (
+    <main className="workspace">
+      <div className="app-state app-state--inline">Loading workspace…</div>
+    </main>
+  );
+}
+
 export default function App() {
   const initialRoute = readRoute();
   const [theme, setTheme] = useState(() => getInitialTheme());
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState(null);
+  const [authNeedsBootstrap, setAuthNeedsBootstrap] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(() => matchesMobileSidebarViewport());
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => !matchesMobileSidebarViewport());
   const [dashboard, setDashboard] = useState(null);
@@ -166,12 +194,28 @@ export default function App() {
   const [paperPortfolioLastUpdated, setPaperPortfolioLastUpdated] = useState(null);
   const [activeView, setActiveView] = useState(initialRoute.activeView);
   const [selectedStrategyId, setSelectedStrategyId] = useState(initialRoute.selectedStrategyId);
+  const [finderAutoOpenRowId, setFinderAutoOpenRowId] = useState("");
   const [marketTimerContext, setMarketTimerContext] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState(null);
   const [error, setError] = useState("");
   const strategyRefreshKeyRef = useRef(null);
+
+  const resetApplicationState = useCallback(() => {
+    setDashboard(null);
+    setStreamDiagnostics(null);
+    setMarketStatusPayload(null);
+    setStrategyPayload(null);
+    setPaperPortfolioPreview(null);
+    setPaperPortfolio(null);
+    setPaperPortfolioLastUpdated(null);
+    setRefreshNotice(null);
+    setFinderAutoOpenRowId("");
+    setError("");
+    setLoading(true);
+    strategyRefreshKeyRef.current = null;
+  }, []);
 
   const applyAppState = useCallback((dashboardJson, strategyJson) => {
     setDashboard(dashboardJson);
@@ -182,11 +226,175 @@ export default function App() {
     setError("");
   }, []);
 
+  const loadAuthConfig = useCallback(async () => {
+    try {
+      const response = await fetch("/api/auth/config");
+      const payload = await response.json().catch(() => null);
+      setAuthNeedsBootstrap(payload?.needsBootstrap === true);
+      return payload;
+    } catch (_error) {
+      setAuthNeedsBootstrap(false);
+      return null;
+    }
+  }, []);
+
+  const handleAuthRequired = useCallback(
+    (message = "Authentication required") => {
+      setAuthUser(null);
+      setAuthError(message);
+      resetApplicationState();
+      void loadAuthConfig();
+    },
+    [loadAuthConfig, resetApplicationState]
+  );
+
+  const handleLogin = useCallback(
+    async (username, password) => {
+      setAuthBusy(true);
+      setAuthError("");
+
+      try {
+        const response = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            username,
+            password
+          })
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || `Login failed (${response.status})`);
+        }
+
+        setAuthUser(payload?.user ?? null);
+        setAuthNeedsBootstrap(false);
+        resetApplicationState();
+      } catch (error) {
+        setAuthError(error.message);
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [resetApplicationState]
+  );
+
+  const handleBootstrap = useCallback(
+    async (username, password) => {
+      setAuthBusy(true);
+      setAuthError("");
+
+      try {
+        const response = await fetch("/api/auth/bootstrap", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            username,
+            password
+          })
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || `Bootstrap failed (${response.status})`);
+        }
+
+        setAuthUser(payload?.user ?? null);
+        setAuthNeedsBootstrap(false);
+        resetApplicationState();
+      } catch (error) {
+        setAuthError(error.message);
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [resetApplicationState]
+  );
+
+  const handleLogout = useCallback(async () => {
+    setAuthBusy(true);
+    setAuthError("");
+
+    try {
+      await fetch("/api/auth/logout", {
+        method: "POST"
+      });
+    } catch (_error) {
+      // ignore
+    } finally {
+      setAuthUser(null);
+      resetApplicationState();
+      await loadAuthConfig();
+      setAuthBusy(false);
+    }
+  }, [loadAuthConfig, resetApplicationState]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadAuth() {
+      setAuthError("");
+
+      try {
+        const response = await fetch("/api/auth/me");
+        const payload = await response.json().catch(() => null);
+
+        if (!isActive) {
+          return;
+        }
+
+        if (response.ok) {
+          setAuthUser(payload?.user ?? null);
+          setAuthNeedsBootstrap(false);
+          return;
+        }
+
+        if (response.status === 401) {
+          setAuthUser(null);
+          await loadAuthConfig();
+          return;
+        }
+
+        setAuthUser(null);
+        setAuthError(payload?.error || `Authentication check failed (${response.status})`);
+        await loadAuthConfig();
+      } catch (error) {
+        if (isActive) {
+          setAuthUser(null);
+          setAuthError(error.message);
+          await loadAuthConfig();
+        }
+      } finally {
+        if (isActive) {
+          setAuthReady(true);
+        }
+      }
+    }
+
+    void loadAuth();
+
+    return () => {
+      isActive = false;
+    };
+  }, [loadAuthConfig]);
+
   const fetchAppState = useCallback(async () => {
     const [dashboardResponse, strategyResponse] = await Promise.all([
       fetch("/api/dashboard"),
       fetch("/api/strategies")
     ]);
+
+    if (dashboardResponse.status === 401 || strategyResponse.status === 401) {
+      handleAuthRequired("Session expired");
+      const error = new Error("Authentication required");
+      error.code = "AUTH_REQUIRED";
+      throw error;
+    }
 
     if (!dashboardResponse.ok || !strategyResponse.ok) {
       throw new Error("Failed to load dashboard state");
@@ -198,7 +406,7 @@ export default function App() {
     ]);
 
     return { dashboardJson, strategyJson };
-  }, []);
+  }, [handleAuthRequired]);
 
   const syncAppState = useCallback(async () => {
     const { dashboardJson, strategyJson } = await fetchAppState();
@@ -216,13 +424,20 @@ export default function App() {
     const response = await fetch("/api/paper-portfolio");
     const payload = await response.json().catch(() => null);
 
+    if (response.status === 401) {
+      handleAuthRequired("Session expired");
+      const error = new Error("Authentication required");
+      error.code = "AUTH_REQUIRED";
+      throw error;
+    }
+
     if (!response.ok) {
       throw new Error(payload?.error || "Failed to load paper portfolio");
     }
 
     applyPaperPortfolioUpdate(payload?.paperPortfolio ?? null, payload?.lastUpdated ?? null);
     return payload;
-  }, [applyPaperPortfolioUpdate]);
+  }, [applyPaperPortfolioUpdate, handleAuthRequired]);
 
   const navigateTo = useCallback((nextView, strategyId = selectedStrategyId) => {
     setActiveView(nextView);
@@ -240,6 +455,16 @@ export default function App() {
     }
   }, [isMobileViewport, selectedStrategyId]);
 
+  const handleOpenFinderRowFromWatchlist = useCallback((rowId) => {
+    const normalizedRowId = String(rowId ?? "").trim();
+    if (!normalizedRowId) {
+      return;
+    }
+
+    setFinderAutoOpenRowId(normalizedRowId);
+    navigateTo("strategy", "strategy-1");
+  }, [navigateTo]);
+
   const runStrategyRefresh = useCallback(async ({ announceStart = true } = {}) => {
     setRefreshing(true);
     if (announceStart) {
@@ -255,6 +480,13 @@ export default function App() {
       });
 
       const refreshPayload = await refreshResponse.json().catch(() => null);
+
+      if (refreshResponse.status === 401) {
+        handleAuthRequired("Session expired");
+        const error = new Error("Authentication required");
+        error.code = "AUTH_REQUIRED";
+        throw error;
+      }
 
       if (!refreshResponse.ok) {
         throw new Error(refreshPayload?.error || "Manual refresh failed");
@@ -278,14 +510,16 @@ export default function App() {
         });
       }
     } catch (refreshError) {
-      setRefreshNotice({
-        tone: "error",
-        message: refreshError.message
-      });
+      if (String(refreshError?.code ?? "") !== "AUTH_REQUIRED") {
+        setRefreshNotice({
+          tone: "error",
+          message: refreshError.message
+        });
+      }
     } finally {
       setRefreshing(false);
     }
-  }, [syncAppState]);
+  }, [handleAuthRequired, syncAppState]);
 
   const handleManualRefresh = useCallback(() => {
     return runStrategyRefresh({ announceStart: true });
@@ -315,6 +549,13 @@ export default function App() {
       }
     }
 
+    if (response.status === 401) {
+      handleAuthRequired("Session expired");
+      const error = new Error("Authentication required");
+      error.code = "AUTH_REQUIRED";
+      throw error;
+    }
+
     if (!response.ok) {
       if (payload?.paperPortfolio) {
         applyPaperPortfolioUpdate(payload.paperPortfolio, new Date().toISOString());
@@ -334,7 +575,7 @@ export default function App() {
     }
 
     return payload;
-  }, [applyPaperPortfolioUpdate, syncAppState]);
+  }, [applyPaperPortfolioUpdate, handleAuthRequired, syncAppState]);
 
   const handleCreatePaperOrder = useCallback((orderPayload) => {
     return mutatePaperOrders("/api/paper-orders", {
@@ -363,6 +604,33 @@ export default function App() {
     });
   }, [mutatePaperOrders]);
 
+  const handleClosePaperOrderLeg = useCallback((orderId, legId, payload) => {
+    return mutatePaperOrders(
+      `/api/paper-orders/${encodeURIComponent(orderId)}/legs/${encodeURIComponent(legId)}/close`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      }
+    );
+  }, [mutatePaperOrders]);
+
+  const handleRevivePaperOrderLeg = useCallback((orderId, legId, payload) => {
+    return mutatePaperOrders(
+      `/api/paper-orders/${encodeURIComponent(orderId)}/legs/${encodeURIComponent(legId)}/revive`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      }
+    );
+  }, [mutatePaperOrders]);
+
+  const handleAddPaperHedge = useCallback((orderId, payload = {}) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/hedge`, {
+      method: "POST",
+      body: JSON.stringify(payload ?? {})
+    });
+  }, [mutatePaperOrders]);
+
   const handleSaveCalculatorSnapshot = useCallback((orderId, snapshotPayload) => {
     return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/calculator-snapshots`, {
       method: "POST",
@@ -370,31 +638,10 @@ export default function App() {
     });
   }, [mutatePaperOrders]);
 
-  const handleExecutePaperOrder = useCallback((orderId, payload = {}) => {
-    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/execute`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  }, [mutatePaperOrders]);
-
   const handleConfirmPaperExecution = useCallback((orderId, payload = {}) => {
     return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/confirm-execution`, {
       method: "POST",
       body: JSON.stringify(payload)
-    });
-  }, [mutatePaperOrders]);
-
-  const handleSyncPaperExecution = useCallback((orderId) => {
-    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/sync-execution`, {
-      method: "POST",
-      body: JSON.stringify({})
-    });
-  }, [mutatePaperOrders]);
-
-  const handleCancelPaperExecution = useCallback((orderId) => {
-    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/cancel-execution`, {
-      method: "POST",
-      body: JSON.stringify({})
     });
   }, [mutatePaperOrders]);
 
@@ -414,6 +661,100 @@ export default function App() {
     await syncAppState();
     return payload;
   }, [syncAppState]);
+
+  const applyStrategyWatchlistUpdate = useCallback((watchlist) => {
+    setStrategyPayload((currentPayload) =>
+      currentPayload
+        ? {
+            ...currentPayload,
+            strategyWatchlist: Array.isArray(watchlist) ? watchlist : []
+          }
+        : currentPayload
+    );
+  }, []);
+
+  const mutateStrategyWatchlist = useCallback(async (url, options = {}) => {
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json"
+      },
+      ...options
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || "Watchlist request failed");
+    }
+
+    if (payload?.watchlist) {
+      applyStrategyWatchlistUpdate(payload.watchlist);
+    } else {
+      await syncAppState();
+    }
+
+    return payload;
+  }, [applyStrategyWatchlistUpdate, syncAppState]);
+
+  const handleAddStrategyToWatchlist = useCallback((strategyId) => {
+    return mutateStrategyWatchlist("/api/strategy-watchlist", {
+      method: "POST",
+      body: JSON.stringify({
+        strategyId
+      })
+    });
+  }, [mutateStrategyWatchlist]);
+
+  const handleRemoveStrategyFromWatchlist = useCallback((strategyId) => {
+    return mutateStrategyWatchlist(`/api/strategy-watchlist/${encodeURIComponent(strategyId)}`, {
+      method: "DELETE"
+    });
+  }, [mutateStrategyWatchlist]);
+
+  const applySetupWatchlistUpdate = useCallback((watchlist) => {
+    setStrategyPayload((currentPayload) =>
+      currentPayload
+        ? {
+            ...currentPayload,
+            setupWatchlist: Array.isArray(watchlist) ? watchlist : []
+          }
+        : currentPayload
+    );
+  }, []);
+
+  const mutateSetupWatchlist = useCallback(async (url, options = {}) => {
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json"
+      },
+      ...options
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || "Setup watchlist request failed");
+    }
+
+    if (payload?.watchlist) {
+      applySetupWatchlistUpdate(payload.watchlist);
+    } else {
+      await syncAppState();
+    }
+
+    return payload;
+  }, [applySetupWatchlistUpdate, syncAppState]);
+
+  const handleUpsertSetupWatchlistItem = useCallback((item) => {
+    return mutateSetupWatchlist("/api/setup-watchlist", {
+      method: "POST",
+      body: JSON.stringify(item ?? {})
+    });
+  }, [mutateSetupWatchlist]);
+
+  const handleDeleteSetupWatchlistItem = useCallback((id) => {
+    return mutateSetupWatchlist(`/api/setup-watchlist/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+  }, [mutateSetupWatchlist]);
 
   const handleSaveStrategyAssetMapping = useCallback((assetConfig) => {
     return mutateStrategyAssets(`/api/strategy-assets/${encodeURIComponent(assetConfig.id)}`, {
@@ -498,6 +839,10 @@ export default function App() {
   }, [isMobileViewport, isSidebarOpen]);
 
   useEffect(() => {
+    if (!authUser) {
+      return undefined;
+    }
+
     let isActive = true;
 
     async function load() {
@@ -510,7 +855,7 @@ export default function App() {
 
         applyAppState(dashboardJson, strategyJson);
       } catch (loadError) {
-        if (isActive) {
+        if (String(loadError?.code ?? "") !== "AUTH_REQUIRED" && isActive) {
           setError(loadError.message);
         }
       } finally {
@@ -525,14 +870,23 @@ export default function App() {
     return () => {
       isActive = false;
     };
-  }, [applyAppState, fetchAppState]);
+  }, [applyAppState, authUser, fetchAppState]);
 
   useEffect(() => {
+    if (!authUser) {
+      return undefined;
+    }
+
     let isActive = true;
 
     async function loadStreamDiagnostics() {
       try {
         const response = await fetch("/api/stream-status");
+
+        if (response.status === 401) {
+          handleAuthRequired("Session expired");
+          return;
+        }
 
         if (!response.ok) {
           throw new Error(`Diagnostics request failed with ${response.status}`);
@@ -556,38 +910,7 @@ export default function App() {
       isActive = false;
       window.clearInterval(interval);
     };
-  }, []);
-
-  useEffect(() => {
-    let isActive = true;
-
-    async function loadMarketStatus() {
-      try {
-        const response = await fetch("/api/market-status");
-
-        if (!response.ok) {
-          throw new Error(`Market status request failed with ${response.status}`);
-        }
-
-        const payload = await response.json();
-        if (isActive) {
-          setMarketStatusPayload(payload);
-        }
-      } catch (_error) {
-        // Keep the last known market schedule visible if the lightweight Polygon poll fails.
-      }
-    }
-
-    void loadMarketStatus();
-    const interval = window.setInterval(() => {
-      void loadMarketStatus();
-    }, 60_000);
-
-    return () => {
-      isActive = false;
-      window.clearInterval(interval);
-    };
-  }, []);
+  }, [authUser, handleAuthRequired]);
 
   useEffect(() => {
     if (loading) {
@@ -615,16 +938,22 @@ export default function App() {
   }, [activeView, dashboard?.lastUpdated, loading, runStrategyRefresh, selectedStrategyId]);
 
   useEffect(() => {
+    if (!authUser) {
+      return undefined;
+    }
+
     if (loading || !(activeView === "paper" || activeView === "orders")) {
-      return;
+      return undefined;
     }
 
     if (!paperPortfolio) {
       void fetchPaperPortfolio().catch((paperLoadError) => {
-        setRefreshNotice({
-          tone: "error",
-          message: paperLoadError.message
-        });
+        if (String(paperLoadError?.code ?? "") !== "AUTH_REQUIRED") {
+          setRefreshNotice({
+            tone: "error",
+            message: paperLoadError.message
+          });
+        }
       });
     }
 
@@ -645,7 +974,7 @@ export default function App() {
     return () => {
       source.close();
     };
-  }, [activeView, applyPaperPortfolioUpdate, fetchPaperPortfolio, loading, paperPortfolio]);
+  }, [activeView, applyPaperPortfolioUpdate, authUser, fetchPaperPortfolio, loading, paperPortfolio]);
 
   useEffect(() => {
     setMarketTimerContext(null);
@@ -673,6 +1002,22 @@ export default function App() {
     [marketTimerContext, strategyPayload]
   );
 
+  if (!authReady) {
+    return <div className="app-state">Loading HedgeHub…</div>;
+  }
+
+  if (!authUser) {
+    return (
+      <AuthScreen
+        needsBootstrap={authNeedsBootstrap}
+        busy={authBusy}
+        error={authError}
+        onLogin={handleLogin}
+        onBootstrap={handleBootstrap}
+      />
+    );
+  }
+
   if (loading) {
     return <div className="app-state">Loading HedgeHub…</div>;
   }
@@ -688,10 +1033,13 @@ export default function App() {
   const selectedStrategy = strategies.find((strategy) => strategy.id === selectedStrategyId) ?? null;
   const heroStats = dashboard?.heroStats ?? [];
   const showSettings = activeView === "settings";
+  const showAdminUsers = activeView === "admin-users";
   const showScreening = activeView === "screening";
+  const showWatchlist = activeView === "watchlist";
   const showStrategyFinder = activeView === "strategy" && selectedStrategyId === "strategy-1";
   const showVolCrushEarnings = activeView === "strategy" && selectedStrategyId === "strategy-2";
   const showDeltaHedgeScanner = activeView === "strategy" && selectedStrategyId === "strategy-4";
+  const showCoveredIncomeScanner = activeView === "strategy" && selectedStrategyId === "strategy-5";
   const showTradingViewStrategyFinder =
     activeView === "strategy" && selectedStrategyId === "strategy-tv-finder";
   const showPlannedStrategy =
@@ -699,9 +1047,9 @@ export default function App() {
     !showStrategyFinder &&
     !showVolCrushEarnings &&
     !showDeltaHedgeScanner &&
+    !showCoveredIncomeScanner &&
     !showTradingViewStrategyFinder;
   const showPaperTrading = activeView === "paper";
-  const showOrderManagement = activeView === "orders";
   const nextThemeLabel = theme === "dark" ? "Light mode" : "Dark mode";
 
   return (
@@ -717,11 +1065,11 @@ export default function App() {
       ) : null}
 
       <div className="app-shell">
-        <div className="app-toolbar">
-          {isMobileViewport ? (
-            <button
-              type="button"
-              className={`sidebar-toggle ${isSidebarOpen ? "sidebar-toggle--active" : ""}`}
+	        <div className="app-toolbar">
+	          {isMobileViewport ? (
+	            <button
+	              type="button"
+	              className={`sidebar-toggle ${isSidebarOpen ? "sidebar-toggle--active" : ""}`}
               aria-controls="app-sidebar"
               aria-expanded={isSidebarOpen}
               onClick={() => setIsSidebarOpen((current) => !current)}
@@ -729,15 +1077,24 @@ export default function App() {
               {isSidebarOpen ? "Hide sidebar" : "Show sidebar"}
             </button>
           ) : null}
-          <button
-            type="button"
-            className="theme-toggle"
-            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-            onClick={() => setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"))}
-          >
-            {nextThemeLabel}
-          </button>
-        </div>
+	          <button
+	            type="button"
+	            className="theme-toggle"
+	            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+	            onClick={() => setTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"))}
+	          >
+	            {nextThemeLabel}
+	          </button>
+	          <div className="app-userbar">
+	            <span className="app-userbar__label">
+	              {authUser?.username}
+	              {authUser?.role === "admin" ? " (admin)" : ""}
+	            </span>
+	            <button type="button" className="macro-layout-button" onClick={handleLogout} disabled={authBusy}>
+	              Log out
+	            </button>
+	          </div>
+	        </div>
 
         {isMobileViewport && isSidebarOpen ? (
           <button
@@ -749,72 +1106,94 @@ export default function App() {
         ) : null}
 
         <div className="app-grid">
-          <StrategyRail
-            sidebarId="app-sidebar"
-            activeView={activeView}
-            strategies={strategies}
-            selectedStrategyId={selectedStrategyId}
-            streamDiagnostics={streamDiagnostics}
-            marketStatusPayload={marketStatusPayload}
-            marketTimerContext={effectiveMarketTimerContext}
-            onOpenDashboard={() => navigateTo("dashboard")}
-            onOpenSettings={() => navigateTo("settings")}
-            onOpenScreening={() => navigateTo("screening")}
-            onOpenPaperTrading={() => navigateTo("paper")}
-            onOpenOrderManagement={() => navigateTo("orders")}
-            onSelect={(strategyId) => navigateTo("strategy", strategyId)}
-            paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
-            screeningSummary={v2Screener?.summary ?? null}
-            isMobile={isMobileViewport}
-            isOpen={!isMobileViewport || isSidebarOpen}
-            onCloseMobile={() => setIsSidebarOpen(false)}
-          />
+	          <StrategyRail
+	            sidebarId="app-sidebar"
+	            activeView={activeView}
+	            strategies={strategies}
+	            selectedStrategyId={selectedStrategyId}
+	            streamDiagnostics={streamDiagnostics}
+	            marketStatusPayload={marketStatusPayload}
+	            marketTimerContext={effectiveMarketTimerContext}
+	            onOpenDashboard={() => navigateTo("dashboard")}
+	            onOpenWatchlist={() => navigateTo("watchlist")}
+	            onOpenSettings={() => navigateTo("settings")}
+	            onOpenAdminUsers={() => navigateTo("admin-users")}
+	            onOpenScreening={() => navigateTo("screening")}
+	            onOpenPaperTrading={() => navigateTo("paper")}
+	            paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
+	            screeningSummary={v2Screener?.summary ?? null}
+	            isAdmin={authUser?.role === "admin"}
+	            isMobile={isMobileViewport}
+	            isOpen={!isMobileViewport || isSidebarOpen}
+	            onCloseMobile={() => setIsSidebarOpen(false)}
+	          />
 
-          {showPaperTrading ? (
-            <PaperTradingWorkspace
-              paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
-              lastUpdated={paperPortfolioLastUpdated ?? strategyPayload?.lastUpdated ?? null}
-              onUpdatePaperOrder={handleUpdatePaperOrder}
-              onClosePaperOrder={handleClosePaperOrder}
-              onDeletePaperOrder={handleDeletePaperOrder}
-              onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
-              onExecutePaperOrder={handleExecutePaperOrder}
-              onConfirmPaperExecution={handleConfirmPaperExecution}
-              onSyncPaperExecution={handleSyncPaperExecution}
-              onCancelPaperExecution={handleCancelPaperExecution}
+	          <Suspense fallback={<WorkspaceLoadingFallback />}>
+	          {showPaperTrading ? (
+	            <PaperTradingWorkspace
+	              paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
+	              lastUpdated={paperPortfolioLastUpdated ?? strategyPayload?.lastUpdated ?? null}
+	              onUpdatePaperOrder={handleUpdatePaperOrder}
+	              onClosePaperOrder={handleClosePaperOrder}
+	              onClosePaperOrderLeg={handleClosePaperOrderLeg}
+	              onRevivePaperOrderLeg={handleRevivePaperOrderLeg}
+	              onAddPaperHedge={handleAddPaperHedge}
+	              onDeletePaperOrder={handleDeletePaperOrder}
+	              onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
+	              onConfirmPaperExecution={handleConfirmPaperExecution}
               theme={theme}
             />
-          ) : showOrderManagement ? (
-            <IbkrOrderManagementWorkspace
-              paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
-              lastUpdated={paperPortfolioLastUpdated ?? strategyPayload?.lastUpdated ?? null}
-              onUpdatePaperOrder={handleUpdatePaperOrder}
-              onExecutePaperOrder={handleExecutePaperOrder}
+          ) : showWatchlist ? (
+            <StrategyWatchlistWorkspace
+              setupWatchlist={strategyPayload?.setupWatchlist ?? []}
+              finderRows={strategyPayload?.primaryStrategy?.finder?.rows ?? []}
+              onOpenFinderRow={handleOpenFinderRowFromWatchlist}
+              onDeleteSetupWatchlistItem={handleDeleteSetupWatchlistItem}
+              onCreatePaperOrder={handleCreatePaperOrder}
               onConfirmPaperExecution={handleConfirmPaperExecution}
-              onSyncPaperExecution={handleSyncPaperExecution}
-              onCancelPaperExecution={handleCancelPaperExecution}
-              onOpenStrategy={(strategyId) => navigateTo("strategy", strategyId)}
               onOpenPaperTrading={() => navigateTo("paper")}
-            />
-          ) : showScreening ? (
-            <StrategyScreeningWorkspace
-              screenerPayload={v2Screener}
-              onManualRefresh={handleManualRefresh}
-              refreshing={refreshing}
-              refreshNotice={refreshNotice}
-              onMarketTimerContextChange={setMarketTimerContext}
+              paperPortfolio={strategyPaperContext}
+              lastUpdated={strategyPayload?.lastUpdated ?? null}
               theme={theme}
             />
-          ) : showSettings ? (
-            <StrategySettingsWorkspace
-              strategyPayload={strategyPayload}
-              onSaveStrategyAssetMapping={handleSaveStrategyAssetMapping}
-              onDeleteStrategyAssetMapping={handleDeleteStrategyAssetMapping}
-            />
-          ) : showStrategyFinder ? (
-            <StrategyFinderWorkspace
-              strategyPayload={strategyPayload}
-              strategyDefinition={selectedStrategy}
+	          ) : showScreening ? (
+	            <StrategyScreeningWorkspace
+	              screenerPayload={v2Screener}
+	              onManualRefresh={handleManualRefresh}
+	              refreshing={refreshing}
+	              refreshNotice={refreshNotice}
+	              onMarketTimerContextChange={setMarketTimerContext}
+	              theme={theme}
+	            />
+	          ) : showSettings ? (
+	            <StrategySettingsWorkspace
+	              strategyPayload={strategyPayload}
+	              onSaveStrategyAssetMapping={handleSaveStrategyAssetMapping}
+	              onDeleteStrategyAssetMapping={handleDeleteStrategyAssetMapping}
+	            />
+	          ) : showAdminUsers ? (
+	            authUser?.role === "admin" ? (
+	              <AdminUsersWorkspace onAuthRequired={handleAuthRequired} />
+	            ) : (
+	              <main className="workspace workspace--admin-users">
+	                <header className="topbar">
+	                  <div>
+	                    <span className="brand__eyebrow">Admin</span>
+	                    <h2>Access denied</h2>
+	                  </div>
+	                </header>
+	                <div className="app-state app-state--inline">Admin access is required.</div>
+	              </main>
+	            )
+	          ) : showStrategyFinder ? (
+	            <StrategyFinderWorkspace
+	              strategyPayload={strategyPayload}
+	              strategyDefinition={selectedStrategy}
+              setupWatchlist={strategyPayload?.setupWatchlist ?? []}
+              onUpsertSetupWatchlistItem={handleUpsertSetupWatchlistItem}
+              onDeleteSetupWatchlistItem={handleDeleteSetupWatchlistItem}
+              autoOpenRowId={finderAutoOpenRowId}
+              onAutoOpenRowHandled={() => setFinderAutoOpenRowId("")}
               onManualRefresh={handleManualRefresh}
               refreshing={refreshing}
               refreshNotice={refreshNotice}
@@ -835,6 +1214,16 @@ export default function App() {
             />
           ) : showDeltaHedgeScanner ? (
             <DeltaHedgeScannerWorkspace
+              strategyDefinition={selectedStrategy}
+              paperPortfolio={strategyPaperContext}
+              onCreatePaperOrder={handleCreatePaperOrder}
+              onConfirmPaperExecution={handleConfirmPaperExecution}
+              onOpenPaperTrading={() => navigateTo("paper")}
+              onMarketTimerContextChange={setMarketTimerContext}
+              theme={theme}
+            />
+          ) : showCoveredIncomeScanner ? (
+            <CoveredIncomeScannerWorkspace
               strategyDefinition={selectedStrategy}
               onMarketTimerContextChange={setMarketTimerContext}
               theme={theme}
@@ -949,6 +1338,7 @@ export default function App() {
 
             </main>
           )}
+          </Suspense>
         </div>
       </div>
     </div>

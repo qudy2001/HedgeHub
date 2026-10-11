@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
 
 function formatCurrency(value) {
   const numericValue = Number(value);
@@ -141,6 +142,7 @@ const columns = [
 ];
 
 const MAX_SORT_PRIORITIES = 4;
+const VOL_CRUSH_FILTERS_STORAGE_KEY = "hedgehub:filters:vol-crush";
 
 export default function VolCrushEarningsWorkspace({
   strategyDefinition,
@@ -162,6 +164,7 @@ export default function VolCrushEarningsWorkspace({
   const [sortState, setSortState] = useState([{ key: "compositeScore", direction: "desc" }]);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
   const [paperOrderState, setPaperOrderState] = useState(null);
+  const hasHydratedSavedFiltersRef = useRef(false);
 
   async function loadScan(force = false) {
     const nextRefreshing = payload != null;
@@ -209,6 +212,34 @@ export default function VolCrushEarningsWorkspace({
       return next.length ? next : quoteQualities;
     });
   }, [payload?.filters?.quoteQualities]);
+
+  useEffect(() => {
+    if (!payload || hasHydratedSavedFiltersRef.current) {
+      return;
+    }
+
+    const savedFilters = loadSavedFilters(VOL_CRUSH_FILTERS_STORAGE_KEY);
+    if (savedFilters) {
+      const sessions = payload?.filters?.sessions ?? [];
+      const quoteQualities = payload?.filters?.quoteQualities ?? [];
+
+      if (Array.isArray(savedFilters.selectedSessions)) {
+        const nextSessions = savedFilters.selectedSessions.filter((session) => sessions.includes(session));
+        setSelectedSessions(nextSessions.length ? nextSessions : sessions);
+      }
+
+      if (Array.isArray(savedFilters.selectedQuoteQualities)) {
+        const nextQualities = savedFilters.selectedQuoteQualities.filter((quality) => quoteQualities.includes(quality));
+        setSelectedQuoteQualities(nextQualities.length ? nextQualities : quoteQualities);
+      }
+
+      setMaxDaysToEvent(typeof savedFilters.maxDaysToEvent === "string" ? savedFilters.maxDaysToEvent : "14");
+      setMinLiquidity(typeof savedFilters.minLiquidity === "string" ? savedFilters.minLiquidity : "");
+      setMaxSpread(typeof savedFilters.maxSpread === "string" ? savedFilters.maxSpread : "");
+    }
+
+    hasHydratedSavedFiltersRef.current = true;
+  }, [payload]);
 
   const filteredRows = useMemo(() => {
     const rows = payload?.rows ?? [];
@@ -357,6 +388,16 @@ export default function VolCrushEarningsWorkspace({
     setMaxDaysToEvent("14");
     setMinLiquidity("");
     setMaxSpread("");
+  }
+
+  function saveFilters() {
+    persistSavedFilters(VOL_CRUSH_FILTERS_STORAGE_KEY, {
+      selectedSessions,
+      selectedQuoteQualities,
+      maxDaysToEvent,
+      minLiquidity,
+      maxSpread
+    });
   }
 
   async function handleCreatePaperTrade() {
@@ -510,9 +551,14 @@ export default function VolCrushEarningsWorkspace({
       <section className="insight-card screening-v2__filters">
         <div className="section-heading">
           <span>Filters</span>
-          <button type="button" className="finder-menu__reset" onClick={resetFilters}>
-            Reset
-          </button>
+          <div className="finder-menu__header-actions">
+            <button type="button" className="finder-menu__reset" onClick={saveFilters}>
+              Save
+            </button>
+            <button type="button" className="finder-menu__reset" onClick={resetFilters}>
+              Reset
+            </button>
+          </div>
         </div>
 
         <div className="screening-v2__filter-grid">
