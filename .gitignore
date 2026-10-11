@@ -3,6 +3,7 @@ dist
 /data/
 /dashboards/
 /logs/
+/tmp/
 *.log
 *.pid
 .env
@@ -10,7 +11,7 @@ dist
 .env.local
 .DS_Store
 /vendor/clientportal.gw/
-
 .venv-tiger/
 __pycache__/
 /Tiger_Accounts/
+/TradingAgents/

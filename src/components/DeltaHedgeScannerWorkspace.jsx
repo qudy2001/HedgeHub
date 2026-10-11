@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
 
 function formatCurrency(value) {
@@ -167,6 +168,28 @@ function invertPositionAction(action) {
   return String(action ?? "").trim().toUpperCase() === "SHORT" ? "LONG" : "SHORT";
 }
 
+function gcd(a, b) {
+  const left = Math.max(Math.round(Number(a ?? 0) || 0), 0);
+  const right = Math.max(Math.round(Number(b ?? 0) || 0), 0);
+  if (!left) {
+    return right;
+  }
+
+  if (!right) {
+    return left;
+  }
+
+  let currentLeft = left;
+  let currentRight = right;
+  while (currentRight) {
+    const remainder = currentLeft % currentRight;
+    currentLeft = currentRight;
+    currentRight = remainder;
+  }
+
+  return currentLeft;
+}
+
 function normalizeComboQuantityInput(value, fallback = 1) {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue) || numericValue <= 0) {
@@ -240,6 +263,7 @@ function buildDeltaHedgePaperOrderPayload({
   return {
     strategyId: strategyDefinition?.id ?? "strategy-4",
     strategyName: strategyDefinition?.name ?? "Delta Hedge Scanner",
+    strategySource: "Delta Hedge Scanner",
     combinationId: row.id,
     combinationLabel: `${row.symbol} · ${row.strategyType} · ${row.expiration}`,
     assetLabel: row.symbol,
@@ -856,6 +880,18 @@ export default function DeltaHedgeScannerWorkspace({
       optionRows
     };
   }, [directedSelectedRow, normalizedComboQuantity]);
+  const executionQualityContracts = useMemo(
+    () =>
+      (directedSelectedRow?.optionLegs ?? [])
+        .filter((leg) => String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.contractSymbol ||
+            `${selectedRow?.symbol || "Option"} ${index + 1} · ${formatCurrency(leg.strike)} · ${leg.expiration || "n/a"}`
+        })),
+    [directedSelectedRow?.optionLegs, selectedRow?.symbol]
+  );
   const marketTimerContext = useMemo(() => {
     if (!selectedRow) {
       return null;
@@ -1892,6 +1928,8 @@ export default function DeltaHedgeScannerWorkspace({
                                           </table>
                                         </div>
                                       </article>
+
+                                      <OptionMicrostructurePanel contracts={executionQualityContracts} />
                                     </div>
                                   </>
                                 ) : (

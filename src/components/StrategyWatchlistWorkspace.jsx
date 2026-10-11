@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 
 function formatCurrency(value, currency = "USD", digits = 2) {
@@ -362,6 +363,11 @@ function buildConfiguredOrderPayload(item, order, configuration = {}) {
   return {
     ...payload,
     ...order,
+    strategySource:
+      String(order?.strategySource ?? "").trim() ||
+      String(payload.strategySource ?? "").trim() ||
+      String(payload.source ?? "").trim() ||
+      String(item?.source ?? "").trim(),
     purchaseDate:
       String(configuration.purchaseDate ?? "").trim() ||
       String(order?.purchaseDate ?? "").trim() ||
@@ -469,6 +475,22 @@ export default function StrategyWatchlistWorkspace({
       }))
     };
   }, [expandedScenarioOrder, paperStrategyDirection]);
+  const expandedMicrostructureContracts = useMemo(
+    () =>
+      (directedExpandedScenarioOrder?.legs ?? [])
+        .filter((leg) => leg?.kind === "option" && String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.referenceLabel ||
+            `${directedExpandedScenarioOrder?.assetLabel || "Option"} ${index + 1} · ${describeWatchlistLeg(
+              leg,
+              directedExpandedScenarioOrder
+            )}`,
+          anchorAt: expandedItem?.createdAt ?? null
+        })),
+    [directedExpandedScenarioOrder, expandedItem?.createdAt]
+  );
   const previewScenarioOrder = useMemo(() => {
     if (!directedExpandedScenarioOrder) {
       return null;
@@ -988,6 +1010,13 @@ export default function StrategyWatchlistWorkspace({
                                     </table>
                                   </div>
                                 </section>
+
+                                <OptionMicrostructurePanel
+                                  title="Microstructure"
+                                  contracts={expandedMicrostructureContracts}
+                                  anchorAt={expandedItem?.createdAt ?? null}
+                                  anchorLabel="Since watchlist"
+                                />
                               </div>
 
                               <section className="paper-order-ticket">

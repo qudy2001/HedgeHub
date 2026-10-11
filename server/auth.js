@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { buildRequestLogContext, logError, logWarn } from "./logger.js";
 import {
   claimLegacyUserData,
   countUsers,
@@ -209,6 +210,10 @@ export function requireAuth(request, response, next) {
     touchSession(tokenHash);
     next();
   } catch (error) {
+    logError("Authentication middleware failed", {
+      error,
+      request: buildRequestLogContext(request)
+    });
     response.status(500).json({ error: error.message });
   }
 }
@@ -265,50 +270,72 @@ export function registerAuthRoutes(app) {
       setSessionCookie(request, response, token);
       response.status(201).json({ ok: true, user: buildSafeUser(user) });
     } catch (error) {
+      logWarn("Bootstrap request failed", {
+        error,
+        request: buildRequestLogContext(request, {
+          username
+        })
+      });
       response.status(400).json({ error: error.message });
     }
   });
 
   app.post("/api/auth/login", (request, response) => {
-    const username = normalizeUsername(request.body?.username);
-    const password = String(request.body?.password ?? "");
+    try {
+      const username = normalizeUsername(request.body?.username);
+      const password = String(request.body?.password ?? "");
 
-    if (!username || !password) {
-      response.status(400).json({ error: "username and password are required" });
-      return;
+      if (!username || !password) {
+        response.status(400).json({ error: "username and password are required" });
+        return;
+      }
+
+      const user = getUserByUsername(username);
+      if (!user || Number(user.disabled ?? 0) === 1) {
+        response.status(401).json({ error: "Invalid credentials" });
+        return;
+      }
+
+      if (!verifyPassword(password, user.passwordHash)) {
+        response.status(401).json({ error: "Invalid credentials" });
+        return;
+      }
+
+      const token = crypto.randomBytes(32).toString("base64url");
+      const expiresAt = addDays(new Date(), DEFAULT_SESSION_DAYS).toISOString();
+      createSession({
+        tokenHash: hashToken(token),
+        userId: user.id,
+        expiresAt
+      });
+
+      setSessionCookie(request, response, token);
+      response.json({ ok: true, user: buildSafeUser(user) });
+    } catch (error) {
+      logError("Login request failed", {
+        error,
+        request: buildRequestLogContext(request)
+      });
+      response.status(500).json({ error: error.message });
     }
-
-    const user = getUserByUsername(username);
-    if (!user || Number(user.disabled ?? 0) === 1) {
-      response.status(401).json({ error: "Invalid credentials" });
-      return;
-    }
-
-    if (!verifyPassword(password, user.passwordHash)) {
-      response.status(401).json({ error: "Invalid credentials" });
-      return;
-    }
-
-    const token = crypto.randomBytes(32).toString("base64url");
-    const expiresAt = addDays(new Date(), DEFAULT_SESSION_DAYS).toISOString();
-    createSession({
-      tokenHash: hashToken(token),
-      userId: user.id,
-      expiresAt
-    });
-
-    setSessionCookie(request, response, token);
-    response.json({ ok: true, user: buildSafeUser(user) });
   });
 
   app.post("/api/auth/logout", (request, response) => {
-    const token = readRequestCookie(request, COOKIE_NAME);
-    if (token) {
-      deleteSession(hashToken(token));
-    }
+    try {
+      const token = readRequestCookie(request, COOKIE_NAME);
+      if (token) {
+        deleteSession(hashToken(token));
+      }
 
-    clearSessionCookie(request, response);
-    response.json({ ok: true });
+      clearSessionCookie(request, response);
+      response.json({ ok: true });
+    } catch (error) {
+      logError("Logout request failed", {
+        error,
+        request: buildRequestLogContext(request)
+      });
+      response.status(500).json({ error: error.message });
+    }
   });
 
   app.get("/api/auth/me", requireAuth, (request, response) => {

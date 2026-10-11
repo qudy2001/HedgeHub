@@ -2,14 +2,15 @@
 
 HedgeHub is a personal hedge-strategy workstation with:
 
-- a React frontend tuned for dense market monitoring
+- a React frontend tuned for dense market monitoring, with classic, Momentum, and Strategy Studio UI variants
 - an Express backend for live quote refresh and strategy analytics
-- SQLite storage through `better-sqlite3`
+- SQLite compatibility through `better-sqlite3`
+- PostgreSQL 16 + TimescaleDB bootstrap for historical-data migration, including OHLC and option IV history
 - TradingView widgets for market context and calendars
 
 ## Strategy Studio
 
-The new dashboard is available at `/builder`, with an interactive sample at `/builder?demo=1`. The classic UI remains at `/`. See [Strategy Studio setup and data notes](docs/strategy-studio.md).
+The new dashboard is available at `/builder`, with an interactive sample at `/builder?demo=1`. The classic UI remains at `/`, and a Momentum-design UI is available at `/momentum`. All three are path-routed from the same build and served by the same process — see [src/main.jsx](src/main.jsx). See [Strategy Studio setup and data notes](docs/strategy-studio.md).
 
 ## Run
 
@@ -28,6 +29,15 @@ npm run build
 npm start
 ```
 
+Service scripts:
+
+```bash
+./scripts/startup.sh
+./scripts/startup.sh --local-db
+./scripts/restart.sh
+./scripts/shutdown.sh
+```
+
 Docker / NAS deployment:
 
 ```bash
@@ -36,10 +46,21 @@ docker compose pull
 docker compose up -d
 ```
 
+The default compose stack now includes:
+
+- `postgres` using `timescale/timescaledb:latest-pg16`
+- `web` for the Express API and built React frontend
+- `scanner` for background refresh and scanner persistence jobs
+- deterministic SQL bootstrap from `db/init/`
+- persistent Postgres data in the `postgres_data` volume
+
 - app: `http://localhost:8787` by default, or the host port set in `.env`
-- image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub-livedata:latest`
+- frontend data flow: browser -> `web` API -> PostgreSQL
+- scanner data flow: `scanner` worker -> PostgreSQL
+- image source: set `HEDGEHUB_IMAGE` in `.env`, for example `ghcr.io/qudy2001/hedgehub-postgresql:latest`
 - persistent data: `data/` for SQLite and `dashboards/` for saved layouts
-- logs: use `docker compose logs -f hedgehub`
+- persistent PostgreSQL data: Docker volume `postgres_data`
+- logs: use `docker compose logs -f web` or `docker compose logs -f scanner`
 - default dashboard layouts are seeded automatically on first boot if the dashboards volume starts empty
 
 If you want to keep your current local data when moving to the NAS, copy these folders with the project:
@@ -58,7 +79,8 @@ GitHub image publishing:
 - a GitHub Actions workflow at `.github/workflows/docker-publish.yml` builds multi-arch images for `linux/amd64` and `linux/arm64`
 - pushes on `main`, `master`, `codex/livedata`, tags starting with `v`, and manual runs
 - publishes to GitHub Container Registry as `ghcr.io/<owner>/<repo>`
-- the `codex/livedata` branch publishes a separate image line at `ghcr.io/qudy2001/hedgehub-livedata`
+- the `codex/livedata` branch still publishes the legacy `ghcr.io/qudy2001/hedgehub-livedata` line
+- the `codex/postgresql` branch publishes the PostgreSQL line at `ghcr.io/qudy2001/hedgehub-postgresql`
 - if the package stays private, the NAS must log in first with `docker login ghcr.io`
 
 Nginx reverse proxy:
@@ -80,18 +102,100 @@ Service scripts:
 ./scripts/startup.sh
 ./scripts/restart.sh
 ./scripts/shutdown.sh
+./scripts/publish-image.sh
+./scripts/publish-image-fast.sh
 ```
 
 The scripts write the PID file and application log under `logs/`.
+
+## Database modes
+
+App configuration is now environment-driven:
+
+```env
+HEDGEHUB_ROLE=web
+HEDGEHUB_ENABLE_HTTP=true
+HEDGEHUB_ENABLE_BACKGROUND_JOBS=false
+
+DB_TYPE=postgres
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=optionsdb
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/optionsdb
+
+SQLITE_DATA_DIR=./data
+SQLITE_DB_PATH=./data/hedgehub.db
+```
+
+Runtime roles:
+
+- `web`
+  Starts Express, serves `dist`, exposes `/api/*`, and keeps background jobs off by default.
+- `scanner`
+  Disables HTTP and runs background refresh / scanner persistence loops against PostgreSQL.
+
+Local macOS PostgreSQL:
+
+```bash
+brew install postgresql@16
+brew services start postgresql@16
+createdb optionsdb
+psql postgresql://postgres:postgres@localhost:5432/optionsdb -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+./scripts/startup.sh --local-db
+```
+
+SQLite fallback remains available:
+
+```bash
+DB_TYPE=sqlite ./scripts/startup.sh
+```
+
+SQLite-to-PostgreSQL migration:
+
+```bash
+./scripts/migrate_sqlite_to_postgres.py --resume
+```
+
+More detail lives in [docs/database.md](docs/database.md).
+
+Manual PostgreSQL image publish:
+
+```bash
+./scripts/publish-image.sh
+./scripts/publish-image-fast.sh
+```
 
 ## What is implemented
 
 - front page dashboard for US, UK, EU, commodities, bonds, crypto, forex, and global trade
 - left strategy rail with the Bitcoin / IBIT example strategy
-- live proxy quote tracking stored in SQLite
+- live proxy quote tracking stored in SQLite or PostgreSQL, depending on `DB_TYPE`
 - P&L timeline for daily BTC-to-80k scenarios through March 31
 - Greek-aware option model using delta, gamma, vega, and theta
 - TradingView embeds for ticker tape, advanced chart, market overview, economic calendar, and events
+- shared scanner persistence for TradingView Finder and Covered Income runs
+- candidate rank history and paper-trade promotion tracking for scanner workflows
+- regime-aware scanner payloads with IV rank, IV/HV spread, EV/BP, portfolio impact, and explainability data
+- progressive-disclosure scanner UI with a lean decision grid and deeper analytics in the detail area
+
+## Scanner intelligence
+
+The scanner platform is moving from stateless tables to persistent strategy-intelligence workflows:
+
+- shared run persistence and presets
+- candidate rank drift tracking
+- volatility regime classification
+- portfolio overlap diagnostics
+- explainable score breakdowns
+
+Implementation notes live here:
+
+- [docs/scanner-architecture.md](docs/scanner-architecture.md)
+- [docs/scoring-system.md](docs/scoring-system.md)
+- [docs/volatility-regime.md](docs/volatility-regime.md)
+- [docs/ui-architecture.md](docs/ui-architecture.md)
 
 ## Current limits
 

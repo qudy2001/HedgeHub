@@ -10,9 +10,11 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
 import { createMarketTimerContext } from "../marketTimers.js";
 import { getChartPalette } from "../theme.js";
+import { buildOptionChainCallColumns, buildOptionChainSideColumns } from "../optionChainColumns.js";
 import {
   buildTradingDateColumns,
   buildTradingDateRange,
@@ -27,27 +29,8 @@ import {
 } from "../../shared/polymarketSignals.js";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
 
-const OPTION_CHAIN_SIDE_COLUMNS = [
-  { key: "bid", label: "Bid", kind: "price" },
-  { key: "ask", label: "Ask", kind: "price" },
-  { key: "bidSize", label: "Bid x", kind: "count" },
-  { key: "askSize", label: "Ask x", kind: "count" },
-  { key: "mark", label: "Mark", kind: "select" },
-  { key: "changePercent", label: "Chg%", kind: "percent" },
-  { key: "volume", label: "Vol", kind: "count" },
-  { key: "openInterest", label: "OI", kind: "count" },
-  { key: "impliedVolatility", label: "IV", kind: "percent", scale: 100, digits: 2 },
-  { key: "delta", label: "Δ", kind: "number", digits: 3 },
-  { key: "gamma", label: "Γ", kind: "number", digits: 4 },
-  { key: "theta", label: "Θ", kind: "number", digits: 3 },
-  { key: "vega", label: "Vega", kind: "number", digits: 3 },
-  { key: "rho", label: "Rho", kind: "number", digits: 3 },
-  { key: "intrinsicValue", label: "Intrinsic", kind: "price" },
-  { key: "timeValue", label: "Time", kind: "price" },
-  { key: "premiumPercent", label: "Premium%", kind: "percent" },
-  { key: "lastPrice", label: "Last", kind: "price" }
-];
-const OPTION_CHAIN_CALL_COLUMNS = [...OPTION_CHAIN_SIDE_COLUMNS].reverse();
+const OPTION_CHAIN_SIDE_COLUMNS = buildOptionChainSideColumns();
+const OPTION_CHAIN_CALL_COLUMNS = buildOptionChainCallColumns();
 const LIVE_OPTION_QUOTES_POLL_MS = 5000;
 const MAX_OPTION_CHAIN_CACHE_ENTRIES = 8;
 const MAX_FINDER_DETAIL_CACHE_ENTRIES = 1;
@@ -1032,7 +1015,7 @@ function formatQuoteSourceLabel(leg) {
     return "Polymarket";
   }
 
-  if (leg?.isLive === true) {
+  if (leg?.isLive === true || leg?.quoteSource === "live") {
     return "Live";
   }
 
@@ -1560,6 +1543,7 @@ export default function StrategyFinderWorkspace({
   const detailRef = useRef(null);
   const liveTheoRowIdRef = useRef(null);
   const filterMenuRefs = useRef({});
+  const saveFiltersFeedbackTimeoutRef = useRef(null);
   const hasHydratedFiltersRef = useRef(false);
   const hasAutoRevealedHiddenDataRef = useRef(false);
   const [sortState, setSortState] = useState([{ key: "rewardRisk", direction: "desc" }]);
@@ -1603,6 +1587,7 @@ export default function StrategyFinderWorkspace({
   const [normalizedOptionVolumeMax, setNormalizedOptionVolumeMax] = useState("");
   const [midMinusTheoMin, setMidMinusTheoMin] = useState("");
   const [midMinusTheoMax, setMidMinusTheoMax] = useState("");
+  const [saveFiltersState, setSaveFiltersState] = useState("idle");
   const [controls, setControls] = useState(null);
   const [optionChains, setOptionChains] = useState({});
   const [optionChainStatus, setOptionChainStatus] = useState({});
@@ -1839,6 +1824,14 @@ export default function StrategyFinderWorkspace({
     finder,
     quoteSizeThresholdOptionsKey
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (saveFiltersFeedbackTimeoutRef.current) {
+        window.clearTimeout(saveFiltersFeedbackTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const baseFilteredRows = useMemo(
     () =>
@@ -2554,7 +2547,7 @@ export default function StrategyFinderWorkspace({
   }
 
   function saveFilters() {
-    persistSavedFilters(STRATEGY_FINDER_FILTERS_STORAGE_KEY, {
+    const saved = persistSavedFilters(STRATEGY_FINDER_FILTERS_STORAGE_KEY, {
       dateFrom,
       dateTo,
       activeAssets,
@@ -2577,6 +2570,15 @@ export default function StrategyFinderWorkspace({
       midMinusTheoMax,
       visibleColumnKeys
     });
+
+    setSaveFiltersState(saved ? "saved" : "error");
+    if (saveFiltersFeedbackTimeoutRef.current) {
+      window.clearTimeout(saveFiltersFeedbackTimeoutRef.current);
+    }
+    saveFiltersFeedbackTimeoutRef.current = window.setTimeout(() => {
+      setSaveFiltersState("idle");
+      saveFiltersFeedbackTimeoutRef.current = null;
+    }, 2200);
   }
 
   function resetFilters() {
@@ -3054,6 +3056,21 @@ export default function StrategyFinderWorkspace({
         isLive: config.isLive === true || leg.isLive === true
     };
   });
+  const microstructureContracts = useMemo(
+    () =>
+      effectiveOptionLegs
+        .filter((leg) => String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.referenceLabel ||
+            `${selectedRow?.assetLabel || selectedRow?.marketContext?.proxySymbol || "Option"} ${index + 1} · ${formatNumber(
+              leg.strike,
+              1
+            )}${leg.optionType === "put" ? "P" : "C"} · ${leg.expiry || "n/a"}`
+        })),
+    [effectiveOptionLegs, selectedRow?.assetLabel, selectedRow?.marketContext?.proxySymbol]
+  );
   const strategyCloseDate =
     minIsoDate([polymarketResolutionDate, ...effectiveOptionLegs.map((leg) => leg.expiry)]) ||
     selectedRow?.strategyCloseDate ||
@@ -3559,6 +3576,7 @@ export default function StrategyFinderWorkspace({
       const baseOrderPayload = {
         strategyId: strategyDefinition?.id ?? "strategy-1",
         strategyName: strategyDefinition?.name ?? "Strategy",
+        strategySource: "Strategy Finder",
         combinationId: selectedRow.id,
         combinationLabel: `${selectedRow.assetLabel} · ${strategyTypeLabel} · ${strategyCloseDate}`,
         assetLabel: selectedRow.assetLabel,
@@ -5293,10 +5311,21 @@ export default function StrategyFinderWorkspace({
 
         <button
           type="button"
-          className="chart-toggle chart-toggle--compact"
+          className={`chart-toggle chart-toggle--compact finder-action ${
+            saveFiltersState === "saved"
+              ? "finder-action--success"
+              : saveFiltersState === "error"
+                ? "finder-action--error"
+                : ""
+          }`}
           onClick={saveFilters}
+          aria-live="polite"
         >
-          Save filters
+          {saveFiltersState === "saved"
+            ? "Saved"
+            : saveFiltersState === "error"
+              ? "Save failed"
+              : "Save filters"}
         </button>
 
         <details
@@ -5808,7 +5837,7 @@ export default function StrategyFinderWorkspace({
                                 <strong>Leg {index + 1}</strong>
                                 <div className="strategy-editor__card-actions">
                                   <span className="pill pill--ghost">
-                                    {chainPayload?.sourceLabel ?? "Seeded"}
+                                    {leg.quoteSource === "live" ? "Live" : chainPayload?.sourceLabel ?? "Seeded"}
                                   </span>
                                   <button
                                     type="button"
@@ -6072,6 +6101,8 @@ export default function StrategyFinderWorkspace({
 	                        })}
 	                      </div>
 	                    </div>
+
+                      <OptionMicrostructurePanel contracts={microstructureContracts} />
 
 	                    <div className="detail-panel detail-panel--controls">
 	                      <h4>Scenario controls</h4>

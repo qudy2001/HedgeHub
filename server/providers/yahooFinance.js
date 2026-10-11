@@ -1,5 +1,6 @@
 import { normalCdf, optionPrice as blackScholesOptionPrice } from "../../shared/optionMath.js";
 const STOOQ_BASE_URL = "https://stooq.com/q/l/?f=sd2t2ohlcvn&e=csv&s=";
+const YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
 const COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3/simple/price";
 
 async function fetchText(url) {
@@ -408,6 +409,92 @@ async function fetchStooqQuotes(items) {
     .filter(Boolean);
 }
 
+function normalizeYahooEquityTicker(sourceSymbol = "") {
+  return String(sourceSymbol ?? "")
+    .trim()
+    .replace(/\.us$/i, "")
+    .toUpperCase();
+}
+
+async function fetchYahooEquityQuotes(items) {
+  if (!items.length) {
+    return [];
+  }
+
+  const tickers = [...new Set(items.map((item) => normalizeYahooEquityTicker(item.sourceSymbol)).filter(Boolean))];
+  if (!tickers.length) {
+    return [];
+  }
+
+  const chartResults = await Promise.allSettled(
+    tickers.map(async (ticker) => {
+      const url = new URL(`${YAHOO_CHART_URL}/${encodeURIComponent(ticker)}`);
+      url.searchParams.set("interval", "1m");
+      url.searchParams.set("range", "1d");
+      url.searchParams.set("includePrePost", "true");
+
+      const payload = await fetchJson(url.toString());
+      const result = Array.isArray(payload?.chart?.result) ? payload.chart.result[0] : null;
+      const meta = result?.meta ?? null;
+      const priceCandidates = [
+        Number(meta?.regularMarketPrice),
+        Number(meta?.previousClose)
+      ];
+      const regularMarketPrice = priceCandidates.find((value) => Number.isFinite(value) && value > 0) ?? null;
+      if (!meta || !(regularMarketPrice > 0)) {
+        return null;
+      }
+
+      const previousClose = Number(meta?.previousClose);
+      const changePercent =
+        Number.isFinite(previousClose) && previousClose > 0
+          ? ((regularMarketPrice - previousClose) / previousClose) * 100
+          : 0;
+      const marketTimeSeconds = Number(meta?.regularMarketTime ?? 0);
+
+      return [
+        ticker,
+        {
+          regularMarketPrice,
+          regularMarketChangePercent: changePercent,
+          regularMarketTime:
+            Number.isFinite(marketTimeSeconds) && marketTimeSeconds > 0
+              ? new Date(marketTimeSeconds * 1000).toISOString()
+              : new Date().toISOString(),
+          shortName: meta?.shortName ?? meta?.longName ?? ticker,
+          exchange: "Yahoo Finance",
+          currency: meta?.currency ?? "USD"
+        }
+      ];
+    })
+  );
+
+  const quoteByTicker = new Map(
+    chartResults
+      .filter((result) => result.status === "fulfilled" && Array.isArray(result.value))
+      .map((result) => result.value)
+  );
+
+  return items
+    .map((item) => {
+      const quote = quoteByTicker.get(normalizeYahooEquityTicker(item.sourceSymbol));
+      if (!quote) {
+        return null;
+      }
+
+      return {
+        symbol: item.symbol,
+        shortName: item.label || quote.shortName,
+        regularMarketPrice: quote.regularMarketPrice,
+        regularMarketChangePercent: quote.regularMarketChangePercent,
+        currency: quote.currency,
+        exchange: quote.exchange,
+        regularMarketTime: quote.regularMarketTime
+      };
+    })
+    .filter(Boolean);
+}
+
 async function fetchCoinGeckoQuotes(items) {
   if (!items.length) {
     return [];
@@ -439,17 +526,60 @@ async function fetchCoinGeckoQuotes(items) {
     .filter(Boolean);
 }
 
+async function fetchStockQuotesWithFallback(items) {
+  if (!items.length) {
+    return [];
+  }
+
+  const resolved = new Array(items.length).fill(null);
+  let remaining = items.map((item, index) => ({ item, index }));
+
+  const mergeQuotes = (quotes = []) => {
+    if (!quotes.length || !remaining.length) {
+      return;
+    }
+
+    const quotesBySymbol = new Map(
+      quotes.map((quote) => [String(quote.symbol ?? "").trim().toUpperCase(), quote])
+    );
+
+    remaining = remaining.filter(({ item, index }) => {
+      const quote = quotesBySymbol.get(String(item.symbol ?? "").trim().toUpperCase());
+      if (!quote || !(Number(quote.regularMarketPrice) > 0)) {
+        return true;
+      }
+
+      resolved[index] = quote;
+      return false;
+    });
+  };
+
+  try {
+    mergeQuotes(await fetchYahooEquityQuotes(remaining.map(({ item }) => item)));
+  } catch (_error) {
+    // Fall through to Stooq.
+  }
+
+  try {
+    mergeQuotes(await fetchStooqQuotes(remaining.map(({ item }) => item)));
+  } catch (_error) {
+    // Surface an empty result if every provider failed.
+  }
+
+  return resolved.filter(Boolean);
+}
+
 export async function fetchQuotes(items) {
-  const stooqItems = items.filter((item) => item.provider === "stooq");
+  const stockItems = items.filter((item) => item.provider !== "coingecko");
   const coingeckoItems = items.filter((item) => item.provider === "coingecko");
-  const [stooqResult, coingeckoResult] = await Promise.allSettled([
-    fetchStooqQuotes(stooqItems),
+  const [stockResult, coingeckoResult] = await Promise.allSettled([
+    fetchStockQuotesWithFallback(stockItems),
     fetchCoinGeckoQuotes(coingeckoItems)
   ]);
 
   return [
-    ...(stooqResult.status === "fulfilled" ? stooqResult.value : []),
-    ...(coingeckoResult.status === "fulfilled" ? coingeckoResult.value : [])
+    ...(stockResult.status === "fulfilled" ? stockResult.value : []),
+    ...(coingeckoResult.status === "fulfilled" ? coingeckoResult.value : []),
   ];
 }
 

@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createMarketTimerContext } from "../marketTimers.js";
-import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import PaperTradeScenarioPanel, { buildPaperTradeHeatmapBenchmark } from "./PaperTradeScenarioPanel.jsx";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
+import { buildOptionChainCallColumns, buildOptionChainSideColumns } from "../optionChainColumns.js";
 
 const TRADING_VIEW_STRATEGY_TYPE_KEYS = [
   "long_call",
@@ -79,7 +80,6 @@ const SORT_DEFAULT_DIRECTIONS = {
   bidAskSpread: "asc"
 };
 const MAX_SORT_PRIORITIES = 4;
-const LIVE_OPTION_QUOTES_POLL_MS = 5000;
 const MAX_OPTION_CHAIN_CACHE_ENTRIES = 8;
 const DEFAULT_EXPECTED_PRICE_RANGE = {
   min: -20,
@@ -90,15 +90,36 @@ const DEFAULT_TABLE_MAX_LOSS_MAX = "99999999";
 const TRADING_VIEW_SAVED_TICKERS_STORAGE_KEY = "hedgehub:tradingview-saved-tickers";
 const TRADING_VIEW_FILTERS_STORAGE_KEY = "hedgehub:filters:tradingview-strategy";
 const MAX_TRADING_VIEW_SAVED_TICKERS = 20;
+const TRADING_VIEW_DEFAULT_VISIBLE_COLUMN_KEYS = [
+  "expiration",
+  "assetLabel",
+  "strategyType",
+  "ivRank",
+  "evPerBuyingPower",
+  "signalFreshness",
+  "normalizedOptionVolume",
+  "regimeFit",
+  "rankDrift",
+  "portfolioImpact",
+  "probabilityOfProfit",
+  "maxLoss",
+  "rewardRisk",
+  "bidAskSpread"
+];
 const TRADING_VIEW_TABLE_COLUMNS = [
   { key: "expiration", label: "Expiration", width: 120 },
   { key: "days", label: "Days", mobileHidden: true, width: 70 },
   { key: "assetLabel", label: "Asset", width: 110 },
-  { key: "strategyType", label: "Strategy type", mobileHidden: true, width: 150 },
-  { key: "marketBias", label: "Tag", mobileHidden: true, width: 110 },
+  { key: "strategyType", label: "Strategy", mobileHidden: true, width: 140 },
+  { key: "ivRank", label: "IV rank", width: 90 },
+  { key: "evPerBuyingPower", label: "EV/BP", width: 90 },
+  { key: "signalFreshness", label: "Freshness", mobileHidden: true, width: 100 },
+  { key: "normalizedOptionVolume", label: "Liquidity", width: 110 },
+  { key: "historicalWinRate", label: "Win rate", width: 110 },
+  { key: "regimeFit", label: "IV fit", mobileHidden: true, width: 100 },
+  { key: "rankDrift", label: "Rank drift", width: 100 },
+  { key: "portfolioImpact", label: "Overlap", mobileHidden: true, width: 120 },
   { key: "formula", label: "Formula", mobileHidden: true, width: 220 },
-  { key: "normalizedOptionVolume", label: "Opt vol (norm)", width: 120 },
-  { key: "midMinusTheo", label: "Avg B/A - Theo", width: 140 },
   { key: "probabilityOfProfit", label: "POP", width: 120 },
   { key: "maxProfit", label: "Max profit", width: 148 },
   { key: "maxLoss", label: "Max loss", width: 148 },
@@ -109,27 +130,8 @@ const TRADING_VIEW_TABLE_COLUMNS = [
   { key: "ask", label: "Ask", mobileHidden: true, width: 80 },
   { key: "bidAskSpread", label: "Bid-ask spread", width: 120 }
 ];
-const OPTION_CHAIN_SIDE_COLUMNS = [
-  { key: "bid", label: "Bid", kind: "price" },
-  { key: "ask", label: "Ask", kind: "price" },
-  { key: "bidSize", label: "Bid x", kind: "count" },
-  { key: "askSize", label: "Ask x", kind: "count" },
-  { key: "mark", label: "Mark", kind: "select" },
-  { key: "changePercent", label: "Chg%", kind: "percent" },
-  { key: "volume", label: "Vol", kind: "count" },
-  { key: "openInterest", label: "OI", kind: "count" },
-  { key: "impliedVolatility", label: "IV", kind: "percent", scale: 100, digits: 2 },
-  { key: "delta", label: "Δ", kind: "number", digits: 3 },
-  { key: "gamma", label: "Γ", kind: "number", digits: 4 },
-  { key: "theta", label: "Θ", kind: "number", digits: 3 },
-  { key: "vega", label: "Vega", kind: "number", digits: 3 },
-  { key: "rho", label: "Rho", kind: "number", digits: 3 },
-  { key: "intrinsicValue", label: "Intrinsic", kind: "price" },
-  { key: "timeValue", label: "Time", kind: "price" },
-  { key: "premiumPercent", label: "Premium%", kind: "percent" },
-  { key: "lastPrice", label: "Last", kind: "price" }
-];
-const OPTION_CHAIN_CALL_COLUMNS = [...OPTION_CHAIN_SIDE_COLUMNS].reverse();
+const OPTION_CHAIN_SIDE_COLUMNS = buildOptionChainSideColumns();
+const OPTION_CHAIN_CALL_COLUMNS = buildOptionChainCallColumns();
 
 function writeBoundedCacheRecord(current, key, value, maxEntries) {
   const normalizedKey = String(key ?? "").trim();
@@ -530,6 +532,16 @@ function sanitizeSavedTradingViewTickers(value) {
     .slice(0, MAX_TRADING_VIEW_SAVED_TICKERS);
 }
 
+function sanitizeTradingViewVisibleColumnKeys(value) {
+  if (!Array.isArray(value)) {
+    return TRADING_VIEW_DEFAULT_VISIBLE_COLUMN_KEYS.slice();
+  }
+
+  const allowedKeys = new Set(TRADING_VIEW_TABLE_COLUMNS.map((column) => column.key));
+  const keys = value.filter((item) => allowedKeys.has(item));
+  return keys.length ? keys : TRADING_VIEW_DEFAULT_VISIBLE_COLUMN_KEYS.slice();
+}
+
 function readSavedTradingViewTickers() {
   if (typeof window === "undefined") {
     return [];
@@ -720,6 +732,12 @@ function getTradingViewSortValue(row, sortKey) {
       return row.strategyTypeLabel ?? "";
     case "marketBias":
       return inferTradingViewMarketBias(row.strategyTypeKey).label ?? "";
+    case "ivRank":
+      return row.intelligence?.volatility?.ivRank52w ?? null;
+    case "evPerBuyingPower":
+      return row.intelligence?.ev?.evPerBuyingPower ?? null;
+    case "signalFreshness":
+      return row.intelligence?.signalFreshness ?? "";
     case "formula":
       return Array.isArray(row.legs)
         ? row.legs.map((leg) => `${leg?.action ?? ""}${formatStrategyLegLabel(leg)}`).join("|")
@@ -728,6 +746,14 @@ function getTradingViewSortValue(row, sortKey) {
       return row.normalizedOptionVolume ?? null;
     case "midMinusTheo":
       return getTradingViewMidMinusTheo(row);
+    case "historicalWinRate":
+      return row.probabilityOfProfit ?? null;
+    case "regimeFit":
+      return row.intelligence?.volatility?.ivRank52w ?? null;
+    case "rankDrift":
+      return row.intelligence?.rankDrift?.scoreDelta ?? null;
+    case "portfolioImpact":
+      return row.intelligence?.portfolioImpact?.correlationOverlap ?? "";
     case "probabilityOfProfit":
       return row.probabilityOfProfit ?? null;
     case "maxProfit":
@@ -1241,6 +1267,7 @@ function buildTradingViewPaperOrderPayload({
   return {
     strategyId: strategyDefinition?.id ?? "strategy-tv-finder",
     strategyName: strategyDefinition?.name ?? "TradingView Strategy Finder",
+    strategySource: "TradingView finder",
     combinationId: order.id,
     combinationLabel:
       order.combinationLabel ??
@@ -1356,13 +1383,15 @@ export default function TradingViewStrategyWorkspace({
   onMarketTimerContextChange = null,
   theme = "dark"
 }) {
-  const tableColumnCount = TRADING_VIEW_TABLE_COLUMNS.length;
   const filterMenuRefs = useRef({});
   const savedFilters = useMemo(() => loadSavedFilters(TRADING_VIEW_FILTERS_STORAGE_KEY), []);
   const [symbolInput, setSymbolInput] = useState(() =>
     typeof savedFilters?.symbolInput === "string" ? savedFilters.symbolInput : "SPY"
   );
   const [savedTickers, setSavedTickers] = useState(() => readSavedTradingViewTickers());
+  const [visibleColumnKeys, setVisibleColumnKeys] = useState(() =>
+    sanitizeTradingViewVisibleColumnKeys(savedFilters?.visibleColumnKeys)
+  );
   const [dateFrom, setDateFrom] = useState(() =>
     typeof savedFilters?.dateFrom === "string" ? savedFilters.dateFrom : startOfCurrentMonthIso()
   );
@@ -1443,10 +1472,12 @@ export default function TradingViewStrategyWorkspace({
   const [sortState, setSortState] = useState([{ key: "rewardRisk", direction: "desc" }]);
   const [detailCollapsed, setDetailCollapsed] = useState(false);
   const [liveTheoPrice, setLiveTheoPrice] = useState(null);
-  const liveTheoRowIdRef = useRef(null);
   const [liveOptionLegQuotes, setLiveOptionLegQuotes] = useState({});
   const [liveOptionLegQuotesUpdatedAt, setLiveOptionLegQuotesUpdatedAt] = useState(null);
-  const liveOptionQuoteRowIdRef = useRef(null);
+  const [scenarioMarkRefreshBusy, setScenarioMarkRefreshBusy] = useState(false);
+  const [scenarioMarkRefreshState, setScenarioMarkRefreshState] = useState(null);
+  const [scenarioMarkRefreshNonce, setScenarioMarkRefreshNonce] = useState(0);
+  const [scenarioMetricOverridesByRowId, setScenarioMetricOverridesByRowId] = useState({});
   const [strategyEditorOpen, setStrategyEditorOpen] = useState(false);
   const [scenarioOrderDraft, setScenarioOrderDraft] = useState(null);
   const [strategyDirection, setStrategyDirection] = useState("LONG");
@@ -1624,6 +1655,26 @@ export default function TradingViewStrategyWorkspace({
     });
   }
 
+  function toggleVisibleColumn(columnKey) {
+    setVisibleColumnKeys((current) => {
+      if (current.includes(columnKey)) {
+        return current.length === 1 ? current : current.filter((key) => key !== columnKey);
+      }
+
+      return TRADING_VIEW_TABLE_COLUMNS.map((column) => column.key).filter(
+        (key) => key === columnKey || current.includes(key)
+      );
+    });
+  }
+
+  function showDefaultColumns() {
+    setVisibleColumnKeys(TRADING_VIEW_DEFAULT_VISIBLE_COLUMN_KEYS.slice());
+  }
+
+  function showAllColumns() {
+    setVisibleColumnKeys(TRADING_VIEW_TABLE_COLUMNS.map((column) => column.key));
+  }
+
   async function loadStrategies() {
     setLoading(true);
     setError("");
@@ -1697,9 +1748,27 @@ export default function TradingViewStrategyWorkspace({
     () => sortTradingViewRows(filteredRows, sortState),
     [filteredRows, sortState]
   );
+  const visibleColumns = useMemo(() => {
+    const nextColumns = TRADING_VIEW_TABLE_COLUMNS.filter((column) => visibleColumnKeys.includes(column.key));
+    return nextColumns.length
+      ? nextColumns
+      : TRADING_VIEW_TABLE_COLUMNS.filter((column) => TRADING_VIEW_DEFAULT_VISIBLE_COLUMN_KEYS.includes(column.key));
+  }, [visibleColumnKeys]);
+  const tableColumnCount = visibleColumns.length;
   const visibleRowsCountLabel =
     filteredRows.length !== rows.length ? `${filteredRows.length}/${rows.length}` : String(filteredRows.length);
-  const selectedRow = sortedRows.find((row) => row.id === selectedRowId) ?? null;
+  const getDisplayRow = useMemo(
+    () => (row) => {
+      if (!row) {
+        return row;
+      }
+
+      const override = scenarioMetricOverridesByRowId?.[String(row.id)] ?? null;
+      return override ? { ...row, ...override } : row;
+    },
+    [scenarioMetricOverridesByRowId]
+  );
+  const selectedRow = getDisplayRow(sortedRows.find((row) => row.id === selectedRowId) ?? null);
   const baseScenarioOrder = useMemo(
     () => buildTradingViewScenarioOrder(selectedRow, payload?.generatedAt),
     [payload?.generatedAt, selectedRow]
@@ -1821,73 +1890,9 @@ export default function TradingViewStrategyWorkspace({
   useEffect(() => {
     if (!selectedRow || detailCollapsed) {
       setLiveTheoPrice(null);
-      liveTheoRowIdRef.current = null;
       return;
     }
-
-    let cancelled = false;
-    let controller = null;
-    let inFlight = false;
-    const rowId = selectedRow.id ?? null;
-    if (rowId && liveTheoRowIdRef.current !== rowId) {
-      liveTheoRowIdRef.current = rowId;
-      setLiveTheoPrice(null);
-    }
-    const symbol = selectedRow.underlyingFamily || selectedRow.underlyingSymbol || "";
-    const spotFallback = Number(selectedRow.underlyingPrice ?? NaN);
-    const legs = Array.isArray(selectedRow.legs) ? selectedRow.legs : [];
-
-    async function refreshLiveTheoPrice() {
-      if (inFlight) {
-        return;
-      }
-
-      inFlight = true;
-      controller?.abort();
-      controller = new AbortController();
-
-      try {
-        const response = await fetch("/api/tradingview/theo-price", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          signal: controller.signal,
-          cache: "no-store",
-          body: JSON.stringify({
-            symbol,
-            spot: Number.isFinite(spotFallback) ? spotFallback : null,
-            legs
-          })
-        });
-        const payload = await response.json().catch(() => null);
-
-        if (!response.ok) {
-          throw new Error(payload?.error || "Unable to load live theo price");
-        }
-
-        const nextTheo = Number(payload?.theoPrice ?? NaN);
-
-        if (!cancelled) {
-          setLiveTheoPrice(Number.isFinite(nextTheo) ? nextTheo : null);
-        }
-      } catch (_error) {
-        // Keep the last known live theo visible if the lightweight poll fails.
-      } finally {
-        inFlight = false;
-      }
-    }
-
-    void refreshLiveTheoPrice();
-    const interval = window.setInterval(() => {
-      void refreshLiveTheoPrice();
-    }, 15_000);
-
-    return () => {
-      cancelled = true;
-      controller?.abort();
-      window.clearInterval(interval);
-    };
+    setLiveTheoPrice(null);
   }, [detailCollapsed, payload?.generatedAt, selectedRow?.id]);
 
   const liveComboQuote = useMemo(() => {
@@ -1929,19 +1934,30 @@ export default function TradingViewStrategyWorkspace({
     let ready = true;
     let bid = 0;
     let ask = 0;
+    let markTotal = 0;
+    let markCount = 0;
 
     optionLegs.forEach((leg) => {
       const quote = liveOptionLegQuotes?.[leg.id] ?? null;
       const legBid = Number(quote?.bid ?? NaN);
       const legAsk = Number(quote?.ask ?? NaN);
+      const legMark =
+        Number(quote?.mark ?? NaN) ||
+        Number(leg?.currentPrice ?? NaN) ||
+        (Number.isFinite(legBid) && Number.isFinite(legAsk) ? (legBid + legAsk) / 2 : Number.NaN);
+      const ratio = Math.max(Number(leg.quantity ?? 0), 0) / lotCount;
+      const direction = String(leg.action ?? "LONG").trim().toUpperCase() === "SHORT" ? -1 : 1;
+
+      if (Number.isFinite(legMark) && legMark >= 0) {
+        markTotal += direction * legMark * ratio;
+        markCount += 1;
+      }
 
       if (!(legBid > 0) || !(legAsk > 0) || legAsk < legBid) {
         ready = false;
         return;
       }
 
-      const ratio = Math.max(Number(leg.quantity ?? 0), 0) / lotCount;
-      const direction = String(leg.action ?? "LONG").trim().toUpperCase() === "SHORT" ? -1 : 1;
       const isShort = direction < 0;
 
       bid += direction * (isShort ? legAsk : legBid) * ratio;
@@ -1953,7 +1969,7 @@ export default function TradingViewStrategyWorkspace({
         ready: false,
         bid: null,
         ask: null,
-        mid: null
+        mid: markCount ? Number(markTotal.toFixed(2)) : null
       };
     }
 
@@ -1969,184 +1985,241 @@ export default function TradingViewStrategyWorkspace({
     if (!selectedScenarioOrder || detailCollapsed || !optionRootSymbol) {
       setLiveOptionLegQuotes({});
       setLiveOptionLegQuotesUpdatedAt(null);
-      liveOptionQuoteRowIdRef.current = null;
       return;
     }
+    setLiveOptionLegQuotes({});
+    setLiveOptionLegQuotesUpdatedAt(null);
+  }, [detailCollapsed, optionLegQuoteSignature, optionRootSymbol, selectedScenarioOrder, selectedRow?.id]);
 
-    const rowId = selectedScenarioOrder.id ?? selectedRow?.id ?? null;
-    if (rowId && liveOptionQuoteRowIdRef.current !== rowId) {
-      liveOptionQuoteRowIdRef.current = rowId;
-      setLiveOptionLegQuotes({});
-      setLiveOptionLegQuotesUpdatedAt(null);
+  async function handleRefreshScenarioMarks() {
+    if (!selectedScenarioOrder || !optionRootSymbol || scenarioMarkRefreshBusy) {
+      return;
     }
 
     const optionLegs = (selectedScenarioOrder.legs ?? []).filter(
       (leg) => leg?.kind === "option" && Number(leg?.quantity ?? 0) > 0
     );
-
     if (!optionLegs.length) {
-      setLiveOptionLegQuotes({});
-      setLiveOptionLegQuotesUpdatedAt(null);
       return;
     }
 
-    const groupLegs = new Map();
-    optionLegs.forEach((leg) => {
-      const expiration = String(leg?.expiry ?? "").trim();
-      if (!expiration) {
-        return;
-      }
+    setScenarioMarkRefreshBusy(true);
+    setScenarioMarkRefreshState(null);
 
-      const optionType = String(leg?.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
-      const strike = Number(leg?.strike ?? NaN);
-      if (!Number.isFinite(strike) || strike <= 0) {
-        return;
-      }
+    try {
+      const spotFallback = Number(
+        selectedScenarioOrder?.valuationContext?.currentProxySpot ?? selectedRow?.underlyingPrice ?? NaN
+      );
 
-      const key = buildChainKey(optionRootSymbol, expiration, optionType);
-      const current = groupLegs.get(key) ?? {
-        expiration,
-        optionType,
-        strikes: []
-      };
-      current.strikes.push(strike);
-      groupLegs.set(key, current);
-    });
-
-    if (!groupLegs.size) {
-      setLiveOptionLegQuotes({});
-      return;
-    }
-
-    let cancelled = false;
-    let controller = null;
-    let inFlight = false;
-
-    async function refreshLiveOptionQuotes() {
-      if (inFlight) {
-        return;
-      }
-
-      inFlight = true;
-      controller?.abort();
-      controller = new AbortController();
-
-      try {
-        const requests = [...groupLegs.entries()].map(async ([key, group]) => {
-          const strikes = group.strikes.filter((value) => Number.isFinite(value) && value > 0);
-          if (!strikes.length) {
-            return [key, []];
-          }
-
-          const minStrike = Math.min(...strikes);
-          const maxStrike = Math.max(...strikes);
-          const padding = Math.max((maxStrike - minStrike) * 0.15, chainSpot > 200 ? 5 : 1);
-          const strikeMin = Math.max(minStrike - padding, 0.01);
-          const strikeMax = Math.max(maxStrike + padding, strikeMin);
-          const limit = Math.max(strikes.length * 12, 60);
-
-          const url = `/api/options/chain?symbol=${encodeURIComponent(optionRootSymbol)}&expiration=${encodeURIComponent(
-            group.expiration
-          )}&optionType=${encodeURIComponent(group.optionType)}&strikeMin=${encodeURIComponent(
-            strikeMin
-          )}&strikeMax=${encodeURIComponent(strikeMax)}&limit=${encodeURIComponent(limit)}`;
-
-          const response = await fetch(url, {
-            signal: controller.signal,
-            cache: "no-store"
-          });
-          const payload = await response.json().catch(() => null);
-          if (!response.ok) {
-            throw new Error(payload?.error || "Unable to load live option quotes");
-          }
-
-          return [key, Array.isArray(payload?.contracts) ? payload.contracts : []];
-        });
-
-        const results = await Promise.allSettled(requests);
-        if (controller.signal.aborted) {
+      const groupLegs = new Map();
+      optionLegs.forEach((leg) => {
+        const expiration = String(leg?.expiry ?? "").trim();
+        if (!expiration) {
           return;
         }
 
-        const contractsByGroup = new Map();
-        results.forEach((result) => {
-          if (result.status !== "fulfilled") {
-            return;
-          }
-
-          const [key, contracts] = result.value ?? [];
-          if (key) {
-            contractsByGroup.set(key, Array.isArray(contracts) ? contracts : []);
-          }
-        });
-
-        if (cancelled) {
+        const optionType = String(leg?.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
+        const strike = Number(leg?.strike ?? NaN);
+        if (!Number.isFinite(strike) || strike <= 0) {
           return;
         }
 
-        setLiveOptionLegQuotes((current) => {
-          const next = {};
-          optionLegs.forEach((leg) => {
-            const expiration = String(leg?.expiry ?? "").trim();
-            const optionType = String(leg?.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
-            const key = buildChainKey(optionRootSymbol, expiration, optionType);
-            const contracts = contractsByGroup.get(key) ?? [];
+        const key = buildChainKey(optionRootSymbol, expiration, optionType);
+        const current = groupLegs.get(key) ?? {
+          expiration,
+          optionType,
+          strikes: []
+        };
+        current.strikes.push(strike);
+        groupLegs.set(key, current);
+      });
 
-            const targetContractSymbol = String(leg?.contractSymbol ?? "").trim();
-            const matched =
-              (targetContractSymbol
-                ? contracts.find(
-                    (contract) => String(contract?.contractSymbol ?? "").trim() === targetContractSymbol
-                  )
-                : null) ??
-              contracts.find((contract) => {
-                const contractStrike = Number(contract?.strike ?? NaN);
-                return Number.isFinite(contractStrike) && Math.abs(contractStrike - Number(leg.strike ?? 0)) < 0.01;
-              }) ??
-              null;
-
-            if (matched) {
-              next[leg.id] = {
-                bid: matched.bid ?? null,
-                ask: matched.ask ?? null,
-                bidSize: matched.bidSize ?? null,
-                askSize: matched.askSize ?? null,
-                volume: matched.volume ?? null,
-                openInterest: matched.openInterest ?? null,
-                mark: matched.mark ?? null,
-                sourceLabel: matched.sourceLabel ?? matched.source ?? null,
-                isLive: matched.isLive === true,
-                hasRealBidAsk: matched.hasRealBidAsk === true
-              };
-              return;
+      const [theoResponse, quoteResults] = await Promise.all([
+        fetch("/api/tradingview/theo-price", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          cache: "no-store",
+          body: JSON.stringify({
+            symbol: optionRootSymbol,
+            spot: Number.isFinite(spotFallback) ? spotFallback : null,
+            legs: selectedScenarioOrder.legs ?? []
+          })
+        }),
+        Promise.allSettled(
+          [...groupLegs.entries()].map(async ([key, group]) => {
+            const strikes = group.strikes.filter((value) => Number.isFinite(value) && value > 0);
+            if (!strikes.length) {
+              return [key, []];
             }
 
-            if (current?.[leg.id]) {
-              next[leg.id] = current[leg.id];
-            }
-          });
+            const minStrike = Math.min(...strikes);
+            const maxStrike = Math.max(...strikes);
+            const padding = Math.max((maxStrike - minStrike) * 0.15, chainSpot > 200 ? 5 : 1);
+            const strikeMin = Math.max(minStrike - padding, 0.01);
+            const strikeMax = Math.max(maxStrike + padding, strikeMin);
+            const limit = Math.max(strikes.length * 12, 60);
 
-          return next;
-        });
-        setLiveOptionLegQuotesUpdatedAt(new Date().toISOString());
-      } catch (_error) {
-        // Keep the last known live quotes visible if the lightweight poll fails.
-      } finally {
-        inFlight = false;
+            const url = `/api/options/chain?symbol=${encodeURIComponent(optionRootSymbol)}&expiration=${encodeURIComponent(
+              group.expiration
+            )}&optionType=${encodeURIComponent(group.optionType)}&strikeMin=${encodeURIComponent(
+              strikeMin
+            )}&strikeMax=${encodeURIComponent(strikeMax)}&limit=${encodeURIComponent(limit)}`;
+            const response = await fetch(url, {
+              cache: "no-store"
+            });
+            const payload = await response.json().catch(() => null);
+
+            if (!response.ok) {
+              throw new Error(payload?.error || "Unable to load current option marks");
+            }
+
+            return [key, Array.isArray(payload?.contracts) ? payload.contracts : []];
+          })
+        )
+      ]);
+
+      const theoPayload = await theoResponse.json().catch(() => null);
+      if (!theoResponse.ok) {
+        throw new Error(theoPayload?.error || "Unable to load current underlying spot");
       }
+
+      const contractsByGroup = new Map();
+      quoteResults.forEach((result) => {
+        if (result.status !== "fulfilled") {
+          return;
+        }
+
+        const [key, contracts] = result.value ?? [];
+        if (key) {
+          contractsByGroup.set(key, Array.isArray(contracts) ? contracts : []);
+        }
+      });
+
+      const nextQuotes = {};
+      optionLegs.forEach((leg) => {
+        const expiration = String(leg?.expiry ?? "").trim();
+        const optionType = String(leg?.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
+        const key = buildChainKey(optionRootSymbol, expiration, optionType);
+        const contracts = contractsByGroup.get(key) ?? [];
+        const targetContractSymbol = String(leg?.contractSymbol ?? "").trim();
+        const matched =
+          (targetContractSymbol
+            ? contracts.find((contract) => String(contract?.contractSymbol ?? "").trim() === targetContractSymbol)
+            : null) ??
+          contracts.find((contract) => {
+            const contractStrike = Number(contract?.strike ?? NaN);
+            return Number.isFinite(contractStrike) && Math.abs(contractStrike - Number(leg.strike ?? 0)) < 0.01;
+          }) ??
+          null;
+
+        if (!matched) {
+          return;
+        }
+
+        const bidValue = Number(matched.bid ?? NaN);
+        const askValue = Number(matched.ask ?? NaN);
+        const markValue =
+          Number(matched.mark ?? NaN) ||
+          (Number.isFinite(bidValue) && Number.isFinite(askValue) ? (bidValue + askValue) / 2 : null);
+
+        nextQuotes[leg.id] = {
+          bid: matched.bid ?? null,
+          ask: matched.ask ?? null,
+          bidSize: matched.bidSize ?? null,
+          askSize: matched.askSize ?? null,
+          volume: matched.volume ?? null,
+          openInterest: matched.openInterest ?? null,
+          impliedVolatility: matched.impliedVolatility ?? null,
+          mark: markValue,
+          sourceLabel: matched.sourceLabel ?? matched.source ?? null,
+          isLive: matched.isLive === true,
+          hasRealBidAsk: matched.hasRealBidAsk === true
+        };
+      });
+
+      const nextSpot = Number(theoPayload?.spot ?? NaN);
+      const nextTheo = Number(theoPayload?.theoPrice ?? NaN);
+      const refreshedAt = new Date().toISOString();
+
+      setLiveTheoPrice(Number.isFinite(nextTheo) ? nextTheo : null);
+      setLiveOptionLegQuotes(nextQuotes);
+      setLiveOptionLegQuotesUpdatedAt(refreshedAt);
+      let refreshedScenarioOrder = null;
+      setScenarioOrderDraft((current) => {
+        const baseOrder = current ?? cloneTradingViewScenarioOrder(baseScenarioOrder);
+        if (!baseOrder) {
+          refreshedScenarioOrder = baseOrder;
+          return baseOrder;
+        }
+
+        refreshedScenarioOrder = {
+          ...baseOrder,
+          valuationContext: {
+            ...(baseOrder.valuationContext ?? {}),
+            currentProxySpot:
+              Number.isFinite(nextSpot) && nextSpot > 0
+                ? nextSpot
+                : Number(baseOrder.valuationContext?.currentProxySpot ?? 0),
+            currentUnderlyingSpot:
+              Number.isFinite(nextSpot) && nextSpot > 0
+                ? nextSpot
+                : Number(baseOrder.valuationContext?.currentUnderlyingSpot ?? 0)
+          },
+          legs: (baseOrder.legs ?? []).map((leg) => {
+            const refreshedQuote = nextQuotes[leg.id];
+            if (!refreshedQuote) {
+              return leg;
+            }
+
+            return {
+              ...leg,
+              bid: refreshedQuote.bid,
+              ask: refreshedQuote.ask,
+              bidSize: refreshedQuote.bidSize,
+              askSize: refreshedQuote.askSize,
+              volume: refreshedQuote.volume,
+              openInterest: refreshedQuote.openInterest,
+              currentPrice: refreshedQuote.mark,
+              impliedVolatility:
+                Number(refreshedQuote.impliedVolatility ?? NaN) > 0
+                  ? Number(refreshedQuote.impliedVolatility)
+                  : leg.impliedVolatility,
+              quoteSource: refreshedQuote.sourceLabel ?? leg.quoteSource,
+              isLive: refreshedQuote.isLive,
+              hasRealBidAsk: refreshedQuote.hasRealBidAsk
+            };
+          })
+        };
+        return refreshedScenarioOrder;
+      });
+      const refreshedBenchmark = refreshedScenarioOrder
+        ? buildPaperTradeHeatmapBenchmark(refreshedScenarioOrder, refreshedAt)
+        : null;
+      if (selectedRow?.id != null && refreshedBenchmark) {
+        setScenarioMetricOverridesByRowId((current) => ({
+          ...current,
+          [String(selectedRow.id)]: {
+            maxProfit: refreshedBenchmark.maxPositivePnl,
+            maxLoss: refreshedBenchmark.minNegativePnl
+          }
+        }));
+      }
+      setScenarioMarkRefreshState({
+        tone: "success",
+        message: `Marks refreshed at ${formatShortTime(refreshedAt)}`
+      });
+      setScenarioMarkRefreshNonce((current) => current + 1);
+    } catch (error) {
+      setScenarioMarkRefreshState({
+        tone: "error",
+        message: error.message
+      });
+    } finally {
+      setScenarioMarkRefreshBusy(false);
     }
-
-    void refreshLiveOptionQuotes();
-    const interval = window.setInterval(() => {
-      void refreshLiveOptionQuotes();
-    }, LIVE_OPTION_QUOTES_POLL_MS);
-
-    return () => {
-      cancelled = true;
-      controller?.abort();
-      window.clearInterval(interval);
-    };
-  }, [detailCollapsed, optionLegQuoteSignature, optionRootSymbol, selectedScenarioOrder, selectedRow?.id]);
+  }
 
   useEffect(() => {
     if (!sortedRows.length) {
@@ -2167,6 +2240,12 @@ export default function TradingViewStrategyWorkspace({
 
   useEffect(() => {
     setScenarioOrderDraft(baseScenarioOrder ? cloneTradingViewScenarioOrder(baseScenarioOrder) : null);
+    setLiveTheoPrice(null);
+    setLiveOptionLegQuotes({});
+    setLiveOptionLegQuotesUpdatedAt(null);
+    setScenarioMarkRefreshBusy(false);
+    setScenarioMarkRefreshState(null);
+    setScenarioMarkRefreshNonce(0);
     setStrategyDirection(inferStrategyDirection(baseScenarioOrder?.strategyType));
     setStrategyEditorOpen(false);
     setActiveLegId("");
@@ -2727,7 +2806,7 @@ export default function TradingViewStrategyWorkspace({
         askSize: contract.askSize ?? leg.askSize ?? null,
         volume: contract.volume ?? leg.volume ?? null,
         openInterest: contract.openInterest ?? leg.openInterest ?? null,
-        quoteSource: contract.sourceLabel ?? contract.source ?? leg.quoteSource ?? "Market data",
+        quoteSource: contract.sourceLabel ?? contract.source ?? leg.quoteSource ?? "TradingView",
         isLive: contract.isLive === true,
         hasRealBidAsk: contract.hasRealBidAsk === true
       });
@@ -2762,6 +2841,25 @@ export default function TradingViewStrategyWorkspace({
           execution
         })
       );
+      if (createResponse?.order?.id && selectedRow?.scannerRunId && selectedRow?.scannerCandidateId) {
+        fetch("/api/scanners/tradingview-finder/promotions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            scannerRunId: selectedRow.scannerRunId,
+            scannerCandidateId: selectedRow.scannerCandidateId,
+            paperOrderId: createResponse.order.id,
+            symbol: selectedRow.intelligence?.symbol ?? selectedRow.underlyingSymbol,
+            strategyType: selectedRow.strategyTypeKey,
+            promotionStatus: "paper_trade",
+            notes: {
+              source: "TradingView finder"
+            }
+          })
+        }).catch(() => null);
+      }
       const pendingConfirmation = getPendingConfirmation(createResponse?.order);
 
       setPaperOrderState({
@@ -2842,6 +2940,7 @@ export default function TradingViewStrategyWorkspace({
 
   function saveFilters() {
     persistSavedFilters(TRADING_VIEW_FILTERS_STORAGE_KEY, {
+      visibleColumnKeys,
       symbolInput,
       dateFrom,
       dateTo,
@@ -2953,6 +3052,101 @@ export default function TradingViewStrategyWorkspace({
         </span>
       </button>
     );
+  }
+
+  function renderTradingViewTableCell(row, columnKey) {
+    const marketBias = inferTradingViewMarketBias(row.strategyTypeKey);
+
+    switch (columnKey) {
+      case "expiration":
+        return row.expiration || "n/a";
+      case "days":
+        return row.daysToExpiration ?? "n/a";
+      case "assetLabel":
+        return getTradingViewAssetLabel(row) || "n/a";
+      case "strategyType":
+        return <strong>{row.strategyTypeLabel}</strong>;
+      case "ivRank":
+        return (
+          <span className={getMetricTone(row.intelligence?.volatility?.ivRank52w, { kind: "threshold", threshold: 60 })}>
+            {row.intelligence?.volatility?.ivRank52w == null ? "n/a" : formatNumber(row.intelligence?.volatility?.ivRank52w, 0)}
+          </span>
+        );
+      case "evPerBuyingPower":
+        return (
+          <span className={getMetricTone(row.intelligence?.ev?.evPerBuyingPower, { kind: "threshold", threshold: 0.1 })}>
+            {row.intelligence?.ev?.evPerBuyingPower == null ? "n/a" : formatNumber(row.intelligence?.ev?.evPerBuyingPower, 3)}
+          </span>
+        );
+      case "signalFreshness":
+        return <span className={`bias-pill bias-pill--${marketBias.tone}`}>{row.intelligence?.signalFreshness ?? "fresh"}</span>;
+      case "normalizedOptionVolume":
+        return formatCompactCount(row.normalizedOptionVolume);
+      case "historicalWinRate":
+        return formatPercent(row.probabilityOfProfit);
+      case "regimeFit":
+        return (
+          <span className={getMetricTone(row.intelligence?.volatility?.ivRank52w, { kind: "threshold", threshold: 60 })}>
+            {row.intelligence?.volatility?.ivRank52w == null ? "n/a" : row.intelligence?.volatility?.ivRank52w >= 60 ? "Aligned" : "Neutral"}
+          </span>
+        );
+      case "rankDrift":
+        return (
+          <span className={getMetricTone(row.intelligence?.rankDrift?.scoreDelta, { kind: "threshold", threshold: 0 })}>
+            {row.intelligence?.rankDrift?.trend === "new"
+              ? "New"
+              : row.intelligence?.rankDrift?.scoreDelta == null
+                ? "Stable"
+                : `${row.intelligence?.rankDrift?.scoreDelta > 0 ? "+" : ""}${formatNumber(row.intelligence?.rankDrift?.scoreDelta, 2)}`}
+          </span>
+        );
+      case "portfolioImpact":
+        return (
+          <span
+            className={`bias-pill bias-pill--${row.intelligence?.portfolioImpact?.correlationOverlap === "high" ? "bearish" : row.intelligence?.portfolioImpact?.correlationOverlap === "medium" ? "balanced" : "bullish"}`}
+            title={`Cluster ${row.intelligence?.portfolioImpact?.correlationCluster ?? "n/a"} · Overlap ${row.intelligence?.portfolioImpact?.correlationOverlap ?? "n/a"}`}
+          >
+            {row.intelligence?.portfolioImpact?.correlationOverlap ?? "n/a"}
+          </span>
+        );
+      case "formula":
+        return (
+          <div className="tv-finder__formula">
+            {(row.legs ?? []).map((leg) => (
+              <span
+                key={`${row.id}:${leg.contractSymbol}:${leg.action}`}
+                className={`formula-pill formula-pill--${leg.optionType === "put" ? "put" : "call"}`}
+              >
+                {formatStrategyLegLabel(leg)}
+              </span>
+            ))}
+          </div>
+        );
+      case "probabilityOfProfit":
+        return (
+          <span className={getMetricTone(row.probabilityOfProfit, { kind: "threshold", threshold: 50 })}>
+            {formatPercent(row.probabilityOfProfit)}
+          </span>
+        );
+      case "maxProfit":
+        return <span className={getMetricTone(row.maxProfit)}>{formatCurrency(row.maxProfit)}</span>;
+      case "maxLoss":
+        return <span className={getMetricTone(row.maxLoss, { kind: "cost" })}>{formatCurrency(row.maxLoss)}</span>;
+      case "rewardRisk":
+        return <span className={getMetricTone(row.rewardRisk, { kind: "threshold", threshold: 1 })}>{formatNumber(row.rewardRisk)}</span>;
+      case "breakevens":
+        return row.breakevens?.length ? row.breakevens.map((value) => formatCurrency(value)).join(", ") : "n/a";
+      case "theoPrice":
+        return formatCurrency(row.theoreticalPrice);
+      case "bid":
+        return formatCurrency(row.bid);
+      case "ask":
+        return formatCurrency(row.ask);
+      case "bidAskSpread":
+        return <span className={getMetricTone(row.bidAskSpreadPercent, { kind: "cost" })}>{formatPercent(row.bidAskSpreadPercent)}</span>;
+      default:
+        return "n/a";
+    }
   }
 
   return (
@@ -3774,6 +3968,46 @@ export default function TradingViewStrategyWorkspace({
             >
               Save filters
             </button>
+
+            <details
+              className="finder-menu tv-finder__compact-menu"
+              ref={(node) => setFilterMenuRef("columns", node)}
+              onToggle={() => handleFilterMenuToggle("columns")}
+            >
+              <summary className="finder-control tv-finder__filter-control">
+                <span>Columns</span>
+              </summary>
+              <div className="finder-menu__panel">
+                <div className="finder-menu__header">
+                  <strong>Visible columns</strong>
+                  <div className="finder-menu__header-actions">
+                    <button type="button" className="finder-menu__reset" onClick={showDefaultColumns}>
+                      Default
+                    </button>
+                    <button type="button" className="finder-menu__reset" onClick={showAllColumns}>
+                      All
+                    </button>
+                  </div>
+                </div>
+
+                <div className="finder-menu__list">
+                  {TRADING_VIEW_TABLE_COLUMNS.map((column) => {
+                    const isActive = visibleColumnKeys.includes(column.key);
+                    return (
+                      <button
+                        key={column.key}
+                        type="button"
+                        className={`finder-menu__option ${isActive ? "finder-menu__option--active" : ""}`}
+                        onClick={() => toggleVisibleColumn(column.key)}
+                        disabled={isActive && visibleColumnKeys.length === 1}
+                      >
+                        <span>{column.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </details>
           </div>
         </form>
 
@@ -3784,6 +4018,27 @@ export default function TradingViewStrategyWorkspace({
 
       {error ? (
         <div className="screening-v2__notice screening-v2__notice--error">{error}</div>
+      ) : null}
+
+      {payload?.marketRegime ? (
+        <section className="selection-banner tv-finder__selection-banner">
+          <div className="selection-banner__title">
+            <span className="brand__eyebrow">Current market regime</span>
+            <strong>
+              {payload.marketRegime.volatilityRegime} / {payload.marketRegime.trendRegime} / {payload.marketRegime.marketRegime}
+            </strong>
+          </div>
+          <div className="selection-banner__actions">
+            <div className="detail-badges">
+              {(payload.marketRegime.recommended ?? []).map((item) => (
+                <span key={`tv-regime:${item}`} className="pill pill--live">{item}</span>
+              ))}
+              {(payload.marketRegime.avoid ?? []).slice(0, 2).map((item) => (
+                <span key={`tv-avoid:${item}`} className="pill pill--ghost">Avoid: {item}</span>
+              ))}
+            </div>
+          </div>
+        </section>
       ) : null}
 
       <section className="insight-card screening-v2__table-card">
@@ -3798,94 +4053,32 @@ export default function TradingViewStrategyWorkspace({
 	          <div className="screening-v2__table-wrap">
 	            <table className="screening-v2__table tv-finder__table">
 	              <colgroup>
-	                {TRADING_VIEW_TABLE_COLUMNS.map((column) => (
+	                {visibleColumns.map((column) => (
 	                  <col key={column.key} style={{ width: `${column.width}px` }} />
 	                ))}
 	              </colgroup>
 	              <thead>
 	                <tr>
-	                  {TRADING_VIEW_TABLE_COLUMNS.map((column) => (
+	                  {visibleColumns.map((column) => (
 	                    <th key={column.key}>{renderSortHeader(column.key, column.label)}</th>
 	                  ))}
 	                </tr>
 	              </thead>
               <tbody>
                 {sortedRows.map((row) => {
-                  const isSelected = row.id === selectedRowId;
-                  const marketBias = inferTradingViewMarketBias(row.strategyTypeKey);
+                  const displayRow = getDisplayRow(row);
+                  const isSelected = displayRow.id === selectedRowId;
 
                   return (
-                    <Fragment key={row.id}>
+                    <Fragment key={displayRow.id}>
                       <tr
                         aria-expanded={isSelected && !detailCollapsed}
                         className={isSelected ? "screening-v2__table-row--active" : ""}
-                        onClick={() => handleRowSelect(row.id)}
+                        onClick={() => handleRowSelect(displayRow.id)}
 	                      >
-	                        <td>{row.expiration || "n/a"}</td>
-	                        <td>{row.daysToExpiration ?? "n/a"}</td>
-	                        <td>{getTradingViewAssetLabel(row) || "n/a"}</td>
-	                        <td>
-	                          <strong>{row.strategyTypeLabel}</strong>
-	                        </td>
-	                        <td>
-	                          <span className={`bias-pill bias-pill--${marketBias.tone}`}>{marketBias.label}</span>
-	                        </td>
-	                        <td>
-                          <div className="tv-finder__formula">
-                            {(row.legs ?? []).map((leg) => (
-                              <span
-                                key={`${row.id}:${leg.contractSymbol}:${leg.action}`}
-                                className={`formula-pill formula-pill--${leg.optionType === "put" ? "put" : "call"}`}
-                              >
-                                {formatStrategyLegLabel(leg)}
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-	                        <td>{formatCompactCount(row.normalizedOptionVolume)}</td>
-	                        <td>
-	                          <span className={getTradingViewMidMinusTheoTone(row)}>
-	                            {formatNumber(getTradingViewMidMinusTheo(row))}
-	                          </span>
-	                        </td>
-	                        <td>
-	                          <span
-	                            className={getMetricTone(row.probabilityOfProfit, {
-	                              kind: "threshold",
-	                              threshold: 50
-	                            })}
-	                          >
-	                            {formatPercent(row.probabilityOfProfit)}
-	                          </span>
-	                        </td>
-	                        <td>
-	                          <span className={getMetricTone(row.maxProfit)}>
-	                            {formatCurrency(row.maxProfit)}
-	                          </span>
-	                        </td>
-	                        <td>
-                          <span className={getMetricTone(row.maxLoss, { kind: "cost" })}>
-                            {formatCurrency(row.maxLoss)}
-                          </span>
-                        </td>
-                        <td>
-                          <span className={getMetricTone(row.rewardRisk, { kind: "threshold", threshold: 1 })}>
-                            {formatNumber(row.rewardRisk)}
-                          </span>
-                        </td>
-                        <td>
-                          {row.breakevens?.length
-                            ? row.breakevens.map((value) => formatCurrency(value)).join(", ")
-                            : "n/a"}
-                        </td>
-                        <td>{formatCurrency(row.theoreticalPrice)}</td>
-                        <td>{formatCurrency(row.bid)}</td>
-                        <td>{formatCurrency(row.ask)}</td>
-                        <td>
-                          <span className={getMetricTone(row.bidAskSpreadPercent, { kind: "cost" })}>
-	                            {formatPercent(row.bidAskSpreadPercent)}
-	                          </span>
-	                        </td>
+	                        {visibleColumns.map((column) => (
+                            <td key={`${displayRow.id}:${column.key}`}>{renderTradingViewTableCell(displayRow, column.key)}</td>
+                          ))}
 	                      </tr>
 
                       {isSelected && !detailCollapsed ? (
@@ -3922,6 +4115,14 @@ export default function TradingViewStrategyWorkspace({
                                   <span className="pill pill--ghost">
                                     Live theo {formatCurrency(liveTheoPrice ?? row.theoreticalPrice)}
                                   </span>
+                                  <button
+                                    type="button"
+                                    className={`chart-toggle ${scenarioMarkRefreshBusy ? "chart-toggle--active" : ""}`}
+                                    onClick={() => void handleRefreshScenarioMarks()}
+                                    disabled={scenarioMarkRefreshBusy || !selectedScenarioOrder}
+                                  >
+                                    {scenarioMarkRefreshBusy ? "Refreshing..." : "Refresh marks"}
+                                  </button>
                                 </div>
                                 <button
                                   type="button"
@@ -3950,6 +4151,12 @@ export default function TradingViewStrategyWorkspace({
                                       ) : null}
                                       {row.score != null ? (
                                         <span className="pill pill--live">Score {formatNumber(row.score, 3)}</span>
+                                      ) : null}
+                                      {row.intelligence?.rankDrift?.appearances ? (
+                                        <span className="pill pill--ghost">{row.intelligence.rankDrift.appearances} scans seen</span>
+                                      ) : null}
+                                      {row.intelligence?.rankDrift?.trend && row.intelligence.rankDrift.trend !== "new" ? (
+                                        <span className="pill pill--ghost">Drift {row.intelligence.rankDrift.trend}</span>
                                       ) : null}
                                     </div>
                                   </div>
@@ -3986,6 +4193,12 @@ export default function TradingViewStrategyWorkspace({
                                     ) : null}
                                   </div>
                                 </div>
+
+                                {scenarioMarkRefreshState ? (
+                                  <div className={`refresh-feedback refresh-feedback--${scenarioMarkRefreshState.tone}`}>
+                                    <span>{scenarioMarkRefreshState.message}</span>
+                                  </div>
+                                ) : null}
 
                                 {paperOrderState ? (
                                   <div className={`refresh-feedback refresh-feedback--${paperOrderState.tone}`}>
@@ -4681,14 +4894,14 @@ export default function TradingViewStrategyWorkspace({
                                       </div>
                                       <div className="summary-row">
                                         <span>Max profit</span>
-                                        <strong className={getMetricTone(row.maxProfit)}>
-                                          {formatCurrency(row.maxProfit)}
+                                        <strong className={getMetricTone(displayRow.maxProfit)}>
+                                          {formatCurrency(displayRow.maxProfit)}
                                         </strong>
                                       </div>
                                       <div className="summary-row">
                                         <span>Max loss</span>
-                                        <strong className={getMetricTone(row.maxLoss, { kind: "cost" })}>
-                                          {formatCurrency(row.maxLoss)}
+                                        <strong className={getMetricTone(displayRow.maxLoss, { kind: "cost" })}>
+                                          {formatCurrency(displayRow.maxLoss)}
                                         </strong>
                                       </div>
                                       <div className="summary-row">
@@ -4810,7 +5023,8 @@ export default function TradingViewStrategyWorkspace({
                               {selectedScenarioOrder ? (
                                 <PaperTradeScenarioPanel
                                   order={selectedScenarioOrder}
-                                  lastUpdated={payload?.generatedAt}
+                                  lastUpdated={liveOptionLegQuotesUpdatedAt ?? payload?.generatedAt}
+                                  refreshNonce={scenarioMarkRefreshNonce}
                                   className="paper-scenario-card--screening"
                                   defaultOpen={true}
                                   theme={theme}

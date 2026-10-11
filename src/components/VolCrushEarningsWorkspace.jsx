@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createMarketTimerContext } from "../marketTimers.js";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
 
@@ -296,6 +297,22 @@ export default function VolCrushEarningsWorkspace({
     () => buildScenarioOrderFromVolCrushRow(selectedRow, payload?.generatedAt),
     [payload?.generatedAt, selectedRow]
   );
+  const executionQualityContracts = useMemo(
+    () =>
+      (selectedRow?.optionLegs ?? [])
+        .filter((leg) => String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.contractSymbol ||
+            `${selectedRow?.symbol || "Option"} ${index + 1} · ${leg.expiration || "n/a"} · ${leg.strike}${String(
+              leg.optionType ?? "call"
+            )
+              .slice(0, 1)
+              .toUpperCase()}`
+        })),
+    [selectedRow?.optionLegs, selectedRow?.symbol]
+  );
   const marketTimerContext = useMemo(() => {
     if (!selectedRow) {
       return null;
@@ -413,6 +430,7 @@ export default function VolCrushEarningsWorkspace({
       const createResponse = await onCreatePaperOrder({
         strategyId: strategyDefinition?.id ?? "strategy-2",
         strategyName: strategyDefinition?.name ?? "Vol Crush Earnings",
+        strategySource: "Vol Crush",
         combinationId: selectedRow.id,
         combinationLabel: `${selectedRow.symbol} · ${selectedRow.strategyType} · ${selectedRow.expiration}`,
         assetLabel: selectedRow.symbol,
@@ -838,6 +856,8 @@ export default function VolCrushEarningsWorkspace({
                   </div>
                 </div>
               </section>
+
+              <OptionMicrostructurePanel contracts={executionQualityContracts} />
             </div>
           </article>
 

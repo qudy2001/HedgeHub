@@ -15,6 +15,7 @@ COPY src ./src
 COPY server ./server
 COPY shared ./shared
 COPY defaults ./defaults
+COPY db ./db
 
 RUN npm run build \
   && npm prune --omit=dev
@@ -26,15 +27,20 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8787
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
 COPY --from=build /app/shared ./shared
 COPY --from=build /app/defaults ./defaults
+COPY --from=build /app/db ./db
 
 RUN mkdir -p /app/data /app/dashboards
 
 EXPOSE 8787
 
-CMD ["node", "server/index.js"]
+CMD ["node", "server/main.js"]

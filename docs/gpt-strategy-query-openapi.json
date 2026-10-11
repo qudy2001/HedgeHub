@@ -1,0 +1,1119 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HedgeHub Programmatic API",
+    "version": "1.1.0",
+    "description": "Programmatic HedgeHub endpoints for GPT strategy queries and daily market-data snapshots. Authentication uses the x-api-key header."
+  },
+  "servers": [
+    {
+      "url": "http://YOUR_HOST:8788"
+    }
+  ],
+  "paths": {
+    "/api/gpt/strategy-query": {
+      "post": {
+        "operationId": "queryStrategies",
+        "summary": "Query strategy scanners for a ticker",
+        "description": "Returns grouped results from Threshold Hedge, TradingView Scanner, and Covered Income.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyQueryRequest"
+              },
+              "example": {
+                "ticker": "AAPL",
+                "optionExpirationStartDate": "2026-06-01",
+                "optionExpirationEndDate": "2026-07-31",
+                "expectedPriceRangeLow": 185,
+                "expectedPriceRangeHigh": 215,
+                "topX": 5
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyQueryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/market-data": {
+      "get": {
+        "operationId": "getMarketDataSnapshot",
+        "summary": "Get a daily technical analysis snapshot for a ticker",
+        "description": "Returns a daily OHLCV snapshot with RSI, MACD, Bollinger Bands, ATR, and 50-day/200-day moving averages for the requested ticker. Authentication uses the x-api-key header.",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "description": "Ticker symbol, for example AAPL or NVDA.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": false,
+            "description": "Candle interval. Only daily candles are currently supported.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1d"
+              ],
+              "default": "1d"
+            }
+          },
+          {
+            "name": "look_back_days",
+            "in": "query",
+            "required": false,
+            "description": "Number of calendar days to include in the daily technical snapshot.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 180
+            }
+          },
+          {
+            "name": "curr_date",
+            "in": "query",
+            "required": false,
+            "description": "Snapshot end date in YYYY-MM-DD format. Defaults to the server's current date.",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketDataSnapshotResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No market data found for the requested symbol/date window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream market data provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key"
+      }
+    },
+    "schemas": {
+      "StrategyQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ticker",
+          "optionExpirationStartDate",
+          "optionExpirationEndDate",
+          "expectedPriceRangeLow",
+          "expectedPriceRangeHigh"
+        ],
+        "properties": {
+          "ticker": {
+            "type": "string",
+            "description": "Underlying ticker symbol.",
+            "examples": [
+              "AAPL",
+              "SPY",
+              "TSLA"
+            ]
+          },
+          "optionExpirationStartDate": {
+            "type": "string",
+            "format": "date",
+            "description": "Start of option expiration window in YYYY-MM-DD."
+          },
+          "optionExpirationEndDate": {
+            "type": "string",
+            "format": "date",
+            "description": "End of option expiration window in YYYY-MM-DD."
+          },
+          "expectedPriceRangeLow": {
+            "type": "number",
+            "description": "Expected underlying price low."
+          },
+          "expectedPriceRangeHigh": {
+            "type": "number",
+            "description": "Expected underlying price high."
+          },
+          "topX": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional per-scanner result cap. For example, topX=5 returns up to 5 ranked results from each scanner."
+          }
+        }
+      },
+      "StrategyQueryResponse": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "generatedAt",
+          "request",
+          "meta",
+          "results"
+        ],
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request": {
+            "$ref": "#/components/schemas/StrategyQueryRequest"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          },
+          "results": {
+            "$ref": "#/components/schemas/StrategyResults"
+          }
+        }
+      },
+      "ResponseMeta": {
+        "type": "object",
+        "required": [
+          "authenticatedUserId",
+          "authenticatedUsername",
+          "scannersQueried",
+          "partialResults",
+          "warnings"
+        ],
+        "properties": {
+          "authenticatedUserId": {
+            "type": "string"
+          },
+          "authenticatedUsername": {
+            "type": "string"
+          },
+          "scannersQueried": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "partialResults": {
+            "type": "boolean"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StrategyResults": {
+        "type": "object",
+        "required": [
+          "thresholdHedge",
+          "tradingViewScanner",
+          "coveredIncome"
+        ],
+        "properties": {
+          "thresholdHedge": {
+            "$ref": "#/components/schemas/ThresholdHedgeSection"
+          },
+          "tradingViewScanner": {
+            "$ref": "#/components/schemas/TradingViewSection"
+          },
+          "coveredIncome": {
+            "$ref": "#/components/schemas/CoveredIncomeSection"
+          }
+        }
+      },
+      "ThresholdHedgeSection": {
+        "type": "object",
+        "required": [
+          "count",
+          "items",
+          "warnings"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThresholdHedgeItem"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ThresholdHedgeItem": {
+        "type": "object",
+        "properties": {
+          "strategyId": {
+            "type": "string"
+          },
+          "scannerType": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "yesPrice": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "optionSymbol": {
+            "type": "string"
+          },
+          "optionReference": {
+            "type": "string"
+          },
+          "optionType": {
+            "type": "string"
+          },
+          "optionStrike": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "optionExpiry": {
+            "type": "string"
+          },
+          "liveOptionPrice": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "optionPriceSource": {
+            "type": "string"
+          },
+          "theoreticalOptionPriceAtTarget": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "targetUnderlyingValue": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "projectedProxyTarget": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "projectedProfit": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "TradingViewSection": {
+        "type": "object",
+        "required": [
+          "count",
+          "items",
+          "warnings"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TradingViewItem"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TradingViewItem": {
+        "type": "object",
+        "required": [
+          "strategyId",
+          "scannerType",
+          "rowId",
+          "ticker",
+          "strategyTypeKey",
+          "strategyTypeLabel",
+          "expiration",
+          "daysToExpiration",
+          "legs",
+          "entryPrice",
+          "bid",
+          "ask",
+          "bidAskSpreadPercent",
+          "maxProfit",
+          "maxLoss",
+          "rewardRisk",
+          "probabilityOfProfit",
+          "breakevens",
+          "underlyingPrice",
+          "averageImpliedVolatility",
+          "normalizedOptionVolume",
+          "normalizedOptionOpenInterest",
+          "score",
+          "pageUrl",
+          "intelligence"
+        ],
+        "properties": {
+          "scannerCandidateId": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scannerRunId": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "strategyId": {
+            "type": "string"
+          },
+          "scannerType": {
+            "type": "string"
+          },
+          "rowId": {
+            "type": "string"
+          },
+          "ticker": {
+            "type": "string"
+          },
+          "strategyTypeKey": {
+            "type": "string"
+          },
+          "strategyTypeLabel": {
+            "type": "string"
+          },
+          "expiration": {
+            "type": "string"
+          },
+          "daysToExpiration": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "legs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TradingViewLeg"
+            }
+          },
+          "entryPrice": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "bid": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "ask": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "bidAskSpreadPercent": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "maxProfit": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "maxLoss": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rewardRisk": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "probabilityOfProfit": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "breakevens": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "underlyingPrice": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "averageImpliedVolatility": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "normalizedOptionVolume": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "normalizedOptionOpenInterest": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "pageUrl": {
+            "type": "string"
+          },
+          "intelligence": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "TradingViewLeg": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "optionType": {
+            "type": "string"
+          },
+          "strike": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "expiration": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": [
+              "integer",
+              "number",
+              "null"
+            ]
+          },
+          "bid": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "ask": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "mark": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "entryPrice": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "impliedVolatility": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "contractSymbol": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "CoveredIncomeSection": {
+        "type": "object",
+        "required": [
+          "count",
+          "items",
+          "warnings"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoveredIncomeItem"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CoveredIncomeItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "companyName": {
+            "type": "string"
+          },
+          "stockPrice": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "probabilityOfProfit": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "expiryDate": {
+            "type": "string"
+          },
+          "dte": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "strategyType": {
+            "type": "string"
+          },
+          "sharesRequired": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "contracts": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "put": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "call": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "premium": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "capital": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "returns": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "breakevens": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "priceZones": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "marketData": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "risk": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "score": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "detail": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "intelligence": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "MarketDataSnapshotResponse": {
+        "type": "object",
+        "required": [
+          "symbol",
+          "curr_date",
+          "look_back_days",
+          "candles",
+          "latest_candle",
+          "latest_indicators"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Normalized uppercase ticker symbol."
+          },
+          "curr_date": {
+            "type": "string",
+            "format": "date",
+            "description": "Snapshot end date used to filter the returned daily candles."
+          },
+          "look_back_days": {
+            "type": "integer",
+            "description": "Requested calendar-day window size."
+          },
+          "candles": {
+            "type": "array",
+            "description": "Daily OHLCV candles with technical indicator values attached for each returned day.",
+            "items": {
+              "$ref": "#/components/schemas/MarketDataCandle"
+            }
+          },
+          "latest_candle": {
+            "$ref": "#/components/schemas/LatestMarketCandle"
+          },
+          "latest_indicators": {
+            "$ref": "#/components/schemas/LatestTechnicalIndicators"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MarketDataCandle": {
+        "type": "object",
+        "required": [
+          "date",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "rsi",
+          "macd",
+          "macds",
+          "macdh",
+          "boll",
+          "boll_ub",
+          "boll_lb",
+          "atr",
+          "close_50_sma",
+          "close_200_sma"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "open": {
+            "type": "number"
+          },
+          "high": {
+            "type": "number"
+          },
+          "low": {
+            "type": "number"
+          },
+          "close": {
+            "type": "number"
+          },
+          "volume": {
+            "type": "number"
+          },
+          "rsi": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "macd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "macds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "macdh": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boll": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boll_ub": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boll_lb": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "atr": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "close_50_sma": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "close_200_sma": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "LatestMarketCandle": {
+        "type": "object",
+        "required": [
+          "date",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "open": {
+            "type": "number"
+          },
+          "high": {
+            "type": "number"
+          },
+          "low": {
+            "type": "number"
+          },
+          "close": {
+            "type": "number"
+          },
+          "volume": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LatestTechnicalIndicators": {
+        "type": "object",
+        "required": [
+          "rsi",
+          "macd",
+          "macds",
+          "macdh",
+          "boll",
+          "boll_ub",
+          "boll_lb",
+          "atr",
+          "close_50_sma",
+          "close_200_sma"
+        ],
+        "properties": {
+          "rsi": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "macd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "macds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "macdh": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boll": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boll_ub": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boll_lb": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "atr": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "close_50_sma": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "close_200_sma": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

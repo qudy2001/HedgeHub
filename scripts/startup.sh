@@ -4,7 +4,31 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
+load_env_files
 clear_stale_pid
+
+db_mode=""
+for arg in "$@"; do
+  case "${arg}" in
+    --local-db)
+      db_mode="local"
+      ;;
+    --docker-db)
+      db_mode="docker"
+      ;;
+  esac
+done
+
+if [[ -z "${db_mode}" ]]; then
+  if [[ "${DB_TYPE:-sqlite}" == "postgres" ]]; then
+    db_mode="$(read_db_mode)"
+    if [[ "${db_mode}" != "local" ]] && [[ "${db_mode}" != "docker" ]]; then
+      db_mode="docker"
+    fi
+  else
+    db_mode="sqlite"
+  fi
+fi
 
 current_pid="$(read_pid || true)"
 if is_running "${current_pid:-}"; then
@@ -17,11 +41,33 @@ require_dependencies
 
 cd "${ROOT_DIR}"
 
+if [[ "${DB_TYPE:-sqlite}" == "postgres" ]]; then
+  export DATABASE_URL="${DATABASE_URL:-$(postgres_database_url)}"
+  export POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+  export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+  export POSTGRES_DB="${POSTGRES_DB:-optionsdb}"
+  export POSTGRES_USER="${POSTGRES_USER:-postgres}"
+  export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
+
+  if [[ "${db_mode}" == "docker" ]]; then
+    echo "[DB] Starting PostgreSQL container..."
+    compose_cmd up -d postgres
+  fi
+
+  wait_for_postgres "${db_mode}"
+  echo "[DB] PostgreSQL ready"
+  check_timescaledb "${db_mode}"
+  run_db_init "${db_mode}"
+  record_db_mode "${db_mode}"
+else
+  record_db_mode "sqlite"
+fi
+
 echo "Building production assets..."
 npm run build
 
 echo "Starting HedgeHub on port ${DEFAULT_PORT}..."
-nohup env NODE_ENV=production PORT="${DEFAULT_PORT}" node server/index.js >> "${APP_LOG}" 2>&1 < /dev/null &
+nohup env NODE_ENV=production PORT="${DEFAULT_PORT}" DB_TYPE="${DB_TYPE:-sqlite}" node server/main.js >> "${APP_LOG}" 2>&1 < /dev/null &
 app_pid=$!
 disown "${app_pid}" 2>/dev/null || true
 echo "${app_pid}" > "${PID_FILE}"

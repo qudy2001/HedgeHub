@@ -83,6 +83,7 @@ export default function StrategyRail({
   const sidebarClassName = [
     "sidebar",
     isMobile ? "sidebar--mobile" : "",
+    !isMobile && !isOpen ? "sidebar--desktop-hidden" : "",
     isMobile && isOpen ? "sidebar--open" : "",
     isMobile && !isOpen ? "sidebar--hidden" : ""
   ]
@@ -100,7 +101,7 @@ export default function StrategyRail({
   }, []);
 
   return (
-    <aside id={sidebarId} className={sidebarClassName} aria-hidden={isMobile && !isOpen}>
+    <aside id={sidebarId} className={sidebarClassName} aria-hidden={!isOpen}>
       {isMobile ? (
         <div className="sidebar__mobile-bar">
           <span className="brand__eyebrow">Navigation</span>

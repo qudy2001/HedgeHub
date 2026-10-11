@@ -1,5 +1,6 @@
 import { tigerEnabled, tigerFundamentals } from "./providers/tiger.js";
 import { finiteNumber } from "./quoteQuality.js";
+
 const TRADING_VIEW_STOCK_SCAN_URL = "https://scanner.tradingview.com/america/scan";
 
 const FUNDAMENTAL_COLUMNS = [

@@ -29,6 +29,41 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeStrategySource(value) {
+  const trimmedValue = String(value ?? "").trim();
+  const normalizedValue = normalizeText(trimmedValue);
+
+  if (!normalizedValue) {
+    return "";
+  }
+
+  if (normalizedValue === "tradingview" || normalizedValue === "tradingview finder") {
+    return "TradingView finder";
+  }
+
+  if (normalizedValue === "covered-income-scanner" || normalizedValue === "covered income scanner") {
+    return "Covered Income Scanner";
+  }
+
+  if (normalizedValue === "delta-hedge" || normalizedValue === "delta hedge scanner") {
+    return "Delta Hedge Scanner";
+  }
+
+  if (normalizedValue === "strategy-finder" || normalizedValue === "finder" || normalizedValue === "strategy finder") {
+    return "Strategy Finder";
+  }
+
+  if (normalizedValue === "vol-crush" || normalizedValue === "vol crush" || normalizedValue === "vol crush earnings") {
+    return "Vol Crush";
+  }
+
+  if (normalizedValue === "screening" || normalizedValue === "strategy screening") {
+    return "Strategy Screening";
+  }
+
+  return trimmedValue;
+}
+
 function normalizeQuestionKey(value) {
   return String(value ?? "")
     .trim()
@@ -907,6 +942,9 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
   return {
     strategyId,
     strategyName,
+    strategySource: normalizeStrategySource(
+      source.strategySource ?? source.source ?? defaults.strategySource ?? defaults.source ?? ""
+    ),
     combinationId: String(source.combinationId ?? defaults.combinationId ?? `paper-${Date.now()}`),
     combinationLabel: String(source.combinationLabel ?? defaults.combinationLabel ?? "Paper trade"),
     assetLabel: String(source.assetLabel ?? defaults.assetLabel ?? ""),

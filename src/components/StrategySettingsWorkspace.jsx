@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import StrategySettingsMenu from "./StrategySettingsMenu.jsx";
 
 function formatCountLabel(count, singular, plural = `${singular}s`) {
@@ -7,7 +8,9 @@ function formatCountLabel(count, singular, plural = `${singular}s`) {
 export default function StrategySettingsWorkspace({
   strategyPayload,
   onSaveStrategyAssetMapping = null,
-  onDeleteStrategyAssetMapping = null
+  onDeleteStrategyAssetMapping = null,
+  isAdmin = false,
+  onAuthRequired = null
 }) {
   const strategySettingsAssets = strategyPayload?.strategySettings?.assets ?? [];
   const strategyCompareModes = strategyPayload?.strategySettings?.compareModes ?? ["price"];
@@ -15,6 +18,92 @@ export default function StrategySettingsWorkspace({
   const customAssetCount = strategySettingsAssets.filter((asset) => asset?.isCustom === true).length;
   const finderEnabledCount = strategySettingsAssets.filter((asset) => asset?.finderEnabled !== false).length;
   const screenerEnabledCount = strategySettingsAssets.filter((asset) => asset?.screenerEnabled !== false).length;
+  const [bridgeStatus, setBridgeStatus] = useState(null);
+  const [bridgeLoading, setBridgeLoading] = useState(false);
+  const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [bridgeError, setBridgeError] = useState("");
+
+  const loadBridgeStatus = useCallback(async () => {
+    if (!isAdmin) {
+      setBridgeStatus(null);
+      setBridgeError("");
+      return;
+    }
+
+    setBridgeLoading(true);
+    setBridgeError("");
+
+    try {
+      const response = await fetch("/api/admin/docker-diagnostics-bridge");
+      const payload = await response.json().catch(() => null);
+
+      if (response.status === 401) {
+        onAuthRequired?.("Session expired");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(payload?.error || `Failed to load Docker diagnostics bridge (${response.status})`);
+      }
+
+      setBridgeStatus(payload ?? null);
+    } catch (error) {
+      setBridgeError(error.message);
+    } finally {
+      setBridgeLoading(false);
+    }
+  }, [isAdmin, onAuthRequired]);
+
+  useEffect(() => {
+    void loadBridgeStatus();
+  }, [loadBridgeStatus]);
+
+  async function handleBridgeToggle(event) {
+    const enabled = Boolean(event.target.checked);
+    setBridgeBusy(true);
+    setBridgeError("");
+
+    try {
+      const response = await fetch("/api/admin/docker-diagnostics-bridge", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          enabled
+        })
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (response.status === 401) {
+        onAuthRequired?.("Session expired");
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(payload?.error || `Failed to update Docker diagnostics bridge (${response.status})`);
+      }
+
+      setBridgeStatus(payload ?? null);
+    } catch (error) {
+      setBridgeError(error.message);
+    } finally {
+      setBridgeBusy(false);
+    }
+  }
+
+  function formatTimestamp(value) {
+    if (!value) {
+      return "n/a";
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return "n/a";
+    }
+
+    return date.toLocaleString("en-GB");
+  }
 
   return (
     <main className="workspace workspace--strategy-settings">
@@ -74,6 +163,62 @@ export default function StrategySettingsWorkspace({
           onDeleteAsset={onDeleteStrategyAssetMapping}
         />
       </article>
+
+      {isAdmin ? (
+        <article className="insight-card strategy-settings__panel">
+          <div className="strategy-settings__page-head">
+            <div>
+              <span className="brand__eyebrow">Admin diagnostics</span>
+              <h3>Docker diagnostics bridge</h3>
+            </div>
+            <p className="card-copy">
+              Enable a read-only localhost TCP bridge that Codex can use to inspect this Docker Compose stack without
+              touching container files.
+            </p>
+          </div>
+
+          <div className="strategy-settings__bridge-card">
+            <div className="strategy-settings__bridge-actions">
+              <label className="strategy-settings__toggle">
+                <input
+                  type="checkbox"
+                  checked={bridgeStatus?.enabled === true}
+                  onChange={handleBridgeToggle}
+                  disabled={bridgeBusy || bridgeLoading}
+                />
+                <span>Bridge enabled</span>
+              </label>
+
+              <button type="button" className="chart-toggle" onClick={() => void loadBridgeStatus()} disabled={bridgeBusy}>
+                Refresh status
+              </button>
+
+              <span className={`pill ${bridgeStatus?.running ? "pill--live" : "pill--warning"}`}>
+                {bridgeLoading ? "Loading…" : bridgeStatus?.running ? "Running" : "Stopped"}
+              </span>
+            </div>
+
+            <div className="strategy-settings__bridge-grid">
+              <div>
+                <span>Bridge address</span>
+                <strong>{bridgeStatus?.bridgeUrl ?? "n/a"}</strong>
+              </div>
+              <div>
+                <span>Host port</span>
+                <strong>{bridgeStatus?.port ?? "n/a"}</strong>
+              </div>
+              <div>
+                <span>Last health check</span>
+                <strong>{formatTimestamp(bridgeStatus?.lastHealthCheckAt)}</strong>
+              </div>
+              <div className="strategy-settings__wide">
+                <span>Last error</span>
+                <strong>{bridgeError || bridgeStatus?.lastError || "n/a"}</strong>
+              </div>
+            </div>
+          </div>
+        </article>
+      ) : null}
     </main>
   );
 }

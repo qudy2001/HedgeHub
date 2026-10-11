@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
+import PaperPortfolioHistoryChart from "./PaperPortfolioHistoryChart.jsx";
 import PaperTradeHistoryChart from "./PaperTradeHistoryChart.jsx";
 import PaperTradeScenarioPanel, { buildPaperTradeHeatmapBenchmark } from "./PaperTradeScenarioPanel.jsx";
 import { countTradingDaysBetween } from "../tradingCalendar.js";
@@ -625,6 +627,12 @@ const CLOSED_ORDER_TABLE_COLUMNS = [
 ];
 
 const CLOSED_ORDER_TABLE_COLUMN_COUNT = CLOSED_ORDER_TABLE_COLUMNS.length;
+const PAPER_TRADING_TABS = new Set(["open", "history"]);
+const HISTORY_SCOPE_LABELS = {
+  open: "Open exposure",
+  closed: "Closed history",
+  combined: "Combined portfolio"
+};
 
 function getCreatedTimePart(value) {
   const match = String(value ?? "").match(/(\d{2}:\d{2}:\d{2})/);
@@ -643,6 +651,203 @@ function getTimestampValue(value) {
   const date = new Date(normalizedValue);
 
   return Number.isNaN(date.getTime()) ? Number.NEGATIVE_INFINITY : date.getTime();
+}
+
+function getPaperTradingTabFromUrl() {
+  if (typeof window === "undefined") {
+    return "open";
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const nextTab = String(params.get("tab") ?? "").trim().toLowerCase();
+  return PAPER_TRADING_TABS.has(nextTab) ? nextTab : "open";
+}
+
+function updatePaperTradingTabQuery(tab) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  url.searchParams.set("tab", tab);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function getOrderStrategySourceLabel(order) {
+  return String(order?.strategySource ?? order?.source ?? "").trim() || "Unknown source";
+}
+
+function getOrderStrategyTypeLabel(order) {
+  return String(order?.strategyType ?? "").trim() || "Custom";
+}
+
+function getOrderAssetFilterLabel(order) {
+  return (
+    String(order?.assetLabel ?? "").trim() ||
+    String(order?.valuationContext?.underlyingSymbol ?? "").trim() ||
+    String(order?.valuationContext?.proxySymbol ?? "").trim() ||
+    "Unknown asset"
+  );
+}
+
+function getOrderTagFilterLabel(order) {
+  return String(getOrderTagLabel(order) ?? "").trim() || "Unknown tag";
+}
+
+function getDateInputStartMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(`${value}T00:00:00.000Z`).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function getDateInputEndMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(`${value}T23:59:59.999Z`).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function isTimestampWithinRange(value, startDate, endDate) {
+  const timestamp = getTimestampValue(value);
+  if (!Number.isFinite(timestamp)) {
+    return false;
+  }
+
+  const startMs = getDateInputStartMs(startDate);
+  const endMs = getDateInputEndMs(endDate);
+
+  if (startMs != null && timestamp < startMs) {
+    return false;
+  }
+
+  if (endMs != null && timestamp > endMs) {
+    return false;
+  }
+
+  return true;
+}
+
+function getClosedOrderTimestamp(order) {
+  if (order?.closedAt) {
+    return order.closedAt;
+  }
+
+  if (order?.closedDate) {
+    return `${order.closedDate}T23:59:59.999Z`;
+  }
+
+  return "";
+}
+
+function getBucketStartIso(value, granularity) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const hour = date.getUTCHours();
+
+  if (granularity === "month") {
+    return new Date(Date.UTC(year, month, 1, 0, 0, 0, 0)).toISOString();
+  }
+
+  if (granularity === "week") {
+    const dayOfWeek = date.getUTCDay();
+    const diffToMonday = (dayOfWeek + 6) % 7;
+    return new Date(Date.UTC(year, month, day - diffToMonday, 0, 0, 0, 0)).toISOString();
+  }
+
+  if (granularity === "day") {
+    return new Date(Date.UTC(year, month, day, 0, 0, 0, 0)).toISOString();
+  }
+
+  return new Date(Date.UTC(year, month, day, hour, 0, 0, 0)).toISOString();
+}
+
+function formatPortfolioBucketLabel(value, granularity) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  if (granularity === "month") {
+    return new Intl.DateTimeFormat("en-GB", {
+      month: "short",
+      year: "numeric"
+    }).format(date);
+  }
+
+  if (granularity === "week") {
+    return `Week of ${new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short"
+    }).format(date)}`;
+  }
+
+  if (granularity === "day") {
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short"
+    }).format(date);
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function buildAggregatedPortfolioHistory(orders, { granularity, startDate, endDate }) {
+  const bucketMap = new Map();
+
+  for (const order of orders ?? []) {
+    const orderBucketMap = new Map();
+
+    for (const candle of order?.history?.candles ?? []) {
+      if (!isTimestampWithinRange(candle?.bucketStart, startDate, endDate)) {
+        continue;
+      }
+
+      const bucketStart = getBucketStartIso(candle.bucketStart, granularity);
+      if (!bucketStart) {
+        continue;
+      }
+
+      orderBucketMap.set(bucketStart, {
+        bucketStart,
+        close: Number(candle.close ?? 0) || 0
+      });
+    }
+
+    for (const orderBucket of orderBucketMap.values()) {
+      const existingBucket = bucketMap.get(orderBucket.bucketStart) ?? {
+        bucketStart: orderBucket.bucketStart,
+        date: orderBucket.bucketStart,
+        label: formatPortfolioBucketLabel(orderBucket.bucketStart, granularity),
+        pnl: 0
+      };
+
+      existingBucket.pnl += orderBucket.close;
+      bucketMap.set(orderBucket.bucketStart, existingBucket);
+    }
+  }
+
+  return [...bucketMap.values()]
+    .sort((left, right) => left.bucketStart.localeCompare(right.bucketStart))
+    .map((bucket) => ({
+      ...bucket,
+      pnl: Number(bucket.pnl.toFixed(2))
+    }));
 }
 
 function getPurchaseDateTimeSortValue(order) {
@@ -1067,6 +1272,7 @@ function OpenOrderDetails({
         onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
         theme={theme}
       />
+      <OptionMicrostructurePanel title="Execution Review" orderId={order.id} anchorLabel="Since entry" />
 
       <div className="paper-order-editbar">
         <label>
@@ -1458,6 +1664,7 @@ function ClosedOrderDetails({
         onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
         theme={theme}
       />
+      <OptionMicrostructurePanel title="Execution Review" orderId={order.id} anchorLabel="Since entry" />
 
       <div className="paper-order-editbar">
         <div className="paper-order-editbar__copy">
@@ -1709,12 +1916,97 @@ export default function PaperTradingWorkspace({
   const [expandedTreeOrderIds, setExpandedTreeOrderIds] = useState([]);
   const [openSortConfig, setOpenSortConfig] = useState({ key: null, direction: "asc" });
   const [closedSortConfig, setClosedSortConfig] = useState({ key: null, direction: "asc" });
+  const [activeTab, setActiveTab] = useState(() => getPaperTradingTabFromUrl());
+  const [historyScope, setHistoryScope] = useState("combined");
+  const [historyGranularity, setHistoryGranularity] = useState("day");
+  const [historyStartDate, setHistoryStartDate] = useState("");
+  const [historyEndDate, setHistoryEndDate] = useState("");
+  const [historyStrategySource, setHistoryStrategySource] = useState("all");
+  const [historyStrategyType, setHistoryStrategyType] = useState("all");
+  const [historyAsset, setHistoryAsset] = useState("all");
+  const [historyTag, setHistoryTag] = useState("all");
   const openOrderHeatmapBenchmarks = useMemo(
     () =>
       Object.fromEntries(
         openOrders.map((order) => [String(order.id), buildPaperTradeHeatmapBenchmark(order, lastUpdated)])
       ),
     [openOrders, lastUpdated]
+  );
+  const historyFilterOptions = useMemo(
+    () => ({
+      strategySources: [...new Set(allOrders.map(getOrderStrategySourceLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      ),
+      strategyTypes: [...new Set(allOrders.map(getOrderStrategyTypeLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      ),
+      assets: [...new Set(allOrders.map(getOrderAssetFilterLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      ),
+      tags: [...new Set(allOrders.map(getOrderTagFilterLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      )
+    }),
+    [allOrders]
+  );
+  const filteredHistoryOrders = useMemo(
+    () =>
+      allOrders.filter((order) => {
+        if (historyStrategySource !== "all" && getOrderStrategySourceLabel(order) !== historyStrategySource) {
+          return false;
+        }
+
+        if (historyStrategyType !== "all" && getOrderStrategyTypeLabel(order) !== historyStrategyType) {
+          return false;
+        }
+
+        if (historyAsset !== "all" && getOrderAssetFilterLabel(order) !== historyAsset) {
+          return false;
+        }
+
+        if (historyTag !== "all" && getOrderTagFilterLabel(order) !== historyTag) {
+          return false;
+        }
+
+        return true;
+      }),
+    [allOrders, historyAsset, historyStrategySource, historyStrategyType, historyTag]
+  );
+  const scopedHistoryOrders = useMemo(() => {
+    if (historyScope === "open") {
+      return filteredHistoryOrders.filter((order) => String(order?.status ?? "").toLowerCase() !== "closed");
+    }
+
+    if (historyScope === "closed") {
+      return filteredHistoryOrders.filter((order) => String(order?.status ?? "").toLowerCase() === "closed");
+    }
+
+    return filteredHistoryOrders;
+  }, [filteredHistoryOrders, historyScope]);
+  const aggregatedPortfolioHistory = useMemo(
+    () =>
+      buildAggregatedPortfolioHistory(scopedHistoryOrders, {
+        granularity: historyGranularity,
+        startDate: historyStartDate,
+        endDate: historyEndDate
+      }),
+    [historyEndDate, historyGranularity, historyStartDate, scopedHistoryOrders]
+  );
+  const filteredClosedOrders = useMemo(
+    () =>
+      closedOrders.filter((order) => {
+        if (!filteredHistoryOrders.some((candidate) => String(candidate.id) === String(order.id))) {
+          return false;
+        }
+
+        const closedTimestamp = getClosedOrderTimestamp(order);
+        if ((historyStartDate || historyEndDate) && !isTimestampWithinRange(closedTimestamp, historyStartDate, historyEndDate)) {
+          return false;
+        }
+
+        return true;
+      }),
+    [closedOrders, filteredHistoryOrders, historyEndDate, historyStartDate]
   );
 
   useEffect(() => {
@@ -1744,6 +2036,39 @@ export default function PaperTradingWorkspace({
     const validOpenIds = new Set((openOrders ?? []).map((order) => String(order.id)));
     setExpandedTreeOrderIds((current) => current.filter((orderId) => validOpenIds.has(String(orderId))));
   }, [openOrders]);
+
+  useEffect(() => {
+    updatePaperTradingTabQuery(activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setActiveTab(getPaperTradingTabFromUrl());
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (historyStrategySource !== "all" && !historyFilterOptions.strategySources.includes(historyStrategySource)) {
+      setHistoryStrategySource("all");
+    }
+
+    if (historyStrategyType !== "all" && !historyFilterOptions.strategyTypes.includes(historyStrategyType)) {
+      setHistoryStrategyType("all");
+    }
+
+    if (historyAsset !== "all" && !historyFilterOptions.assets.includes(historyAsset)) {
+      setHistoryAsset("all");
+    }
+
+    if (historyTag !== "all" && !historyFilterOptions.tags.includes(historyTag)) {
+      setHistoryTag("all");
+    }
+  }, [historyAsset, historyFilterOptions, historyStrategySource, historyStrategyType, historyTag]);
 
   function updateDraft(orderId, updater) {
     setDrafts((current) => {
@@ -2011,7 +2336,7 @@ export default function PaperTradingWorkspace({
   }
 
   const groupedOpenOrders = groupOrdersByStrategy(openOrders);
-  const groupedClosedOrders = groupOrdersByStrategy(closedOrders);
+  const groupedClosedOrders = groupOrdersByStrategy(filteredClosedOrders);
 
   return (
     <main className="workspace workspace--paper-trading">
@@ -2060,6 +2385,23 @@ export default function PaperTradingWorkspace({
         </article>
       </section>
 
+      <section className="paper-tab-bar">
+        <button
+          type="button"
+          className={`chart-toggle ${activeTab === "open" ? "chart-toggle--active" : ""}`}
+          onClick={() => setActiveTab("open")}
+        >
+          Open Orders
+        </button>
+        <button
+          type="button"
+          className={`chart-toggle ${activeTab === "history" ? "chart-toggle--active" : ""}`}
+          onClick={() => setActiveTab("history")}
+        >
+          History &amp; P&amp;L
+        </button>
+      </section>
+
       {openOrders.length === 0 && closedOrders.length === 0 ? (
         <section className="paper-empty-state">
           <span className="brand__eyebrow">No paper trades yet</span>
@@ -2070,7 +2412,7 @@ export default function PaperTradingWorkspace({
         </section>
       ) : null}
 
-      {openOrders.length > 0 || closedOrders.length > 0 ? (
+      {activeTab === "open" && (openOrders.length > 0 || closedOrders.length > 0) ? (
         <section className="paper-group">
           <div className="section-heading">
             <span>Open orders</span>
@@ -2171,79 +2513,188 @@ export default function PaperTradingWorkspace({
         </section>
       ) : null}
 
-      {closedOrders.length ? (
-        <section className="paper-group">
-          <div className="section-heading">
-            <span>Closed order history</span>
-            <span className="pill pill--ghost">{summary.closedOrderCount ?? 0}</span>
+      {activeTab === "history" && (openOrders.length > 0 || closedOrders.length > 0) ? (
+        <section className="paper-group paper-group--history">
+          <div className="paper-history-toolbar">
+            <div className="paper-history-toolbar__intro">
+              <div className="section-heading">
+                <span>History &amp; P&amp;L</span>
+                <span className="pill pill--ghost">{filteredClosedOrders.length} closed matches</span>
+              </div>
+              <p className="paper-history-toolbar__copy">
+                Filter the archived paper book by source, structure, asset, and time window, then review the
+                aggregated portfolio P&amp;L and matching closed trades together.
+              </p>
+            </div>
+
+            <div className="paper-history-filters">
+              <label>
+                <span>Range start</span>
+                <input
+                  type="date"
+                  value={historyStartDate}
+                  onChange={(event) => setHistoryStartDate(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Range end</span>
+                <input
+                  type="date"
+                  value={historyEndDate}
+                  onChange={(event) => setHistoryEndDate(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Granularity</span>
+                <select value={historyGranularity} onChange={(event) => setHistoryGranularity(event.target.value)}>
+                  <option value="hour">Hour</option>
+                  <option value="day">Day</option>
+                  <option value="week">Week</option>
+                  <option value="month">Month</option>
+                </select>
+              </label>
+              <label>
+                <span>Scope</span>
+                <select value={historyScope} onChange={(event) => setHistoryScope(event.target.value)}>
+                  <option value="combined">Combined</option>
+                  <option value="open">Open</option>
+                  <option value="closed">Closed</option>
+                </select>
+              </label>
+              <label>
+                <span>Strategy source</span>
+                <select value={historyStrategySource} onChange={(event) => setHistoryStrategySource(event.target.value)}>
+                  <option value="all">All sources</option>
+                  {historyFilterOptions.strategySources.map((source) => (
+                    <option key={source} value={source}>
+                      {source}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Strategy type</span>
+                <select value={historyStrategyType} onChange={(event) => setHistoryStrategyType(event.target.value)}>
+                  <option value="all">All types</option>
+                  {historyFilterOptions.strategyTypes.map((strategyType) => (
+                    <option key={strategyType} value={strategyType}>
+                      {strategyType}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Asset / symbol</span>
+                <select value={historyAsset} onChange={(event) => setHistoryAsset(event.target.value)}>
+                  <option value="all">All assets</option>
+                  {historyFilterOptions.assets.map((asset) => (
+                    <option key={asset} value={asset}>
+                      {asset}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Tag</span>
+                <select value={historyTag} onChange={(event) => setHistoryTag(event.target.value)}>
+                  <option value="all">All tags</option>
+                  {historyFilterOptions.tags.map((tag) => (
+                    <option key={tag} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
 
-          <div className="paper-groups">
-            {groupedClosedOrders.map((group) => (
-              <section key={group.id} className="paper-subgroup">
-                <div className="section-heading">
-                  <span>{group.strategyName}</span>
-                  <span className="pill pill--ghost">{group.orders.length} closed</span>
-                </div>
+          <section className="paper-subgroup paper-subgroup--history-chart">
+            <PaperPortfolioHistoryChart
+              data={aggregatedPortfolioHistory}
+              theme={theme}
+              granularity={historyGranularity}
+              scopeLabel={HISTORY_SCOPE_LABELS[historyScope] ?? HISTORY_SCOPE_LABELS.combined}
+              rangeLabel={
+                historyStartDate || historyEndDate
+                  ? `${historyStartDate || "Beginning"} to ${historyEndDate || "Latest"}`
+                  : "All history"
+              }
+            />
+          </section>
 
-                <div className="paper-open-table-wrap">
-                  <table className="paper-open-table">
-                    <thead>
-                      <tr>
-                        {CLOSED_ORDER_TABLE_COLUMNS.map((column) => (
-                          <th key={column.key} scope="col">
-                            <SortableTableHeader
-                              column={column}
-                              sortConfig={closedSortConfig}
-                              onToggle={(key) =>
-                                setClosedSortConfig((current) => getNextSortConfig(current, key))
+          {filteredClosedOrders.length ? (
+            <div className="paper-groups">
+              {groupedClosedOrders.map((group) => (
+                <section key={group.id} className="paper-subgroup">
+                  <div className="section-heading">
+                    <span>{group.strategyName}</span>
+                    <span className="pill pill--ghost">{group.orders.length} closed</span>
+                  </div>
+
+                  <div className="paper-open-table-wrap">
+                    <table className="paper-open-table">
+                      <thead>
+                        <tr>
+                          {CLOSED_ORDER_TABLE_COLUMNS.map((column) => (
+                            <th key={column.key} scope="col">
+                              <SortableTableHeader
+                                column={column}
+                                sortConfig={closedSortConfig}
+                                onToggle={(key) =>
+                                  setClosedSortConfig((current) => getNextSortConfig(current, key))
+                                }
+                              />
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortOrders(group.orders, closedSortConfig, getClosedOrderSortValue).map((order) => {
+                          const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
+                          const isDirty = hasOrderDraftChanged(order, draft);
+                          const orderBusy = busyOrderId === String(order.id);
+
+                          return (
+                            <ClosedOrderTableRows
+                              key={order.id}
+                              order={order}
+                              draft={draft}
+                              isDirty={isDirty}
+                              orderBusy={orderBusy}
+                              isExpanded={expandedOrderKey === `order:${order.id}`}
+                              lastUpdated={lastUpdated}
+                              onToggle={() =>
+                                setExpandedOrderKey((current) =>
+                                  current === `order:${order.id}` ? null : `order:${order.id}`
+                                )
                               }
+                              onResetDraft={() =>
+                                setDrafts((current) => ({
+                                  ...current,
+                                  [String(order.id)]: buildDefaultDraft(order)
+                                }))
+                              }
+                              onSave={() => handleSave(order)}
+                              onDelete={() => handleDelete(order, "closed order")}
+                              onUpdateDraft={updateDraft}
+                              onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+                              feedback={feedbackByOrder[String(order.id)]}
+                              theme={theme}
                             />
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortOrders(group.orders, closedSortConfig, getClosedOrderSortValue).map((order) => {
-                        const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
-                        const isDirty = hasOrderDraftChanged(order, draft);
-                        const orderBusy = busyOrderId === String(order.id);
-
-                        return (
-                          <ClosedOrderTableRows
-                            key={order.id}
-                            order={order}
-                            draft={draft}
-                            isDirty={isDirty}
-                            orderBusy={orderBusy}
-                            isExpanded={expandedOrderKey === `order:${order.id}`}
-                            lastUpdated={lastUpdated}
-                            onToggle={() =>
-                              setExpandedOrderKey((current) =>
-                                current === `order:${order.id}` ? null : `order:${order.id}`
-                              )
-                            }
-                            onResetDraft={() =>
-                              setDrafts((current) => ({
-                                ...current,
-                                [String(order.id)]: buildDefaultDraft(order)
-                              }))
-                            }
-                            onSave={() => handleSave(order)}
-                            onDelete={() => handleDelete(order, "closed order")}
-                            onUpdateDraft={updateDraft}
-                            onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
-                            feedback={feedbackByOrder[String(order.id)]}
-                            theme={theme}
-                          />
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            ))}
-          </div>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div className="paper-subempty-state">
+              <strong>No closed orders match these filters.</strong>
+              <span>Try widening the date range or resetting the source, type, asset, or tag filters.</span>
+            </div>
+          )}
         </section>
       ) : null}
     </main>

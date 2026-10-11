@@ -1,6 +1,6 @@
 import { coveredCapital, coveredBreakeven, coveredPayoff } from "../shared/optionMath.js";
 import { assessQuote, finiteNumber, timestampIso } from "./quoteQuality.js";
-import { normalCdf, optionPrice as blackScholesOptionPrice } from "../shared/optionMath.js";
+import { optionPrice as blackScholesOptionPrice } from "../shared/optionMath.js";
 import { fetchStockDailyOhlcHistory, normalizeTicker } from "./stockOhlcHistory.js";
 import { fetchStockFundamentals } from "./stockFundamentals.js";
 import { pickOptionReferencePrice } from "./optionPricing.js";
@@ -817,8 +817,7 @@ function buildOptionLegCandidate({
   }
 
   const liquidCandidates = candidates.filter((candidate) => candidate.isLiquid);
-  if (!liquidCandidates.length) return null;
-  const rankedPool = liquidCandidates;
+  const rankedPool = liquidCandidates.length ? liquidCandidates : candidates;
   const selected = rankedPool.sort((left, right) => {
     return Number(right.candidateScore ?? 0) - Number(left.candidateScore ?? 0);
   })[0];
@@ -906,15 +905,6 @@ function buildScenarioPoints({
   ].filter(Number.isFinite);
 
   const points = [...new Set(candidateSpots.map((value) => formatNumber(value, 2)).filter(Number.isFinite))];
-  const payoffCurve = buildPayoffCurveForStrategy({
-    strategyType,
-    currentPrice,
-    putStrike,
-    callStrike,
-    putPremium,
-    callPremium,
-    contracts
-  });
 
   return points.map(spot => ({ spot, pnl: formatNumber(coveredPayoff({ type: strategyType, spot: currentPrice, terminal: spot, putStrike, callStrike, putPremium, callPremium, contracts }), 2) }));
 }
@@ -963,7 +953,6 @@ export function buildCandidateResult({
   const returnOnFullExposurePct = fullExposure > 0 ? (totalPremium / fullExposure) * 100 : null;
   const annualizedReturnOnFullExposurePct =
     returnOnFullExposurePct != null && dte > 0 ? (returnOnFullExposurePct / dte) * 365 : null;
-  const totalCreditPerShare = putPremium + callPremium;
   const downsideBreakeven = formatNumber(coveredBreakeven(strategyType, currentPrice, putStrike, putPremium, callPremium), 2);
   const upsideBreakeven = null; // Covered stock offsets the short call above its strike.
   const calledAwayPrice =
@@ -1091,6 +1080,9 @@ export function buildCandidateResult({
     callPremium,
     contracts
   });
+  const positivePayoffPoints = payoffCurve.filter((point) => Number(point?.pnl ?? 0) > 0).length;
+  const probabilityOfProfit =
+    payoffCurve.length > 0 ? formatNumber((positivePayoffPoints / payoffCurve.length) * 100, 2) : null;
   const scenarioPoints = buildScenarioPoints({
     strategyType,
     currentPrice,
@@ -1115,6 +1107,7 @@ export function buildCandidateResult({
     symbol,
     companyName,
     stockPrice: formatNumber(currentPrice, 2),
+    probabilityOfProfit,
     expiryDate,
     dte,
     strategyType,

@@ -1,5 +1,6 @@
 import { tigerEnabled, tigerHistory } from "./providers/tiger.js";
 import { finiteNumber } from "./quoteQuality.js";
+
 const STOOQ_DAILY_HISTORY_URL = "https://stooq.com/q/d/l/?i=d&s=";
 const YAHOO_DAILY_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
 

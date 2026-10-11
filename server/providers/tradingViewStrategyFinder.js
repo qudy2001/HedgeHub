@@ -282,6 +282,66 @@ function computeBidAskSpreadPercent(bid, ask) {
   return ((numericAsk - numericBid) / midpoint) * 100;
 }
 
+function computeComboBidAskFromLegs(legs = []) {
+  const normalizedLegs = Array.isArray(legs) ? legs : [];
+  if (!normalizedLegs.length) {
+    return { bid: null, ask: null, mid: null, spreadPercent: null };
+  }
+
+  let comboBid = 0;
+  let comboAsk = 0;
+  let hasBid = true;
+  let hasAsk = true;
+
+  for (const leg of normalizedLegs) {
+    const quantity = Math.max(toFiniteNumber(leg?.quantity, 1) ?? 1, 1);
+    const bid = toFiniteNumber(leg?.bid, null);
+    const ask = toFiniteNumber(leg?.ask, null);
+    const action = String(leg?.action ?? "LONG").trim().toUpperCase();
+
+    if (action === "SHORT") {
+      if (bid == null) {
+        hasBid = false;
+      } else {
+        comboBid += bid * quantity;
+      }
+      if (ask == null) {
+        hasAsk = false;
+      } else {
+        comboAsk += ask * quantity;
+      }
+    } else {
+      if (ask == null) {
+        hasBid = false;
+      } else {
+        comboBid -= ask * quantity;
+      }
+      if (bid == null) {
+        hasAsk = false;
+      } else {
+        comboAsk -= bid * quantity;
+      }
+    }
+  }
+
+  const resolvedBid = hasBid ? comboBid : null;
+  const resolvedAsk = hasAsk ? comboAsk : null;
+  const mid =
+    resolvedBid != null && resolvedAsk != null ? (resolvedBid + resolvedAsk) / 2 : resolvedBid ?? resolvedAsk ?? null;
+  const midpointAbs = Math.abs(mid ?? 0);
+  const spreadPercent =
+    resolvedBid != null && resolvedAsk != null && midpointAbs > 0
+      ? (Math.abs(resolvedAsk - resolvedBid) / midpointAbs) * 100
+      : null;
+
+  return {
+    bid: resolvedBid == null ? null : Number(resolvedBid.toFixed(2)),
+    ask: resolvedAsk == null ? null : Number(resolvedAsk.toFixed(2)),
+    mid: mid == null ? null : Number(mid.toFixed(2)),
+    spreadPercent: spreadPercent == null ? null : Number(spreadPercent.toFixed(2))
+  };
+}
+
 function estimateAnnualizedVolatility(row) {
   const sigma = toFiniteNumber(row?.sigma, null);
   if (!(sigma > 0)) {
@@ -491,11 +551,20 @@ async function enrichTradingViewRowsWithLiquidity(rows) {
 
       return {
         ...leg,
+        ask: matchedContract.ask ?? leg.ask ?? null,
         askSize: matchedContract.askSize ?? leg.askSize ?? null,
+        bid: matchedContract.bid ?? leg.bid ?? null,
         bidSize: matchedContract.bidSize ?? leg.bidSize ?? null,
         contractSymbol: matchedContract.contractSymbol ?? leg.contractSymbol ?? "",
+        delta: matchedContract.delta ?? leg.delta ?? null,
+        gamma: matchedContract.gamma ?? leg.gamma ?? null,
+        impliedVolatility: matchedContract.impliedVolatility ?? leg.impliedVolatility ?? null,
         isLive: matchedContract.isLive === true || leg.isLive === true,
+        mark: matchedContract.mark ?? leg.mark ?? null,
         openInterest: matchedContract.openInterest ?? leg.openInterest ?? null,
+        rho: matchedContract.rho ?? leg.rho ?? null,
+        theta: matchedContract.theta ?? leg.theta ?? null,
+        vega: matchedContract.vega ?? leg.vega ?? null,
         volume: matchedContract.volume ?? leg.volume ?? null
       };
     });
@@ -506,9 +575,21 @@ async function enrichTradingViewRowsWithLiquidity(rows) {
     const optionLiquidity = summarizeOptionStrategyLiquidity(enrichedLegs, {
       side: "entry"
     });
+    const comboQuote = computeComboBidAskFromLegs(enrichedLegs);
+    const impliedVolatilityValues = enrichedLegs
+      .map((leg) => toFiniteNumber(leg?.impliedVolatility, null))
+      .filter((value) => value != null);
+    const averageImpliedVolatility = impliedVolatilityValues.length
+      ? impliedVolatilityValues.reduce((sum, value) => sum + value, 0) / impliedVolatilityValues.length
+      : null;
 
     return {
       ...row,
+      ask: comboQuote.ask ?? row.ask,
+      bid: comboQuote.bid ?? row.bid,
+      bidAskSpreadPercent: comboQuote.spreadPercent ?? row.bidAskSpreadPercent,
+      averageImpliedVolatility:
+        averageImpliedVolatility == null ? row.averageImpliedVolatility ?? null : Number(averageImpliedVolatility.toFixed(4)),
       legs: enrichedLegs,
       normalizedOptionOpenInterest: hasLiquidityData
         ? Number(optionLiquidity.normalizedOpenInterest.toFixed(0))

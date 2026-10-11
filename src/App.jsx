@@ -114,6 +114,7 @@ function isTimestampStale(timestamp, maxAgeMs) {
 
 const ROUTE_REFRESH_STALE_MS = 6 * 60 * 1000;
 const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 1920px)";
+const DESKTOP_SIDEBAR_STORAGE_KEY = "hedgehub.desktopSidebarVisible";
 
 function matchesMobileSidebarViewport() {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -121,6 +122,23 @@ function matchesMobileSidebarViewport() {
   }
 
   return window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY).matches;
+}
+
+function readDesktopSidebarPreference() {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(DESKTOP_SIDEBAR_STORAGE_KEY);
+    if (storedValue === null) {
+      return true;
+    }
+
+    return storedValue !== "false";
+  } catch (_error) {
+    return true;
+  }
 }
 
 function buildPaperPortfolioPreview(paperPortfolio) {
@@ -185,6 +203,7 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(() => matchesMobileSidebarViewport());
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => !matchesMobileSidebarViewport());
+  const [isDesktopSidebarVisible, setIsDesktopSidebarVisible] = useState(() => readDesktopSidebarPreference());
   const [dashboard, setDashboard] = useState(null);
   const [streamDiagnostics, setStreamDiagnostics] = useState(null);
   const [marketStatusPayload, setMarketStatusPayload] = useState(null);
@@ -645,6 +664,20 @@ export default function App() {
     });
   }, [mutatePaperOrders]);
 
+  const handleSyncPaperExecution = useCallback((orderId) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/sync-execution`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }, [mutatePaperOrders]);
+
+  const handleCancelPaperExecution = useCallback((orderId) => {
+    return mutatePaperOrders(`/api/paper-orders/${encodeURIComponent(orderId)}/cancel-execution`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  }, [mutatePaperOrders]);
+
   const mutateStrategyAssets = useCallback(async (url, options = {}) => {
     const response = await fetch(url, {
       headers: {
@@ -787,11 +820,21 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(DESKTOP_SIDEBAR_STORAGE_KEY, String(isDesktopSidebarVisible));
+    } catch (_error) {
+      // Ignore storage failures and keep the preference in memory.
+    }
+  }, [isDesktopSidebarVisible]);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY);
 
     function handleViewportChange(event) {
       setIsMobileViewport(event.matches);
-      setIsSidebarOpen(!event.matches);
+      if (event.matches) {
+        setIsSidebarOpen(false);
+      }
     }
 
     handleViewportChange(mediaQuery);
@@ -942,7 +985,7 @@ export default function App() {
       return undefined;
     }
 
-    if (loading || !(activeView === "paper" || activeView === "orders")) {
+    if (loading || activeView !== "paper") {
       return undefined;
     }
 
@@ -1051,6 +1094,7 @@ export default function App() {
     !showTradingViewStrategyFinder;
   const showPaperTrading = activeView === "paper";
   const nextThemeLabel = theme === "dark" ? "Light mode" : "Dark mode";
+  const isSidebarVisible = isMobileViewport ? isSidebarOpen : isDesktopSidebarVisible;
 
   return (
     <div className="app-root">
@@ -1066,17 +1110,22 @@ export default function App() {
 
       <div className="app-shell">
 	        <div className="app-toolbar">
-	          {isMobileViewport ? (
-	            <button
-	              type="button"
-	              className={`sidebar-toggle ${isSidebarOpen ? "sidebar-toggle--active" : ""}`}
+	          <button
+	            type="button"
+	            className={`sidebar-toggle ${isSidebarVisible ? "sidebar-toggle--active" : ""}`}
               aria-controls="app-sidebar"
-              aria-expanded={isSidebarOpen}
-              onClick={() => setIsSidebarOpen((current) => !current)}
+              aria-expanded={isSidebarVisible}
+              onClick={() => {
+                if (isMobileViewport) {
+                  setIsSidebarOpen((current) => !current);
+                  return;
+                }
+
+                setIsDesktopSidebarVisible((current) => !current);
+              }}
             >
-              {isSidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              {isSidebarVisible ? "Hide sidebar" : "Show sidebar"}
             </button>
-          ) : null}
 	          <button
 	            type="button"
 	            className="theme-toggle"
@@ -1096,7 +1145,7 @@ export default function App() {
 	          </div>
 	        </div>
 
-        {isMobileViewport && isSidebarOpen ? (
+        {isMobileViewport && isSidebarVisible ? (
           <button
             type="button"
             className="app-sidebar-backdrop"
@@ -1105,7 +1154,7 @@ export default function App() {
           />
         ) : null}
 
-        <div className="app-grid">
+        <div className={`app-grid ${!isMobileViewport && !isSidebarVisible ? "app-grid--sidebar-hidden" : ""}`}>
 	          <StrategyRail
 	            sidebarId="app-sidebar"
 	            activeView={activeView}
@@ -1120,11 +1169,12 @@ export default function App() {
 	            onOpenAdminUsers={() => navigateTo("admin-users")}
 	            onOpenScreening={() => navigateTo("screening")}
 	            onOpenPaperTrading={() => navigateTo("paper")}
+	            onSelect={(strategyId) => navigateTo("strategy", strategyId)}
 	            paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
 	            screeningSummary={v2Screener?.summary ?? null}
 	            isAdmin={authUser?.role === "admin"}
 	            isMobile={isMobileViewport}
-	            isOpen={!isMobileViewport || isSidebarOpen}
+	            isOpen={isSidebarVisible}
 	            onCloseMobile={() => setIsSidebarOpen(false)}
 	          />
 
@@ -1141,6 +1191,8 @@ export default function App() {
 	              onDeletePaperOrder={handleDeletePaperOrder}
 	              onSaveCalculatorSnapshot={handleSaveCalculatorSnapshot}
 	              onConfirmPaperExecution={handleConfirmPaperExecution}
+              onSyncPaperExecution={handleSyncPaperExecution}
+              onCancelPaperExecution={handleCancelPaperExecution}
               theme={theme}
             />
           ) : showWatchlist ? (
@@ -1170,6 +1222,8 @@ export default function App() {
 	              strategyPayload={strategyPayload}
 	              onSaveStrategyAssetMapping={handleSaveStrategyAssetMapping}
 	              onDeleteStrategyAssetMapping={handleDeleteStrategyAssetMapping}
+                isAdmin={authUser?.role === "admin"}
+                onAuthRequired={handleAuthRequired}
 	            />
 	          ) : showAdminUsers ? (
 	            authUser?.role === "admin" ? (
@@ -1225,6 +1279,10 @@ export default function App() {
           ) : showCoveredIncomeScanner ? (
             <CoveredIncomeScannerWorkspace
               strategyDefinition={selectedStrategy}
+              paperPortfolio={strategyPaperContext}
+              onCreatePaperOrder={handleCreatePaperOrder}
+              onConfirmPaperExecution={handleConfirmPaperExecution}
+              onOpenPaperTrading={() => navigateTo("paper")}
               onMarketTimerContextChange={setMarketTimerContext}
               theme={theme}
             />
