@@ -228,15 +228,21 @@ export function normalizeStrategyAssetMapping(rawAsset = {}, defaults = {}) {
   const underlyingSymbol = normalizeSymbol(
     readOwn(rawAsset, "underlyingSymbol", defaults.underlyingSymbol ?? optionSymbol)
   ) || optionSymbol;
-  const optionQuoteProvider =
-    normalizeText(readOwn(rawAsset, "optionQuoteProvider", defaults.optionQuoteProvider)).toLowerCase() === "coingecko"
-      ? "coingecko"
-      : "stooq";
-  const underlyingQuoteProvider =
-    normalizeText(readOwn(rawAsset, "underlyingQuoteProvider", defaults.underlyingQuoteProvider)).toLowerCase() ===
-    "coingecko"
-      ? "coingecko"
-      : optionQuoteProvider;
+  const normalizeQuoteProvider = (value, fallback = "stooq") => {
+    const normalizedValue = normalizeText(value, fallback).toLowerCase();
+    if (normalizedValue === "coingecko") {
+      return normalizedValue;
+    }
+    return "stooq";
+  };
+  const optionQuoteProvider = normalizeQuoteProvider(
+    readOwn(rawAsset, "optionQuoteProvider", defaults.optionQuoteProvider),
+    defaults.optionQuoteProvider
+  );
+  const underlyingQuoteProvider = normalizeQuoteProvider(
+    readOwn(rawAsset, "underlyingQuoteProvider", defaults.underlyingQuoteProvider),
+    optionQuoteProvider
+  );
   const label = normalizeText(readOwn(rawAsset, "label", defaults.label ?? optionSymbol));
   const id = normalizeText(
     readOwn(rawAsset, "id", defaults.id ?? optionSymbol.toLowerCase().replace(/[^a-z0-9]+/g, "-"))

@@ -23,7 +23,7 @@ Current table classification:
 - Time-series candidate tables: `market_snapshots`
 - Event tables: `paper_order_snapshots`, `strategy_runs`, `macro_dashboard_snapshots`
 - Lookup/reference tables: `strategy_profiles`, `strategy_asset_mappings`, `delta_hedge_scanner_symbols`, `users`
-- User-state tables: `strategy_watchlist`, `setup_watchlist`, `paper_orders`, `user_sessions`, `user_ibkr_settings`
+- User-state tables: `strategy_watchlist`, `setup_watchlist`, `paper_orders`, `user_sessions`
 - Cache-style tables: `market_snapshots`, `macro_dashboard_snapshots`
 
 Current query patterns discovered in [server/index.js](/Users/raylv/Developer/HedgeHub SQL/server/index.js:1) and [server/auth.js](/Users/raylv/Developer/HedgeHub SQL/server/auth.js:1):

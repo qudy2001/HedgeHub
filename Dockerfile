@@ -43,4 +43,4 @@ RUN mkdir -p /app/data /app/dashboards
 
 EXPOSE 8787
 
-CMD ["node", "server/index.js"]
+CMD ["node", "server/main.js"]

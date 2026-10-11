@@ -160,7 +160,7 @@ function buildStockLiquidityScoreFromVolume(volume) {
 function computeDataQualityScore({ historyPoints, requiredPoints, historySource, optionCandidate } = {}) {
   const pointsScore =
     requiredPoints > 0 && Number.isFinite(historyPoints) ? clamp(historyPoints / requiredPoints, 0, 1) : 0.5;
-  const historyScore = historySource === "polygon" ? 1 : historySource === "stooq" ? 0.9 : 0.85;
+  const historyScore = historySource === "tiger" ? 1 : historySource === "stooq" ? 0.9 : 0.85;
   const optionScore =
     optionCandidate && typeof optionCandidate === "object"
       ? String(optionCandidate.quoteQuality ?? "").toLowerCase().includes("modeled")

@@ -118,6 +118,7 @@ export function createRequestLoggingMiddleware() {
       request.headers["x-request-id"] || request.headers["cf-ray"] || crypto.randomUUID();
 
     const startedAt = process.hrtime.bigint();
+    request.requestStartedAtNs = startedAt;
     let finished = false;
 
     function emit(level, reason) {

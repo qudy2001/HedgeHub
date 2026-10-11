@@ -189,12 +189,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS user_sessions_expires_at_idx
     ON user_sessions(expires_at);
 
-  CREATE TABLE IF NOT EXISTS user_ibkr_settings (
-    user_id TEXT PRIMARY KEY,
-    config_json TEXT NOT NULL,
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS user_api_keys (
@@ -215,6 +214,41 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS user_api_keys_active_token_idx
     ON user_api_keys(token_hash, revoked_at);
+
+  CREATE TABLE IF NOT EXISTS gpt_api_request_logs (
+    id TEXT PRIMARY KEY,
+    system_name TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    ip_address TEXT,
+    user_id TEXT,
+    username TEXT,
+    api_key_id TEXT,
+    api_key_label TEXT,
+    api_key_prefix TEXT,
+    auth_status TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    response_time_ms REAL,
+    request_ticker TEXT,
+    expected_price_range_low REAL,
+    expected_price_range_high REAL,
+    option_expiration_start_date TEXT,
+    option_expiration_end_date TEXT,
+    request_body_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY(api_key_id) REFERENCES user_api_keys(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS gpt_api_request_logs_created_idx
+    ON gpt_api_request_logs(created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS gpt_api_request_logs_user_created_idx
+    ON gpt_api_request_logs(user_id, created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS gpt_api_request_logs_api_key_created_idx
+    ON gpt_api_request_logs(api_key_id, created_at DESC);
 
   CREATE TABLE IF NOT EXISTS strategy_profiles (
     id TEXT PRIMARY KEY,
@@ -852,6 +886,93 @@ const revokeUserApiKeyStatement = db.prepare(`
     AND revoked_at IS NULL
 `);
 
+const insertGptApiRequestLogStatement = db.prepare(`
+  INSERT INTO gpt_api_request_logs (
+    id,
+    system_name,
+    method,
+    path,
+    ip_address,
+    user_id,
+    username,
+    api_key_id,
+    api_key_label,
+    api_key_prefix,
+    auth_status,
+    status_code,
+    response_time_ms,
+    request_ticker,
+    expected_price_range_low,
+    expected_price_range_high,
+    option_expiration_start_date,
+    option_expiration_end_date,
+    request_body_json,
+    error_message
+  ) VALUES (
+    @id,
+    @systemName,
+    @method,
+    @path,
+    @ipAddress,
+    @userId,
+    @username,
+    @apiKeyId,
+    @apiKeyLabel,
+    @apiKeyPrefix,
+    @authStatus,
+    @statusCode,
+    @responseTimeMs,
+    @requestTicker,
+    @expectedPriceRangeLow,
+    @expectedPriceRangeHigh,
+    @optionExpirationStartDate,
+    @optionExpirationEndDate,
+    @requestBodyJson,
+    @errorMessage
+  )
+`);
+
+const listGptApiRequestLogsStatement = db.prepare(`
+  SELECT
+    id,
+    system_name AS systemName,
+    method,
+    path,
+    ip_address AS ipAddress,
+    user_id AS userId,
+    username,
+    api_key_id AS apiKeyId,
+    api_key_label AS apiKeyLabel,
+    api_key_prefix AS apiKeyPrefix,
+    auth_status AS authStatus,
+    status_code AS statusCode,
+    response_time_ms AS responseTimeMs,
+    request_ticker AS requestTicker,
+    expected_price_range_low AS expectedPriceRangeLow,
+    expected_price_range_high AS expectedPriceRangeHigh,
+    option_expiration_start_date AS optionExpirationStartDate,
+    option_expiration_end_date AS optionExpirationEndDate,
+    request_body_json AS requestBodyJson,
+    error_message AS errorMessage,
+    created_at AS createdAt
+  FROM gpt_api_request_logs
+  ORDER BY created_at DESC
+  LIMIT ?
+`);
+
+const summarizeGptApiRequestLogsStatement = db.prepare(`
+  SELECT
+    COUNT(*) AS totalRequests,
+    SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS successCount,
+    SUM(CASE WHEN auth_status = 'authorized' THEN 1 ELSE 0 END) AS authorizedCount,
+    SUM(CASE WHEN auth_status != 'authorized' THEN 1 ELSE 0 END) AS unknownCount,
+    COUNT(DISTINCT COALESCE(ip_address, '')) AS uniqueIpCount,
+    COUNT(DISTINCT COALESCE(user_id, '')) AS uniqueUserCount,
+    ROUND(AVG(response_time_ms), 1) AS averageResponseTimeMs,
+    MAX(created_at) AS latestRequestAt
+  FROM gpt_api_request_logs
+`);
+
 const insertSessionStatement = db.prepare(`
   INSERT INTO user_sessions (
     token_hash,
@@ -897,27 +1018,27 @@ const deleteExpiredSessionsStatement = db.prepare(`
   WHERE expires_at <= ?
 `);
 
-const getIbkrSettingsStatement = db.prepare(`
+const getAppSettingStatement = db.prepare(`
   SELECT
-    user_id AS userId,
-    config_json AS configJson,
+    key,
+    value_json AS valueJson,
     created_at AS createdAt,
     updated_at AS updatedAt
-  FROM user_ibkr_settings
-  WHERE user_id = ?
+  FROM app_settings
+  WHERE key = ?
   LIMIT 1
 `);
 
-const upsertIbkrSettingsStatement = db.prepare(`
-  INSERT INTO user_ibkr_settings (
-    user_id,
-    config_json
+const upsertAppSettingStatement = db.prepare(`
+  INSERT INTO app_settings (
+    key,
+    value_json
   ) VALUES (
-    @userId,
-    @configJson
+    @key,
+    @valueJson
   )
-  ON CONFLICT(user_id) DO UPDATE SET
-    config_json = excluded.config_json,
+  ON CONFLICT(key) DO UPDATE SET
+    value_json = excluded.value_json,
     updated_at = CURRENT_TIMESTAMP
 `);
 
@@ -995,24 +1116,44 @@ export function removeStrategyFromWatchlist(strategyId, userId = "legacy") {
 }
 
 export function listSetupWatchlist(userId = "legacy") {
-  return db
-    .prepare(
-      `
-        SELECT
-          id,
-          source,
-          strategy_id AS strategyId,
-          combination_id AS combinationId,
-          title,
-          payload_json AS payloadJson,
-          created_at AS createdAt,
-          updated_at AS updatedAt
-        FROM setup_watchlist
-        WHERE user_id = ?
-        ORDER BY created_at DESC, id ASC
-      `
-    )
-    .all(userId)
+  const statement =
+    userId == null
+      ? db.prepare(
+          `
+            SELECT
+              user_id AS userId,
+              id,
+              source,
+              strategy_id AS strategyId,
+              combination_id AS combinationId,
+              title,
+              payload_json AS payloadJson,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+            FROM setup_watchlist
+            ORDER BY created_at DESC, id ASC
+          `
+        )
+      : db.prepare(
+          `
+            SELECT
+              user_id AS userId,
+              id,
+              source,
+              strategy_id AS strategyId,
+              combination_id AS combinationId,
+              title,
+              payload_json AS payloadJson,
+              created_at AS createdAt,
+              updated_at AS updatedAt
+            FROM setup_watchlist
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id ASC
+          `
+        );
+
+  return statement
+    .all(...(userId == null ? [] : [userId]))
     .map((row) => ({
       ...row,
       payload: JSON.parse(row.payloadJson)
@@ -1532,6 +1673,88 @@ export function createScannerPromotion(promotion, userId = "legacy") {
       `
     )
     .get(result.lastInsertRowid);
+}
+
+export function listScannerPromotions(userId = null, limit = 100) {
+  const statement =
+    userId == null
+      ? db.prepare(
+          `
+            SELECT
+              promotions.id,
+              promotions.user_id AS userId,
+              promotions.scanner_type AS scannerType,
+              promotions.scanner_run_id AS scannerRunId,
+              promotions.scanner_candidate_id AS scannerCandidateId,
+              promotions.paper_order_id AS paperOrderId,
+              promotions.symbol,
+              promotions.strategy_type AS strategyType,
+              promotions.promotion_status AS promotionStatus,
+              promotions.notes_json AS notesJson,
+              candidates.payload_json AS candidatePayloadJson,
+              promotions.created_at AS createdAt
+            FROM scanner_promotions AS promotions
+            LEFT JOIN scanner_candidates AS candidates
+              ON candidates.id = promotions.scanner_candidate_id
+            ORDER BY promotions.created_at DESC, promotions.id DESC
+            LIMIT ?
+          `
+        )
+      : db.prepare(
+          `
+            SELECT
+              promotions.id,
+              promotions.user_id AS userId,
+              promotions.scanner_type AS scannerType,
+              promotions.scanner_run_id AS scannerRunId,
+              promotions.scanner_candidate_id AS scannerCandidateId,
+              promotions.paper_order_id AS paperOrderId,
+              promotions.symbol,
+              promotions.strategy_type AS strategyType,
+              promotions.promotion_status AS promotionStatus,
+              promotions.notes_json AS notesJson,
+              candidates.payload_json AS candidatePayloadJson,
+              promotions.created_at AS createdAt
+            FROM scanner_promotions AS promotions
+            LEFT JOIN scanner_candidates AS candidates
+              ON candidates.id = promotions.scanner_candidate_id
+            WHERE promotions.user_id = ?
+            ORDER BY promotions.created_at DESC, promotions.id DESC
+            LIMIT ?
+          `
+        );
+
+  return statement
+    .all(...(userId == null ? [limit] : [userId, limit]))
+    .map((row) => ({
+      ...row,
+      notes: row.notesJson ? JSON.parse(row.notesJson) : {},
+      candidatePayload: row.candidatePayloadJson ? JSON.parse(row.candidatePayloadJson) : null
+    }));
+}
+
+function assertPostgresOnlyFeature(featureName) {
+  throw new Error(`${featureName} requires DB_TYPE=postgres.`);
+}
+
+export function recordOptionShortlistObservations(_observations = []) {
+  return assertPostgresOnlyFeature("Option shortlist observations");
+}
+
+export function listOptionShortlistObservations(_query = {}) {
+  return assertPostgresOnlyFeature("Option shortlist observations");
+}
+
+export function createOptionsHistoryIngestionRun(_run = {}) {
+  return assertPostgresOnlyFeature("Options history ingestion");
+}
+
+export function updateOptionsHistoryIngestionRun(_id, _patch = {}) {
+  return assertPostgresOnlyFeature("Options history ingestion");
+}
+
+export function listOptionsHistoryIngestionRuns(_limit = 20) {
+  return assertPostgresOnlyFeature("Options history ingestion");
 }
 
 function mapPaperOrderRow(row) {
@@ -2118,6 +2341,64 @@ export function revokeUserApiKey(id) {
   return revokeUserApiKeyStatement.run(normalizedId).changes > 0;
 }
 
+export function createGptApiRequestLog(entry = {}) {
+  const normalizedId = String(entry.id ?? "").trim();
+  if (!normalizedId) {
+    throw new Error("Log id is required");
+  }
+
+  insertGptApiRequestLogStatement.run({
+    id: normalizedId,
+    systemName: String(entry.systemName ?? "gpt-strategy-query").trim() || "gpt-strategy-query",
+    method: String(entry.method ?? "POST").trim() || "POST",
+    path: String(entry.path ?? "/api/gpt/strategy-query").trim() || "/api/gpt/strategy-query",
+    ipAddress: entry.ipAddress == null ? null : String(entry.ipAddress).trim() || null,
+    userId: entry.userId == null ? null : String(entry.userId).trim() || null,
+    username: entry.username == null ? null : String(entry.username).trim() || null,
+    apiKeyId: entry.apiKeyId == null ? null : String(entry.apiKeyId).trim() || null,
+    apiKeyLabel: entry.apiKeyLabel == null ? null : String(entry.apiKeyLabel).trim() || null,
+    apiKeyPrefix: entry.apiKeyPrefix == null ? null : String(entry.apiKeyPrefix).trim() || null,
+    authStatus: String(entry.authStatus ?? "unknown").trim() || "unknown",
+    statusCode: Number(entry.statusCode ?? 0) || 0,
+    responseTimeMs: Number.isFinite(Number(entry.responseTimeMs)) ? Number(entry.responseTimeMs) : null,
+    requestTicker: entry.requestTicker == null ? null : String(entry.requestTicker).trim() || null,
+    expectedPriceRangeLow:
+      Number.isFinite(Number(entry.expectedPriceRangeLow)) ? Number(entry.expectedPriceRangeLow) : null,
+    expectedPriceRangeHigh:
+      Number.isFinite(Number(entry.expectedPriceRangeHigh)) ? Number(entry.expectedPriceRangeHigh) : null,
+    optionExpirationStartDate:
+      entry.optionExpirationStartDate == null ? null : String(entry.optionExpirationStartDate).trim() || null,
+    optionExpirationEndDate:
+      entry.optionExpirationEndDate == null ? null : String(entry.optionExpirationEndDate).trim() || null,
+    requestBodyJson: JSON.stringify(entry.requestBody ?? {}),
+    errorMessage: entry.errorMessage == null ? null : String(entry.errorMessage).trim() || null
+  });
+
+  return true;
+}
+
+export function listGptApiRequestLogs(limit = 100) {
+  const rows = listGptApiRequestLogsStatement.all(Math.max(Number(limit) || 100, 1));
+  return rows.map((row) => ({
+    ...row,
+    requestBody: row.requestBodyJson ? JSON.parse(row.requestBodyJson) : {}
+  }));
+}
+
+export function summarizeGptApiRequestLogs() {
+  const row = summarizeGptApiRequestLogsStatement.get() ?? {};
+  return {
+    totalRequests: Number(row.totalRequests ?? 0) || 0,
+    successCount: Number(row.successCount ?? 0) || 0,
+    authorizedCount: Number(row.authorizedCount ?? 0) || 0,
+    unknownCount: Number(row.unknownCount ?? 0) || 0,
+    uniqueIpCount: Number(row.uniqueIpCount ?? 0) || 0,
+    uniqueUserCount: Number(row.uniqueUserCount ?? 0) || 0,
+    averageResponseTimeMs: Number.isFinite(Number(row.averageResponseTimeMs)) ? Number(row.averageResponseTimeMs) : null,
+    latestRequestAt: row.latestRequestAt ?? null
+  };
+}
+
 export function createSession({ tokenHash, userId, expiresAt } = {}) {
   if (!tokenHash || !userId || !expiresAt) {
     throw new Error("tokenHash, userId, and expiresAt are required");
@@ -2168,43 +2449,42 @@ export function deleteExpiredSessions(nowIso = new Date().toISOString()) {
   return deleteExpiredSessionsStatement.run(timestamp).changes ?? 0;
 }
 
-export function getIbkrSettings(userId) {
-  const normalizedId = String(userId ?? "").trim();
-  if (!normalizedId) {
+export function getAppSetting(key) {
+  const normalizedKey = String(key ?? "").trim();
+  if (!normalizedKey) {
     return null;
   }
 
-  const row = getIbkrSettingsStatement.get(normalizedId);
+  const row = getAppSettingStatement.get(normalizedKey);
   if (!row) {
     return null;
   }
 
-  let config = null;
+  let value = null;
   try {
-    config = JSON.parse(row.configJson ?? "{}");
+    value = JSON.parse(row.valueJson ?? "null");
   } catch (_error) {
-    config = null;
+    value = null;
   }
 
   return {
     ...row,
-    config
+    value
   };
 }
 
-export function upsertIbkrSettings(userId, config) {
-  const normalizedId = String(userId ?? "").trim();
-  if (!normalizedId) {
-    throw new Error("User id is required");
+export function upsertAppSetting(key, value) {
+  const normalizedKey = String(key ?? "").trim();
+  if (!normalizedKey) {
+    throw new Error("Setting key is required");
   }
 
-  const payload = config && typeof config === "object" ? config : {};
-  upsertIbkrSettingsStatement.run({
-    userId: normalizedId,
-    configJson: JSON.stringify(payload)
+  upsertAppSettingStatement.run({
+    key: normalizedKey,
+    valueJson: JSON.stringify(value ?? null)
   });
 
-  return getIbkrSettings(normalizedId);
+  return getAppSetting(normalizedKey);
 }
 
 export function claimLegacyUserData(userId) {

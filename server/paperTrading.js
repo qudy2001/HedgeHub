@@ -29,6 +29,41 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeStrategySource(value) {
+  const trimmedValue = String(value ?? "").trim();
+  const normalizedValue = normalizeText(trimmedValue);
+
+  if (!normalizedValue) {
+    return "";
+  }
+
+  if (normalizedValue === "tradingview" || normalizedValue === "tradingview finder") {
+    return "TradingView finder";
+  }
+
+  if (normalizedValue === "covered-income-scanner" || normalizedValue === "covered income scanner") {
+    return "Covered Income Scanner";
+  }
+
+  if (normalizedValue === "delta-hedge" || normalizedValue === "delta hedge scanner") {
+    return "Delta Hedge Scanner";
+  }
+
+  if (normalizedValue === "strategy-finder" || normalizedValue === "finder" || normalizedValue === "strategy finder") {
+    return "Strategy Finder";
+  }
+
+  if (normalizedValue === "vol-crush" || normalizedValue === "vol crush" || normalizedValue === "vol crush earnings") {
+    return "Vol Crush";
+  }
+
+  if (normalizedValue === "screening" || normalizedValue === "strategy screening") {
+    return "Strategy Screening";
+  }
+
+  return trimmedValue;
+}
+
 function normalizeQuestionKey(value) {
   return String(value ?? "")
     .trim()
@@ -120,17 +155,7 @@ function normalizePaperLegStatus(value) {
   return String(value ?? "open").trim().toLowerCase() === "closed" ? "closed" : "open";
 }
 
-function normalizeExecutionRoute(value) {
-  const normalized = String(value ?? "local-paper").trim().toLowerCase();
-
-  if (normalized === "ibkr-paper") {
-    return "ibkr-paper";
-  }
-
-  if (normalized === "tws-paper") {
-    return "tws-paper";
-  }
-
+function normalizeExecutionRoute(_value) {
   return "local-paper";
 }
 
@@ -307,24 +332,10 @@ function sanitizeExecutionPayload(source, defaults = {}, { allowNull = false, pu
 
   return {
     route,
-    broker: route === "ibkr-paper" ? "ibkr" : route === "tws-paper" ? "tws" : "",
+    broker: "",
     purpose: normalizedPurpose,
-    status: normalizeExecutionStatus(
-      mergedSource.status,
-      route === "ibkr-paper" || route === "tws-paper" ? "pending_submit" : "local"
-    ),
-    statusText: String(
-      mergedSource.statusText ??
-        (route === "ibkr-paper"
-          ? normalizedPurpose === "exit"
-            ? "IBKR exit pending"
-            : "IBKR entry pending"
-          : route === "tws-paper"
-            ? normalizedPurpose === "exit"
-              ? "TWS exit pending"
-              : "TWS entry pending"
-            : "Local paper order")
-    ),
+    status: normalizeExecutionStatus(mergedSource.status, "local"),
+    statusText: String(mergedSource.statusText ?? "Local paper order"),
     accountId: String(mergedSource.accountId ?? ""),
     accountAlias: String(mergedSource.accountAlias ?? ""),
     isPaper: mergedSource.isPaper === true,
@@ -1041,6 +1052,9 @@ export function sanitizePaperOrderPayload(payload, defaults = {}) {
   return {
     strategyId,
     strategyName,
+    strategySource: normalizeStrategySource(
+      source.strategySource ?? source.source ?? defaults.strategySource ?? defaults.source ?? ""
+    ),
     combinationId: String(source.combinationId ?? defaults.combinationId ?? `paper-${Date.now()}`),
     combinationLabel: String(source.combinationLabel ?? defaults.combinationLabel ?? "Paper trade"),
     assetLabel: String(source.assetLabel ?? defaults.assetLabel ?? ""),

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { buildMarketTimerModel, buildUnderlyingMarketMonitorModels } from "../marketTimers.js";
-import LiveMonitoringPanel from "./LiveMonitoringPanel.jsx";
 
 const OPTION_SESSION_ENTRY_KEYS = new Set(["option-pre", "option-open", "option-post"]);
 const PINNED_UNDERLYING_MARKETS = [
@@ -49,7 +48,6 @@ export default function StrategyRail({
   onOpenSettings,
   onOpenScreening,
   onOpenPaperTrading,
-  onOpenOrderManagement,
   onOpenAdminUsers,
   onSelect,
   paperPortfolio,
@@ -123,12 +121,6 @@ export default function StrategyRail({
 
       <div className="sidebar__section">
         <div className="sidebar-primary-nav">
-          <LiveMonitoringPanel
-            streamDiagnostics={streamDiagnostics}
-            brokerStatus={paperPortfolio?.brokerStatus ?? null}
-            className="sidebar-live-monitor"
-          />
-
           {marketTimerModel || underlyingMarketMonitorModels.length ? (
             <div className="macro-layout-diagnostics sidebar-market-timers sidebar-underlying-monitor">
               {marketTimerModel ? (
@@ -240,13 +232,6 @@ export default function StrategyRail({
             onClick={onOpenSettings}
           >
             Strategy settings
-          </button>
-          <button
-            type="button"
-            className={`dashboard-button ${activeView === "orders" ? "dashboard-button--active" : ""}`}
-            onClick={onOpenOrderManagement}
-          >
-            Order management
           </button>
           {isAdmin ? (
             <button

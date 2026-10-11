@@ -9,7 +9,6 @@ import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
 
 const AdminUsersWorkspace = lazy(() => import("./components/AdminUsersWorkspace.jsx"));
 const DeltaHedgeScannerWorkspace = lazy(() => import("./components/DeltaHedgeScannerWorkspace.jsx"));
-const IbkrOrderManagementWorkspace = lazy(() => import("./components/IbkrOrderManagementWorkspace.jsx"));
 const MacroHeatmapDashboard = lazy(() => import("./components/MacroHeatmapDashboard.jsx"));
 const PaperTradingWorkspace = lazy(() => import("./components/PaperTradingWorkspace.jsx"));
 const CoveredIncomeScannerWorkspace = lazy(() => import("./components/CoveredIncomeScannerWorkspace.jsx"));
@@ -27,13 +26,6 @@ function readRoute() {
   if (pathname === "/paper-trading") {
     return {
       activeView: "paper",
-      selectedStrategyId: "strategy-1"
-    };
-  }
-
-  if (pathname === "/order-management") {
-    return {
-      activeView: "orders",
       selectedStrategyId: "strategy-1"
     };
   }
@@ -84,10 +76,6 @@ function buildPath(activeView, strategyId) {
     return "/paper-trading";
   }
 
-  if (activeView === "orders") {
-    return "/order-management";
-  }
-
   if (activeView === "screening") {
     return "/screening";
   }
@@ -125,7 +113,7 @@ function isTimestampStale(timestamp, maxAgeMs) {
 }
 
 const ROUTE_REFRESH_STALE_MS = 6 * 60 * 1000;
-const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 1920px)";
+const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 1200px)";
 const DESKTOP_SIDEBAR_STORAGE_KEY = "hedgehub.desktopSidebarVisible";
 
 function matchesMobileSidebarViewport() {
@@ -975,46 +963,6 @@ export default function App() {
   }, [authUser, handleAuthRequired]);
 
   useEffect(() => {
-    if (!authUser) {
-      return undefined;
-    }
-
-    let isActive = true;
-
-    async function loadMarketStatus() {
-      try {
-        const response = await fetch("/api/market-status");
-
-        if (response.status === 401) {
-          handleAuthRequired("Session expired");
-          return;
-        }
-
-        if (!response.ok) {
-          throw new Error(`Market status request failed with ${response.status}`);
-        }
-
-        const payload = await response.json();
-        if (isActive) {
-          setMarketStatusPayload(payload);
-        }
-      } catch (_error) {
-        // Keep the last known market schedule visible if the lightweight Polygon poll fails.
-      }
-    }
-
-    void loadMarketStatus();
-    const interval = window.setInterval(() => {
-      void loadMarketStatus();
-    }, 60_000);
-
-    return () => {
-      isActive = false;
-      window.clearInterval(interval);
-    };
-  }, [authUser, handleAuthRequired]);
-
-  useEffect(() => {
     if (loading) {
       return;
     }
@@ -1044,7 +992,7 @@ export default function App() {
       return undefined;
     }
 
-    if (loading || !(activeView === "paper" || activeView === "orders")) {
+    if (loading || activeView !== "paper") {
       return undefined;
     }
 
@@ -1152,7 +1100,6 @@ export default function App() {
     !showCoveredIncomeScanner &&
     !showTradingViewStrategyFinder;
   const showPaperTrading = activeView === "paper";
-  const showOrderManagement = activeView === "orders";
   const nextThemeLabel = theme === "dark" ? "Light mode" : "Dark mode";
   const isSidebarVisible = isMobileViewport ? isSidebarOpen : isDesktopSidebarVisible;
 
@@ -1229,7 +1176,6 @@ export default function App() {
 	            onOpenAdminUsers={() => navigateTo("admin-users")}
 	            onOpenScreening={() => navigateTo("screening")}
 	            onOpenPaperTrading={() => navigateTo("paper")}
-	            onOpenOrderManagement={() => navigateTo("orders")}
 	            onSelect={(strategyId) => navigateTo("strategy", strategyId)}
 	            paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
 	            screeningSummary={v2Screener?.summary ?? null}
@@ -1256,18 +1202,6 @@ export default function App() {
               onSyncPaperExecution={handleSyncPaperExecution}
               onCancelPaperExecution={handleCancelPaperExecution}
               theme={theme}
-            />
-          ) : showOrderManagement ? (
-            <IbkrOrderManagementWorkspace
-              paperPortfolio={paperPortfolio ?? paperPortfolioPreview}
-              lastUpdated={paperPortfolioLastUpdated ?? strategyPayload?.lastUpdated ?? null}
-              onUpdatePaperOrder={handleUpdatePaperOrder}
-              onExecutePaperOrder={handleExecutePaperOrder}
-              onConfirmPaperExecution={handleConfirmPaperExecution}
-              onSyncPaperExecution={handleSyncPaperExecution}
-              onCancelPaperExecution={handleCancelPaperExecution}
-              onOpenStrategy={(strategyId) => navigateTo("strategy", strategyId)}
-              onOpenPaperTrading={() => navigateTo("paper")}
             />
           ) : showWatchlist ? (
             <StrategyWatchlistWorkspace
@@ -1296,6 +1230,8 @@ export default function App() {
 	              strategyPayload={strategyPayload}
 	              onSaveStrategyAssetMapping={handleSaveStrategyAssetMapping}
 	              onDeleteStrategyAssetMapping={handleDeleteStrategyAssetMapping}
+                isAdmin={authUser?.role === "admin"}
+                onAuthRequired={handleAuthRequired}
 	            />
 	          ) : showAdminUsers ? (
 	            authUser?.role === "admin" ? (

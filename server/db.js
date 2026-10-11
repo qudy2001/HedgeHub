@@ -12,6 +12,7 @@ export const removeStrategyFromWatchlist = (...args) => backend.removeStrategyFr
 export const listSetupWatchlist = (...args) => backend.listSetupWatchlist(...args);
 export const upsertSetupWatchlistItem = (...args) => backend.upsertSetupWatchlistItem(...args);
 export const deleteSetupWatchlistItem = (...args) => backend.deleteSetupWatchlistItem(...args);
+export const listScannerPromotions = (...args) => backend.listScannerPromotions(...args);
 export const getRecentRuns = (...args) => backend.getRecentRuns(...args);
 export const upsertScannerPreset = (...args) => backend.upsertScannerPreset(...args);
 export const listScannerPresets = (...args) => backend.listScannerPresets(...args);
@@ -23,6 +24,11 @@ export const listIv30History = (...args) => backend.listIv30History(...args);
 export const upsertIvRankDaily = (...args) => backend.upsertIvRankDaily(...args);
 export const getLatestIvRankDaily = (...args) => backend.getLatestIvRankDaily(...args);
 export const createScannerPromotion = (...args) => backend.createScannerPromotion(...args);
+export const recordOptionShortlistObservations = (...args) => backend.recordOptionShortlistObservations(...args);
+export const listOptionShortlistObservations = (...args) => backend.listOptionShortlistObservations(...args);
+export const createOptionsHistoryIngestionRun = (...args) => backend.createOptionsHistoryIngestionRun(...args);
+export const updateOptionsHistoryIngestionRun = (...args) => backend.updateOptionsHistoryIngestionRun(...args);
+export const listOptionsHistoryIngestionRuns = (...args) => backend.listOptionsHistoryIngestionRuns(...args);
 export const listPaperOrders = (...args) => backend.listPaperOrders(...args);
 export const createPaperOrder = (...args) => backend.createPaperOrder(...args);
 export const updatePaperOrder = (...args) => backend.updatePaperOrder(...args);
@@ -54,13 +60,16 @@ export const getSessionWithUser = (...args) => backend.getSessionWithUser(...arg
 export const touchSession = (...args) => backend.touchSession(...args);
 export const deleteSession = (...args) => backend.deleteSession(...args);
 export const deleteExpiredSessions = (...args) => backend.deleteExpiredSessions(...args);
-export const getIbkrSettings = (...args) => backend.getIbkrSettings(...args);
-export const upsertIbkrSettings = (...args) => backend.upsertIbkrSettings(...args);
+export const getAppSetting = (...args) => backend.getAppSetting(...args);
+export const upsertAppSetting = (...args) => backend.upsertAppSetting(...args);
 export const createUserApiKey = (...args) => backend.createUserApiKey(...args);
 export const listUserApiKeys = (...args) => backend.listUserApiKeys(...args);
 export const getUserApiKeyWithUser = (...args) => backend.getUserApiKeyWithUser(...args);
 export const touchUserApiKey = (...args) => backend.touchUserApiKey(...args);
 export const revokeUserApiKey = (...args) => backend.revokeUserApiKey(...args);
+export const createGptApiRequestLog = (...args) => backend.createGptApiRequestLog(...args);
+export const listGptApiRequestLogs = (...args) => backend.listGptApiRequestLogs(...args);
+export const summarizeGptApiRequestLogs = (...args) => backend.summarizeGptApiRequestLogs(...args);
 export const claimLegacyUserData = (...args) => backend.claimLegacyUserData(...args);
 
 export default backend.default ?? null;

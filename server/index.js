@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import express from "express";
 import cors from "cors";
+import { pathToFileURL } from "node:url";
 import "./env.js";
 import {
   buildRequestLogContext,
@@ -12,6 +13,7 @@ import {
   logWarn,
   patchExpressAsync
 } from "./logger.js";
+import { envFlagEnabled, runtimeConfig } from "./runtimeConfig.js";
 import { hashPlaintextPassword, registerAuthRoutes, requireAdmin, requireAuth } from "./auth.js";
 import {
   calendarWidgets,
@@ -22,7 +24,9 @@ import {
 import { buildMacroDashboardPayload, buildMacroHeroStats } from "./macroDashboard.js";
 import {
   addStrategyToWatchlist,
+  getAppSetting,
   createUserApiKey,
+  createGptApiRequestLog,
   createUser,
   createPaperCalculatorSnapshot,
   createPaperOrder,
@@ -37,9 +41,11 @@ import {
   listPaperCalculatorSnapshots,
   listCandidateRankHistory,
   listDeltaHedgeScannerSymbols,
-  listIv30History,
+  listOptionShortlistObservations,
   listScannerPresets,
+  listScannerPromotions,
   listUsers,
+  listGptApiRequestLogs,
   getLatestSnapshots,
   listSetupWatchlist,
   listStrategyWatchlist,
@@ -55,20 +61,19 @@ import {
   saveScannerRun,
   saveStrategyRun,
   upsertScannerPreset,
-  upsertIv30History,
-  upsertIvRankDaily,
   upsertSetupWatchlistItem,
-  getIbkrSettings,
   getUserApiKeyWithUser,
-  upsertIbkrSettings,
+  upsertAppSetting,
   upsertDeltaHedgeScannerSymbol,
   upsertStrategyAssetMapping,
   deleteDeltaHedgeScannerSymbol,
   deleteStrategyAssetMapping,
   listUserApiKeys,
   revokeUserApiKey,
+  summarizeGptApiRequestLogs,
   touchUserApiKey,
-  updatePaperOrder
+  updatePaperOrder,
+  recordOptionShortlistObservations
 } from "./db.js";
 import {
   initializeDashboardLayoutsDirectory,
@@ -87,10 +92,9 @@ import {
 } from "./providers/tradingViewCalendars.js";
 import { scanTradingViewStrategyFinder } from "./providers/tradingViewStrategyFinder.js";
 import {
-  fetchPolygonMarketStatusNow,
-  fetchPolygonUpcomingMarketClosures
-} from "./providers/polygonMarketStatus.js";
-import { fetchOptionChain, fetchPolygonAtmIv30Snapshot, fetchQuotes } from "./providers/yahooFinance.js";
+  fetchOptionChain,
+  fetchQuotes
+} from "./providers/yahooFinance.js";
 import {
   blackScholesCall,
   blackScholesPut,
@@ -109,6 +113,7 @@ import {
 import { buildVolatilityOpportunityScan } from "./volatilityOpportunityScreener.js";
 import { fetchStockFundamentals } from "./stockFundamentals.js";
 import { fetchStockTechnicals } from "./stockTechnicals.js";
+import { fetchMarketDataSnapshot } from "./marketDataSnapshot.js";
 import { buildVolCrushEarningsScan } from "./earningsVolCrush.js";
 import { buildCoveredIncomeScan } from "./coveredIncomeScanner.js";
 import { fetchStockDailyOhlcHistory } from "./stockOhlcHistory.js";
@@ -123,23 +128,6 @@ import {
   strategyAssetMatchesMarket
 } from "./strategyAssets.js";
 import {
-  calculateIbkrLimitPrice,
-  cancelIbkrOrder,
-  continueIbkrOrderConfirmation,
-  fetchIbkrOrderBook,
-  fetchIbkrOrderStatus,
-  getIbkrStatus,
-  groupTradesByOrderRef,
-  isIbkrFilledStatus,
-  isIbkrTerminalStatus,
-  isIbkrWorkingStatus,
-  normalizeIbkrLiveOrder,
-  submitIbkrStockOrder,
-  submitIbkrOptionOrder,
-  tickleIbkrSession
-} from "./ibkrClientPortal.js";
-import { parseTwsPaperOrderRef, twsPaperApi } from "./ibkrTwsApi.js";
-import {
   applyPaperOrderPatch,
   attachPaperOrderHistory,
   buildPaperOrderSnapshot,
@@ -150,7 +138,6 @@ import {
 import {
   buildCoveredIncomeEv,
   buildExplainability,
-  buildIvRankDailySnapshot,
   buildMarketRegime,
   buildPortfolioContext,
   buildPortfolioImpact,
@@ -159,6 +146,16 @@ import {
   buildTradingViewEv,
   buildVolatilityMetrics
 } from "./scannerIntelligence.js";
+import {
+  buildOptionObservationPayload,
+  buildOptionObservationSummary,
+  buildOptionObservationDiagnostics,
+  normalizeContractSymbol
+} from "./optionsMicrostructure.js";
+import {
+  getDockerDiagnosticsBridgeStatus,
+  setDockerDiagnosticsBridgeEnabled
+} from "./dockerDiagnosticsBridge.js";
 
 installProcessErrorHandlers();
 
@@ -185,9 +182,6 @@ const PAPER_QUOTE_BROADCAST_DEBOUNCE_MS = Math.max(
 const PAPER_ORDER_SNAPSHOT_INTERVAL_MS = 60 * 1000;
 const IBKR_SYNC_INTERVAL_MS = Math.max(Number(process.env.IBKR_SYNC_INTERVAL_MS ?? 15000) || 15000, 10000);
 const TWS_SYNC_INTERVAL_MS = Math.max(Number(process.env.TWS_SYNC_INTERVAL_MS ?? 15000) || 15000, 5000);
-const MASSIVE_OPTIONS_WS_URL = process.env.POLYGON_WS_URL || "wss://socket.massive.com/options";
-const POLYGON_MARKET_STATUS_REFRESH_MS = 60 * 1000;
-const POLYGON_MARKET_UPCOMING_REFRESH_MS = 6 * 60 * 60 * 1000;
 const SMART_ORDER_QUOTE_MAX_AGE_MS = 90 * 1000;
 const SMART_ORDER_MIN_TICK = 0.05;
 const SMART_ORDER_MAX_REPLACES = 3;
@@ -201,6 +195,18 @@ const PAPER_QUOTE_SLOW_PROCESS_MS = Math.max(
   Number(process.env.PAPER_QUOTE_SLOW_PROCESS_MS ?? 250) || 250,
   50
 );
+const SHORTLIST_OBSERVATION_HEARTBEAT_MS = Math.max(
+  Number(process.env.SHORTLIST_OBSERVATION_HEARTBEAT_MS ?? 60000) || 60000,
+  5000
+);
+const SHORTLIST_REST_BACKFILL_INTERVAL_MS = Math.max(
+  Number(process.env.SHORTLIST_REST_BACKFILL_INTERVAL_MS ?? 60000) || 60000,
+  10000
+);
+const SHORTLIST_OBSERVATION_FLUSH_INTERVAL_MS = Math.max(
+  Number(process.env.SHORTLIST_OBSERVATION_FLUSH_INTERVAL_MS ?? 5000) || 5000,
+  500
+);
 const EVENT_LOOP_MONITOR_INTERVAL_MS = Math.max(
   Number(process.env.EVENT_LOOP_MONITOR_INTERVAL_MS ?? 1000) || 1000,
   250
@@ -210,6 +216,7 @@ const EVENT_LOOP_LAG_WARN_MS = Math.max(
   50
 );
 const GPT_API_KEY_PREFIX = "hhk_";
+const DOCKER_DIAGNOSTICS_BRIDGE_SETTING_KEY = "dockerDiagnosticsBridge";
 
 app.use(createRequestLoggingMiddleware());
 app.use(cors());
@@ -450,6 +457,7 @@ function sanitizeGptStrategyQueryRequest(body = {}) {
   const endDate = parseIsoDate(body?.optionExpirationEndDate);
   const expectedPriceRangeLow = Number(body?.expectedPriceRangeLow);
   const expectedPriceRangeHigh = Number(body?.expectedPriceRangeHigh);
+  const topX = parseOptionalPositiveInteger(body?.topX);
 
   if (!ticker) {
     throw new Error("ticker is required");
@@ -463,6 +471,9 @@ function sanitizeGptStrategyQueryRequest(body = {}) {
   if (!Number.isFinite(expectedPriceRangeLow) || !Number.isFinite(expectedPriceRangeHigh)) {
     throw new Error("expectedPriceRangeLow and expectedPriceRangeHigh must be numbers");
   }
+  if (body?.topX != null && topX == null) {
+    throw new Error("topX must be a positive integer");
+  }
 
   return {
     ticker,
@@ -470,15 +481,94 @@ function sanitizeGptStrategyQueryRequest(body = {}) {
     optionExpirationEndDate: body.optionExpirationEndDate,
     expectedPriceRangeLow: Math.min(expectedPriceRangeLow, expectedPriceRangeHigh),
     expectedPriceRangeHigh: Math.max(expectedPriceRangeLow, expectedPriceRangeHigh),
+    topX,
     startDate,
     endDate
   };
+}
+
+function getRequestDurationMs(request) {
+  const startedAt = request.requestStartedAtNs;
+  if (typeof startedAt !== "bigint") {
+    return null;
+  }
+
+  return Number(((process.hrtime.bigint() - startedAt) / 1000000n).toString());
+}
+
+function sanitizeAuditValue(value, depth = 0) {
+  if (value == null) {
+    return value;
+  }
+
+  if (depth >= 4) {
+    return "[truncated]";
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 25).map((item) => sanitizeAuditValue(item, depth + 1));
+  }
+
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, 50)
+        .map(([key, entryValue]) => [String(key), sanitizeAuditValue(entryValue, depth + 1)])
+    );
+  }
+
+  if (typeof value === "string") {
+    return value.length > 1000 ? `${value.slice(0, 1000)}…` : value;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  return String(value);
+}
+
+function createSafeGptRequestBody(body = {}) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return {};
+  }
+
+  return sanitizeAuditValue(body);
+}
+
+function recordGptApiUsage(entry = {}) {
+  try {
+    createGptApiRequestLog(entry);
+  } catch (error) {
+    logWarn("Failed to record GPT API usage", {
+      subsystem: "gpt-api-audit",
+      error,
+      entryId: entry.id ?? null,
+      path: entry.path ?? null
+    });
+  }
 }
 
 async function requireApiKey(request, response, next) {
   try {
     const rawApiKey = String(request.headers["x-api-key"] ?? "").trim();
     if (!rawApiKey) {
+      recordGptApiUsage({
+        id: crypto.randomUUID(),
+        method: request.method,
+        path: request.originalUrl || request.url,
+        ipAddress: request.ip,
+        authStatus: "missing_api_key",
+        statusCode: 401,
+        responseTimeMs: getRequestDurationMs(request),
+        requestTicker: request.body?.ticker ?? null,
+        expectedPriceRangeLow: request.body?.expectedPriceRangeLow ?? null,
+        expectedPriceRangeHigh: request.body?.expectedPriceRangeHigh ?? null,
+        optionExpirationStartDate: request.body?.optionExpirationStartDate ?? null,
+        optionExpirationEndDate: request.body?.optionExpirationEndDate ?? null,
+        requestBody: createSafeGptRequestBody(request.body),
+        errorMessage: "API key required"
+      });
       response.status(401).json({ error: "API key required" });
       return;
     }
@@ -486,6 +576,23 @@ async function requireApiKey(request, response, next) {
     const tokenHash = hashApiKeyToken(rawApiKey);
     const apiKey = getUserApiKeyWithUser(tokenHash);
     if (!apiKey || apiKey.revokedAt || Number(apiKey.disabled ?? 0) === 1) {
+      recordGptApiUsage({
+        id: crypto.randomUUID(),
+        method: request.method,
+        path: request.originalUrl || request.url,
+        ipAddress: request.ip,
+        apiKeyPrefix: rawApiKey.slice(0, Math.min(rawApiKey.length, 12)),
+        authStatus: "invalid_api_key",
+        statusCode: 401,
+        responseTimeMs: getRequestDurationMs(request),
+        requestTicker: request.body?.ticker ?? null,
+        expectedPriceRangeLow: request.body?.expectedPriceRangeLow ?? null,
+        expectedPriceRangeHigh: request.body?.expectedPriceRangeHigh ?? null,
+        optionExpirationStartDate: request.body?.optionExpirationStartDate ?? null,
+        optionExpirationEndDate: request.body?.optionExpirationEndDate ?? null,
+        requestBody: createSafeGptRequestBody(request.body),
+        errorMessage: "Invalid API key"
+      });
       response.status(401).json({ error: "Invalid API key" });
       return;
     }
@@ -499,6 +606,22 @@ async function requireApiKey(request, response, next) {
     touchUserApiKey(apiKey.id);
     next();
   } catch (error) {
+    recordGptApiUsage({
+      id: crypto.randomUUID(),
+      method: request.method,
+      path: request.originalUrl || request.url,
+      ipAddress: request.ip,
+      authStatus: "auth_error",
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      requestTicker: request.body?.ticker ?? null,
+      expectedPriceRangeLow: request.body?.expectedPriceRangeLow ?? null,
+      expectedPriceRangeHigh: request.body?.expectedPriceRangeHigh ?? null,
+      optionExpirationStartDate: request.body?.optionExpirationStartDate ?? null,
+      optionExpirationEndDate: request.body?.optionExpirationEndDate ?? null,
+      requestBody: createSafeGptRequestBody(request.body),
+      errorMessage: error.message
+    });
     logError("API key authentication failed", {
       error,
       request: buildRequestLogContext(request)
@@ -544,12 +667,88 @@ async function buildThresholdHedgeGptResults(query) {
       }))
     )
     .filter((item) => isIsoDateWithinRange(item.optionExpiry, query.optionExpirationStartDate, query.optionExpirationEndDate));
+  const limitedItems = applyScannerTopX(items, query.topX, {
+    score: (item) => item?.score,
+    rewardRisk: (item) => item?.rewardRisk,
+    maxLoss: (item) => item?.maxLoss
+  });
 
   return {
-    count: items.length,
-    items,
+    count: limitedItems.length,
+    items: limitedItems,
     warnings: items.length ? [] : [`No Threshold Hedge opportunities matched ${query.ticker} in the requested expiry window.`]
   };
+}
+
+function parseOptionalPositiveInteger(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  return numeric;
+}
+
+function toFiniteNumber(value, fallback = null) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function rankScannerItems(items = [], accessors = {}) {
+  const scoreAccessor = typeof accessors.score === "function" ? accessors.score : () => null;
+  const rewardRiskAccessor = typeof accessors.rewardRisk === "function" ? accessors.rewardRisk : () => null;
+  const maxLossAccessor = typeof accessors.maxLoss === "function" ? accessors.maxLoss : () => null;
+
+  return [...items]
+    .map((item, index) => ({
+      item,
+      index,
+      score: toFiniteNumber(scoreAccessor(item), null),
+      rewardRisk: toFiniteNumber(rewardRiskAccessor(item), null),
+      maxLossAbs: Math.abs(toFiniteNumber(maxLossAccessor(item), Number.POSITIVE_INFINITY))
+    }))
+    .sort((left, right) => {
+      const leftScore = left.score ?? Number.NEGATIVE_INFINITY;
+      const rightScore = right.score ?? Number.NEGATIVE_INFINITY;
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
+      }
+
+      const leftRewardRisk = left.rewardRisk ?? Number.NEGATIVE_INFINITY;
+      const rightRewardRisk = right.rewardRisk ?? Number.NEGATIVE_INFINITY;
+      if (rightRewardRisk !== leftRewardRisk) {
+        return rightRewardRisk - leftRewardRisk;
+      }
+
+      if (left.maxLossAbs !== right.maxLossAbs) {
+        return left.maxLossAbs - right.maxLossAbs;
+      }
+
+      return left.index - right.index;
+    })
+    .map((entry) => entry.item);
+}
+
+function applyScannerTopX(items = [], topX = null, accessors = {}) {
+  const normalizedTopX = parseOptionalPositiveInteger(topX);
+  if (!normalizedTopX) {
+    return items;
+  }
+
+  return rankScannerItems(items, accessors).slice(0, normalizedTopX);
+}
+
+function buildTopXShortfallWarning(scannerLabel, requestedTopX, returnedCount, scopeLabel) {
+  const normalizedTopX = parseOptionalPositiveInteger(requestedTopX);
+  if (!normalizedTopX || returnedCount >= normalizedTopX) {
+    return null;
+  }
+
+  return `Only ${returnedCount} ${scannerLabel} match${returnedCount === 1 ? "" : "es"} were available for ${scopeLabel}; requested top ${normalizedTopX}.`;
 }
 
 async function buildTradingViewGptResults(query) {
@@ -576,13 +775,22 @@ async function buildTradingViewGptResults(query) {
     isIsoDateWithinRange(row?.expiration, query.optionExpirationStartDate, query.optionExpirationEndDate)
   );
   const items = filteredRows.map((row) => buildRepricedTradingViewRow(row)).filter(Boolean);
+  const limitedItems = applyScannerTopX(items, query.topX, {
+    score: (item) => item?.score,
+    rewardRisk: (item) => item?.rewardRisk,
+    maxLoss: (item) => item?.maxLoss
+  });
   if (items.length < filteredRows.length) {
     warnings.push("Some TradingView rows were excluded because live option quotes could not be fully verified.");
   }
+  const topXWarning = buildTopXShortfallWarning("TradingView", query.topX, limitedItems.length, query.ticker);
+  if (topXWarning) {
+    warnings.push(topXWarning);
+  }
 
   return {
-    count: items.length,
-    items,
+    count: limitedItems.length,
+    items: limitedItems,
     warnings
   };
 }
@@ -610,11 +818,21 @@ async function buildCoveredIncomeGptResults(query) {
   const items = (enrichedPayload?.rows ?? []).filter((row) =>
     isIsoDateWithinRange(row?.expiryDate, query.optionExpirationStartDate, query.optionExpirationEndDate)
   );
+  const limitedItems = applyScannerTopX(items, query.topX, {
+    score: (item) => item?.score?.finalStrategyScore ?? item?.score,
+    rewardRisk: (item) => item?.returns?.annualizedReturnOnAllocatedCashPct ?? item?.probabilityOfProfit,
+    maxLoss: (item) => item?.capital?.allocatedCashUsed ?? item?.stockPrice
+  });
+  const warnings = Array.isArray(enrichedPayload?.warnings) ? [...enrichedPayload.warnings] : [];
+  const topXWarning = buildTopXShortfallWarning("Covered Income", query.topX, limitedItems.length, query.ticker);
+  if (topXWarning) {
+    warnings.push(topXWarning);
+  }
 
   return {
-    count: items.length,
-    items,
-    warnings: Array.isArray(enrichedPayload?.warnings) ? enrichedPayload.warnings : []
+    count: limitedItems.length,
+    items: limitedItems,
+    warnings
   };
 }
 
@@ -624,7 +842,22 @@ app.use((request, response, next) => {
     return;
   }
 
-  if (request.path === "/api/health" || request.path.startsWith("/api/auth/") || request.path.startsWith("/api/gpt/")) {
+  const requestIp = String(request.ip ?? request.socket?.remoteAddress ?? "").trim();
+  const isLoopbackRequest =
+    requestIp === "::1" ||
+    requestIp === "127.0.0.1" ||
+    requestIp === "::ffff:127.0.0.1" ||
+    requestIp === "::ffff:127.0.1.1";
+
+  if (
+    request.path === "/api/health" ||
+    request.path.startsWith("/api/auth/") ||
+    request.path.startsWith("/api/gpt/") ||
+    request.path === "/api/market-data" ||
+    ((request.path === "/api/options/contract-debug" ||
+      request.path === "/api/options/contract-from-chain-debug") &&
+      isLoopbackRequest)
+  ) {
     next();
     return;
   }
@@ -761,83 +994,51 @@ app.delete("/api/admin/api-keys/:id", requireAdmin, (request, response) => {
   response.json({ ok: true });
 });
 
-function buildDefaultIbkrSettings() {
-  const baseUrl = String(process.env.IBKR_CP_BASE_URL || "https://127.0.0.1:5000/v1/api")
-    .trim()
-    .replace(/\/+$/, "");
-
-  return {
-    baseUrl,
-    timeoutMs: Math.max(Number(process.env.IBKR_CP_TIMEOUT_MS ?? 15000) || 15000, 5000),
-    allowSelfSigned: String(process.env.IBKR_CP_ALLOW_SELF_SIGNED ?? "true").trim().toLowerCase() !== "false",
-    accountId: String(process.env.IBKR_CP_ACCOUNT_ID ?? "").trim(),
-    requirePaper: String(process.env.IBKR_CP_REQUIRE_PAPER ?? "true").trim().toLowerCase() !== "false",
-    extOperator: String(process.env.IBKR_CP_EXT_OPERATOR ?? "").trim(),
-    manualIndicator: String(process.env.IBKR_CP_MANUAL_INDICATOR ?? "false").trim().toLowerCase() === "true"
-  };
-}
-
-function normalizeIbkrSettings(payload) {
-  const defaults = buildDefaultIbkrSettings();
-  const baseUrl = String(payload?.baseUrl ?? payload?.IBKR_CP_BASE_URL ?? defaults.baseUrl)
-    .trim()
-    .replace(/\/+$/, "");
-
-  if (!baseUrl || !(baseUrl.startsWith("http://") || baseUrl.startsWith("https://"))) {
-    throw new Error("baseUrl must start with http:// or https://");
-  }
-
-  return {
-    baseUrl,
-    timeoutMs: Math.max(Number(payload?.timeoutMs ?? defaults.timeoutMs) || defaults.timeoutMs, 5000),
-    allowSelfSigned: Boolean(payload?.allowSelfSigned ?? defaults.allowSelfSigned),
-    accountId: String(payload?.accountId ?? defaults.accountId).trim(),
-    requirePaper: Boolean(payload?.requirePaper ?? defaults.requirePaper),
-    extOperator: String(payload?.extOperator ?? defaults.extOperator).trim(),
-    manualIndicator: Boolean(payload?.manualIndicator ?? defaults.manualIndicator)
-  };
-}
-
-function getEffectiveIbkrSettingsForUser(userId) {
-  const defaults = buildDefaultIbkrSettings();
-  const saved = getIbkrSettings(String(userId ?? "").trim());
-  const savedConfig = saved?.config && typeof saved.config === "object" ? saved.config : null;
-
-  return savedConfig ? { ...defaults, ...savedConfig } : defaults;
-}
-
-function getIbkrContextForUser(userId) {
-  const normalizedUserId = String(userId ?? "").trim() || "anonymous";
-  return {
-    config: getEffectiveIbkrSettingsForUser(normalizedUserId),
-    cookieJarKey: normalizedUserId
-  };
-}
-
-app.get("/api/settings/ibkr", (request, response) => {
-  const saved = getIbkrSettings(request.user.id);
-  const defaults = buildDefaultIbkrSettings();
-  const effective = saved?.config && typeof saved.config === "object" ? { ...defaults, ...saved.config } : defaults;
-
+app.get("/api/admin/api-usage", requireAdmin, (_request, response) => {
   response.json({
-    saved: saved?.config ?? null,
-    effective
+    summary: summarizeGptApiRequestLogs(),
+    requests: listGptApiRequestLogs(100)
   });
 });
 
-app.put("/api/settings/ibkr", (request, response) => {
-  try {
-    const normalized = normalizeIbkrSettings(request.body ?? {});
-    const saved = upsertIbkrSettings(request.user.id, normalized);
-    response.json({
-      ok: true,
-      saved: saved?.config ?? null,
-      effective: normalized
-    });
-  } catch (error) {
-    response.status(400).json({ error: error.message });
-  }
+app.get("/api/admin/docker-diagnostics-bridge", requireAdmin, async (_request, response) => {
+  response.json(await syncDockerDiagnosticsBridgeFromSetting());
 });
+
+app.put("/api/admin/docker-diagnostics-bridge", requireAdmin, async (request, response) => {
+  const normalized = normalizeDockerDiagnosticsBridgeSetting(request.body ?? {});
+  upsertAppSetting(DOCKER_DIAGNOSTICS_BRIDGE_SETTING_KEY, normalized);
+  response.json(await syncDockerDiagnosticsBridgeFromSetting());
+});
+
+function buildDefaultDockerDiagnosticsBridgeSetting() {
+  return {
+    enabled: false
+  };
+}
+
+function normalizeDockerDiagnosticsBridgeSetting(payload) {
+  return {
+    enabled: Boolean(payload?.enabled)
+  };
+}
+
+function getStoredDockerDiagnosticsBridgeSetting() {
+  const saved = getAppSetting(DOCKER_DIAGNOSTICS_BRIDGE_SETTING_KEY);
+  const defaults = buildDefaultDockerDiagnosticsBridgeSetting();
+  const savedValue = saved?.value && typeof saved.value === "object" ? saved.value : null;
+  return savedValue ? { ...defaults, ...savedValue } : defaults;
+}
+
+async function syncDockerDiagnosticsBridgeFromSetting() {
+  const stored = getStoredDockerDiagnosticsBridgeSetting();
+  const shouldEnable = runtimeConfig.enableHttp && stored.enabled === true;
+  await setDockerDiagnosticsBridgeEnabled(shouldEnable);
+  return {
+    ...getDockerDiagnosticsBridgeStatus(),
+    enabled: stored.enabled === true
+  };
+}
 
 app.get("/api/health", (_request, response) => {
   response.json({
@@ -858,6 +1059,7 @@ const liveState = {
   warnings: [],
   calendarWarnings: []
 };
+const IS_POSTGRES_BACKEND = String(process.env.DB_TYPE ?? "sqlite").trim().toLowerCase() === "postgres";
 const strategyResponseCache = {
   buildPromise: null,
   response: null,
@@ -920,34 +1122,25 @@ const paperBrokerState = {
   }
 };
 const livePaperOptionQuotes = new Map();
-const polygonMarketStatusCache = {
-  now: null,
-  upcoming: [],
-  nowFetchedAt: 0,
-  upcomingFetchedAt: 0,
-  lastSuccessAt: null,
-  error: "",
-  promise: null
+const shortlistObservationState = {
+  contextsBySymbol: new Map(),
+  latestByUserContract: new Map(),
+  queue: [],
+  flushTimer: null,
+  flushing: false,
+  restBackfillInFlight: false,
+  lastRestBackfillAt: null
 };
-
-function envFlagEnabled(name, defaultValue = false) {
-  const raw = String(process.env[name] ?? "").trim().toLowerCase();
-  if (!raw) {
-    return defaultValue;
-  }
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-}
-
 function shouldRunBackgroundPaperTasks() {
-  return paperStreamClientsByUserId.size > 0 || envFlagEnabled("HEDGEHUB_BACKGROUND_PAPER_TASKS", false);
+  return runtimeConfig.enableHttp && (paperStreamClientsByUserId.size > 0 || envFlagEnabled("HEDGEHUB_BACKGROUND_PAPER_TASKS", false));
 }
 
 function shouldRunBackgroundIbkrSync() {
-  return shouldRunBackgroundPaperTasks() || envFlagEnabled("HEDGEHUB_BACKGROUND_IBKR_SYNC", false);
+  return false;
 }
 
 function shouldStartBackgroundJobs() {
-  return envFlagEnabled("HEDGEHUB_BACKGROUND_JOBS", false);
+  return runtimeConfig.enableBackgroundJobs;
 }
 
 function shouldRunBackgroundMarketRefresh() {
@@ -963,11 +1156,11 @@ function shouldRunBackgroundCalendarRefresh() {
 }
 
 function shouldRunBackgroundPaperHeartbeat() {
-  return shouldStartBackgroundJobs() || envFlagEnabled("HEDGEHUB_BACKGROUND_PAPER_HEARTBEAT", false);
+  return runtimeConfig.enableHttp && (shouldStartBackgroundJobs() || envFlagEnabled("HEDGEHUB_BACKGROUND_PAPER_HEARTBEAT", false));
 }
 
 function shouldRunBackgroundTwsSync() {
-  return shouldStartBackgroundJobs() || envFlagEnabled("HEDGEHUB_BACKGROUND_TWS_SYNC", false);
+  return false;
 }
 
 function buildEmptyIbkrStatus() {
@@ -1020,78 +1213,6 @@ function normalizeTimestamp(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
-function buildPolygonMarketStatusResponse() {
-  return {
-    configured: Boolean(process.env.POLYGON_API_KEY),
-    provider: "polygon",
-    fetchedAt: new Date().toISOString(),
-    lastSuccessAt: polygonMarketStatusCache.lastSuccessAt,
-    error: polygonMarketStatusCache.error,
-    statusNow: polygonMarketStatusCache.now,
-    upcoming: polygonMarketStatusCache.upcoming
-  };
-}
-
-async function getPolygonMarketStatusPayload({ force = false } = {}) {
-  if (!process.env.POLYGON_API_KEY) {
-    return buildPolygonMarketStatusResponse();
-  }
-
-  const now = Date.now();
-  const shouldRefreshNow =
-    force ||
-    !polygonMarketStatusCache.now ||
-    now - polygonMarketStatusCache.nowFetchedAt >= POLYGON_MARKET_STATUS_REFRESH_MS;
-  const shouldRefreshUpcoming =
-    force ||
-    !polygonMarketStatusCache.upcomingFetchedAt ||
-    now - polygonMarketStatusCache.upcomingFetchedAt >= POLYGON_MARKET_UPCOMING_REFRESH_MS;
-
-  if (!shouldRefreshNow && !shouldRefreshUpcoming) {
-    return buildPolygonMarketStatusResponse();
-  }
-
-  if (polygonMarketStatusCache.promise) {
-    return polygonMarketStatusCache.promise;
-  }
-
-  polygonMarketStatusCache.promise = (async () => {
-    const errors = [];
-
-    if (shouldRefreshNow) {
-      try {
-        polygonMarketStatusCache.now = await fetchPolygonMarketStatusNow();
-        polygonMarketStatusCache.nowFetchedAt = Date.now();
-      } catch (error) {
-        errors.push(`Live status unavailable: ${error.message}`);
-      }
-    }
-
-    if (shouldRefreshUpcoming) {
-      try {
-        polygonMarketStatusCache.upcoming = await fetchPolygonUpcomingMarketClosures();
-        polygonMarketStatusCache.upcomingFetchedAt = Date.now();
-      } catch (error) {
-        errors.push(`Holiday calendar unavailable: ${error.message}`);
-      }
-    }
-
-    polygonMarketStatusCache.error = errors.join(" | ");
-
-    if (!polygonMarketStatusCache.error) {
-      polygonMarketStatusCache.lastSuccessAt = new Date().toISOString();
-    }
-
-    return buildPolygonMarketStatusResponse();
-  })();
-
-  try {
-    return await polygonMarketStatusCache.promise;
-  } finally {
-    polygonMarketStatusCache.promise = null;
-  }
-}
-
 function getPaperValuationPolymarketMarkets() {
   return liveState.polymarketValuationMarkets?.length
     ? liveState.polymarketValuationMarkets
@@ -1108,16 +1229,16 @@ function toNumber(value, fallback = null) {
   return Number.isFinite(numericValue) ? numericValue : fallback;
 }
 
-function isIbkrPaperRoute(order) {
-  return String(order?.execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
+function isIbkrPaperRoute(_order) {
+  return false;
 }
 
-function isTwsPaperRoute(order) {
-  return String(order?.execution?.route ?? "").trim().toLowerCase() === "tws-paper";
+function isTwsPaperRoute(_order) {
+  return false;
 }
 
-function isTwsPaperExecution(execution) {
-  return String(execution?.route ?? "").trim().toLowerCase() === "tws-paper";
+function isTwsPaperExecution(_execution) {
+  return false;
 }
 
 function hasOptionLegs(order) {
@@ -1862,6 +1983,234 @@ function normalizeOptionType(value) {
   return String(value ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
 }
 
+function assertPostgresOnlyFeature(response, featureName = "This feature") {
+  if (IS_POSTGRES_BACKEND) {
+    return true;
+  }
+
+  response.status(409).json({
+    error: `${featureName} requires DB_TYPE=postgres.`
+  });
+  return false;
+}
+
+function toObservationContextKey(userId, contractSymbol) {
+  return `${String(userId ?? "legacy").trim() || "legacy"}::${normalizeContractSymbol(contractSymbol)}`;
+}
+
+function buildObservationContext({
+  userId = "legacy",
+  source = "shortlist",
+  scannerType = null,
+  scannerCandidateId = null,
+  paperOrderId = null,
+  contractSymbol,
+  rootSymbol = null,
+  underlyingSymbol = null,
+  expiration = null,
+  strike = null,
+  optionType = "call",
+  createdAt = null,
+  bid = null,
+  ask = null,
+  bidSize = null,
+  askSize = null,
+  volume = null,
+  openInterest = null,
+  mark = null
+} = {}) {
+  const normalizedContractSymbol = normalizeContractSymbol(contractSymbol);
+  if (!normalizedContractSymbol) {
+    return null;
+  }
+
+  let normalizedCreatedAt = null;
+  if (createdAt) {
+    const parsedCreatedAt = new Date(createdAt);
+    normalizedCreatedAt = Number.isNaN(parsedCreatedAt.getTime()) ? null : parsedCreatedAt.toISOString();
+  }
+
+  return {
+    userId: String(userId ?? "legacy").trim() || "legacy",
+    source: String(source ?? "shortlist").trim() || "shortlist",
+    scannerType: scannerType ? String(scannerType).trim() : null,
+    scannerCandidateId: Number.isInteger(Number(scannerCandidateId)) ? Number(scannerCandidateId) : null,
+    paperOrderId: Number.isInteger(Number(paperOrderId)) ? Number(paperOrderId) : null,
+    contractSymbol: normalizedContractSymbol,
+    rootSymbol: String(rootSymbol ?? "").trim() || null,
+    underlyingSymbol: String(underlyingSymbol ?? rootSymbol ?? "").trim() || null,
+    expiration: String(expiration ?? "").trim() || null,
+    strike: Number.isFinite(Number(strike)) ? Number(strike) : null,
+    optionType: normalizeOptionType(optionType),
+    createdAt: normalizedCreatedAt,
+    bid: Number.isFinite(Number(bid)) ? Number(bid) : null,
+    ask: Number.isFinite(Number(ask)) ? Number(ask) : null,
+    bidSize: Number.isFinite(Number(bidSize)) ? Number(bidSize) : null,
+    askSize: Number.isFinite(Number(askSize)) ? Number(askSize) : null,
+    volume: Number.isFinite(Number(volume)) ? Number(volume) : null,
+    openInterest: Number.isFinite(Number(openInterest)) ? Number(openInterest) : null,
+    mark: Number.isFinite(Number(mark)) ? Number(mark) : null
+  };
+}
+
+function buildContextsFromOptionLegs(legs = [], contextDefaults = {}) {
+  return (Array.isArray(legs) ? legs : [])
+    .filter((leg) => leg?.kind == null || leg?.kind === "option")
+    .map((leg) =>
+      buildObservationContext({
+        ...contextDefaults,
+        contractSymbol: leg?.contractSymbol,
+        rootSymbol: leg?.rootSymbol ?? contextDefaults.rootSymbol,
+        underlyingSymbol: leg?.underlyingSymbol ?? contextDefaults.underlyingSymbol,
+        expiration: leg?.expiry ?? leg?.expiration ?? contextDefaults.expiration,
+        strike: leg?.strike ?? contextDefaults.strike,
+        optionType: leg?.optionType ?? contextDefaults.optionType,
+        bid: leg?.bid,
+        ask: leg?.ask,
+        bidSize: leg?.bidSize,
+        askSize: leg?.askSize,
+        volume: leg?.volume,
+        openInterest: leg?.openInterest,
+        mark: leg?.mark ?? leg?.mid ?? leg?.entryPrice
+      })
+    )
+    .filter(Boolean);
+}
+
+function pickPreferredObservationContext(existing, candidate) {
+  if (!existing) {
+    return candidate;
+  }
+
+  const sourcePriority = {
+    "paper-order": 3,
+    "setup-watchlist": 2,
+    "scanner-promotion": 1
+  };
+  const existingPriority = sourcePriority[existing.source] ?? 0;
+  const candidatePriority = sourcePriority[candidate.source] ?? 0;
+
+  if (candidatePriority !== existingPriority) {
+    return candidatePriority > existingPriority ? candidate : existing;
+  }
+
+  const existingCreatedAtMs = existing.createdAt ? new Date(existing.createdAt).getTime() : 0;
+  const candidateCreatedAtMs = candidate.createdAt ? new Date(candidate.createdAt).getTime() : 0;
+  return candidateCreatedAtMs >= existingCreatedAtMs ? candidate : existing;
+}
+
+function buildShortlistObservationContexts() {
+  const bySymbol = new Map();
+
+  const upsertContext = (context) => {
+    if (!context?.contractSymbol) {
+      return;
+    }
+
+    if (!bySymbol.has(context.contractSymbol)) {
+      bySymbol.set(context.contractSymbol, new Map());
+    }
+
+    const userContexts = bySymbol.get(context.contractSymbol);
+    const key = toObservationContextKey(context.userId, context.contractSymbol);
+    userContexts.set(key, pickPreferredObservationContext(userContexts.get(key), context));
+  };
+
+  getOpenPaperOrders().forEach((order) => {
+    const baseContext = {
+      userId: order.userId ?? "legacy",
+      source: "paper-order",
+      paperOrderId: order.id,
+      rootSymbol: order.position?.marketContext?.proxySymbol ?? null,
+      underlyingSymbol: order.position?.marketContext?.underlyingSymbol ?? null,
+      createdAt:
+        order.position?.execution?.submittedAt ??
+        order.position?.execution?.filledAt ??
+        order.createdAt ??
+        null
+    };
+
+    buildContextsFromOptionLegs(order.position?.legs ?? [], baseContext).forEach(upsertContext);
+  });
+
+  listSetupWatchlist(null).forEach((item) => {
+    const payload = item?.payload ?? {};
+    const baseContext = {
+      userId: item.userId ?? "legacy",
+      source: "setup-watchlist",
+      scannerType: String(payload.strategyId ?? item.strategyId ?? "").trim() || null,
+      rootSymbol: payload.marketContext?.proxySymbol ?? payload.optionSymbol ?? null,
+      underlyingSymbol: payload.marketContext?.underlyingSymbol ?? payload.underlyingSymbol ?? null,
+      createdAt: item.createdAt ?? null
+    };
+
+    buildContextsFromOptionLegs(payload.legs ?? payload.optionLegs ?? [], baseContext).forEach(upsertContext);
+  });
+
+  listScannerPromotions(null, 200).forEach((promotion) => {
+    const payload = promotion.candidatePayload ?? {};
+    const baseContext = {
+      userId: promotion.userId ?? "legacy",
+      source: "scanner-promotion",
+      scannerType: promotion.scannerType ?? null,
+      scannerCandidateId: promotion.scannerCandidateId ?? null,
+      paperOrderId: promotion.paperOrderId ?? null,
+      rootSymbol:
+        payload.marketContext?.proxySymbol ??
+        payload.optionSymbol ??
+        payload.optionLegs?.[0]?.rootSymbol ??
+        payload.legs?.find?.((leg) => leg?.kind === "option")?.rootSymbol ??
+        null,
+      underlyingSymbol: payload.marketContext?.underlyingSymbol ?? payload.underlyingSymbol ?? promotion.symbol ?? null,
+      createdAt: promotion.createdAt ?? null
+    };
+
+    buildContextsFromOptionLegs(payload.legs ?? payload.optionLegs ?? [], baseContext).forEach(upsertContext);
+  });
+
+  return new Map(
+    [...bySymbol.entries()].map(([contractSymbol, contexts]) => [contractSymbol, [...contexts.values()]])
+  );
+}
+
+function getShortlistObservationContextsBySymbol() {
+  shortlistObservationState.contextsBySymbol = buildShortlistObservationContexts();
+  return shortlistObservationState.contextsBySymbol;
+}
+
+function getShortlistObservationSeeds() {
+  const seeds = new Map();
+
+  getShortlistObservationContextsBySymbol().forEach((contexts, contractSymbol) => {
+    const preferredContext = contexts[0] ?? null;
+    if (!preferredContext) {
+      return;
+    }
+
+    seeds.set(contractSymbol, {
+      contractSymbol,
+      rootSymbol: preferredContext.rootSymbol ?? preferredContext.underlyingSymbol ?? null,
+      underlyingSymbol: preferredContext.underlyingSymbol ?? preferredContext.rootSymbol ?? null,
+      expiration: preferredContext.expiration,
+      strike: preferredContext.strike,
+      optionType: preferredContext.optionType,
+      bid: preferredContext.bid,
+      ask: preferredContext.ask,
+      bidSize: preferredContext.bidSize,
+      askSize: preferredContext.askSize,
+      volume: preferredContext.volume,
+      openInterest: preferredContext.openInterest,
+      mark: preferredContext.mark,
+      source: preferredContext.source,
+      sourceLabel: "Shortlist",
+      isLive: true,
+      hasRealBidAsk: false
+    });
+  });
+
+  return seeds;
+}
+
 function getOptionContractSortScore(contract, currentSpot) {
   const strike = Number(contract?.strike ?? 0);
   const expiryValue = String(contract?.expiration ?? "").trim();
@@ -2025,6 +2374,12 @@ function getDesiredPaperOptionSymbols() {
     }
   });
 
+  getShortlistObservationSeeds().forEach((contract, contractSymbol) => {
+    if (contractSymbol) {
+      desiredSymbols.add(contractSymbol);
+    }
+  });
+
   return [...desiredSymbols];
 }
 
@@ -2050,8 +2405,15 @@ function buildPaperValuationOptionMatches() {
     buildLiveOptionMatches().map((contract) => [contract.contractSymbol, contract])
   );
   const orderSeeds = getOpenPaperOptionContractSeeds({ reason: "paper-valuation" });
+  const shortlistSeeds = getShortlistObservationSeeds();
 
   orderSeeds.forEach((contract, contractSymbol) => {
+    if (!mergedContracts.has(contractSymbol)) {
+      mergedContracts.set(contractSymbol, contract);
+    }
+  });
+
+  shortlistSeeds.forEach((contract, contractSymbol) => {
     if (!mergedContracts.has(contractSymbol)) {
       mergedContracts.set(contractSymbol, contract);
     }
@@ -2073,6 +2435,7 @@ function getPaperQuoteContractSeed(contractSymbol) {
   return (
     livePaperOptionQuotes.get(contractSymbol) ??
     getLiveOptionContractIndex().get(contractSymbol) ??
+    getShortlistObservationSeeds().get(contractSymbol) ??
     getOpenPaperOptionContractSeeds({ reason: "quote-fallback" }).get(contractSymbol) ??
     { contractSymbol }
   );
@@ -2085,6 +2448,109 @@ function buildValuedPaperPortfolio(userId = null) {
     polymarketMarkets: getPaperValuationPolymarketMarkets(),
     optionMatches: buildPaperValuationOptionMatches()
   });
+}
+
+function resolveObservationWindowBounds(windowKey = "today", anchorAt = null, now = new Date()) {
+  const normalizedWindow = String(windowKey ?? "today").trim().toLowerCase();
+  const end = new Date(now);
+  const start = new Date(now);
+
+  if (normalizedWindow === "anchor" && anchorAt) {
+    const anchorDate = new Date(anchorAt);
+    if (!Number.isNaN(anchorDate.getTime())) {
+      return {
+        start: anchorDate.toISOString(),
+        end: end.toISOString()
+      };
+    }
+  }
+
+  if (normalizedWindow === "30m") {
+    start.setUTCMinutes(start.getUTCMinutes() - 30);
+  } else if (normalizedWindow === "2h") {
+    start.setUTCHours(start.getUTCHours() - 2);
+  } else if (normalizedWindow === "24h") {
+    start.setUTCDate(start.getUTCDate() - 1);
+  } else {
+    start.setUTCHours(0, 0, 0, 0);
+  }
+
+  return {
+    start: start.toISOString(),
+    end: end.toISOString()
+  };
+}
+
+function buildContractObservationPayloadForUser({
+  userId,
+  contractSymbol,
+  window = "today",
+  anchorAt = null,
+  limit = 100
+} = {}) {
+  const { start, end } = resolveObservationWindowBounds(window, anchorAt);
+  const observations = listOptionShortlistObservations({
+    userId,
+    contractSymbol,
+    fromTimestamp: start,
+    toTimestamp: end,
+    limit
+  }).reverse();
+
+  return {
+    contractSymbol: normalizeContractSymbol(contractSymbol),
+    window: String(window ?? "today").trim().toLowerCase(),
+    anchorAt: anchorAt ?? null,
+    ...buildOptionObservationPayload(observations, {
+      anchorAt,
+      now: new Date()
+    })
+  };
+}
+
+function buildPaperOrderExecutionReviewPayload(order, userId) {
+  const optionLegs = (order?.position?.legs ?? []).filter((leg) => leg?.kind === "option" && leg?.contractSymbol);
+  const anchorAt =
+    order?.position?.execution?.submittedAt ??
+    order?.position?.execution?.filledAt ??
+    order?.createdAt ??
+    null;
+
+  const legs = optionLegs.map((leg) => {
+    const payload = buildContractObservationPayloadForUser({
+      userId,
+      contractSymbol: leg.contractSymbol,
+      window: "anchor",
+      anchorAt,
+      limit: 100
+    });
+    const comparison = {
+      entrySpreadPct: payload.observations[0] ? buildOptionObservationSummary([payload.observations[0]]).currentSpreadPct : null,
+      bestSpreadPct: payload.summary.bestSpreadPct,
+      currentSpreadPct: payload.summary.currentSpreadPct
+    };
+
+    return {
+      contractSymbol: normalizeContractSymbol(leg.contractSymbol),
+      label: leg.label ?? leg.contractSymbol,
+      strike: leg.strike ?? null,
+      expiration: leg.expiry ?? null,
+      optionType: normalizeOptionType(leg.optionType),
+      anchorAt,
+      comparison,
+      ...payload
+    };
+  });
+
+  return {
+    orderId: Number(order?.id ?? 0),
+    anchorAt,
+    diagnostics: legs.map((leg) => ({
+      contractSymbol: leg.contractSymbol,
+      ...buildOptionObservationDiagnostics(leg.summary)
+    })),
+    legs
+  };
 }
 
 function buildPaperPortfolioPreviewResponse(userId = null) {
@@ -2163,23 +2629,6 @@ function invalidateStrategyResponseCache() {
   strategyResponseCache.version += 1;
   strategyResponseCache.response = null;
   strategyResponseCache.finderRowDetails = new Map();
-}
-
-function buildComparableIbkrStatus(status) {
-  return {
-    configured: status?.configured === true,
-    connected: status?.connected === true,
-    authenticated: status?.authenticated === true,
-    isPaper: status?.isPaper === true,
-    selectedAccount: String(status?.selectedAccount ?? ""),
-    accounts: Array.isArray(status?.accounts)
-      ? status.accounts.map((account) => String(account ?? ""))
-      : [],
-    aliases:
-      status?.aliases && typeof status.aliases === "object" ? status.aliases : {},
-    allowedAssetTypes: String(status?.allowedAssetTypes ?? ""),
-    error: String(status?.error ?? "")
-  };
 }
 
 function syncStrategyCacheBrokerStatus() {
@@ -2267,180 +2716,12 @@ function getCachedFinderRowDetail(rowId) {
 }
 
 async function refreshIbkrStatusCacheForUser(userId) {
-  const brokerState = getIbkrBrokerState(userId);
-  const previousComparableStatus = JSON.stringify(buildComparableIbkrStatus(brokerState.status));
-  const context = getIbkrContextForUser(userId);
-
-  const ibkrStatus = await getIbkrStatus(context);
-  brokerState.status = {
-    ...ibkrStatus,
-    updatedAt: new Date().toISOString()
-  };
-
-  syncStrategyCacheBrokerStatus();
-  const nextComparableStatus = JSON.stringify(buildComparableIbkrStatus(brokerState.status));
-  if (previousComparableStatus !== nextComparableStatus) {
-    schedulePaperPortfolioBroadcast(0);
-  }
-
-  return brokerState.status;
+  return getIbkrBrokerState(userId).status;
 }
 
 async function refreshIbkrStatusCacheForActiveUsers() {
-  const userIds = [...paperStreamClientsByUserId.keys()];
-  if (!userIds.length) {
-    return [];
-  }
-
-  const results = [];
-
-  for (const userId of userIds) {
-    try {
-      results.push(await refreshIbkrStatusCacheForUser(userId));
-    } catch (_error) {
-      results.push(null);
-    }
-  }
-
-  return results;
+  return [];
 }
-
-async function handleTwsOrderStatusUpdate(event) {
-  if (!event || typeof event !== "object") {
-    return;
-  }
-
-  const orderId = Number(event.orderId ?? 0);
-  if (!Number.isInteger(orderId) || orderId <= 0) {
-    return;
-  }
-
-  const paperOrderIdFromRef = Number(event.parsedRef?.paperOrderId ?? 0) || null;
-  const orderRecord = paperOrderIdFromRef
-    ? listPaperOrders().find((record) => Number(record.id) === paperOrderIdFromRef) ?? null
-    : listPaperOrders().find(
-        (record) => String(record?.position?.execution?.brokerOrderId ?? "").trim() === String(orderId)
-      ) ?? null;
-
-  if (!orderRecord?.position || !isTwsPaperRoute(orderRecord.position)) {
-    return;
-  }
-
-  const existingOrder = orderRecord.position;
-  const existingExecution = existingOrder.execution ?? null;
-  if (!existingExecution) {
-    return;
-  }
-
-  const trades = twsPaperApi
-    .getTradesForOrder(orderId)
-    .map((fill) => ({
-      conid: String(fill?.contract?.conId ?? "").trim(),
-      quantity: Math.abs(Number(fill?.shares ?? 0) || 0),
-      price: Number(fill?.price ?? 0) || 0,
-      execution_time: String(fill?.time ?? "")
-    }))
-    .filter((fill) => fill.conid && fill.quantity > 0);
-  const tradeFillMap = buildTradeFillMap(trades);
-  const latestTradeTimestamp = [...tradeFillMap.values()]
-    .map((fill) => fill.latestAt)
-    .filter(Boolean)
-    .sort()
-    .slice(-1)[0];
-
-  const normalizedStatus = String(event.normalizedStatus ?? existingExecution.status ?? "submitted")
-    .trim()
-    .toLowerCase();
-  const filledQuantity = toNumber(event.filled, existingExecution.filledQuantity);
-  const remainingQuantity = toNumber(event.remaining, existingExecution.remainingQuantity);
-  const totalQuantity =
-    existingExecution.totalQuantity != null
-      ? Number(existingExecution.totalQuantity)
-      : filledQuantity != null && remainingQuantity != null
-        ? filledQuantity + remainingQuantity
-        : null;
-  const nowIso = new Date().toISOString();
-
-  const nextExecution = {
-    ...existingExecution,
-    route: "tws-paper",
-    purpose: "entry",
-    status: normalizedStatus,
-    statusText: String(event.status ?? existingExecution.statusText ?? normalizedStatus).trim() || normalizedStatus,
-    brokerOrderId: String(orderId),
-    orderRef: String(event.orderRef ?? existingExecution.orderRef ?? "").trim(),
-    accountId: String(existingExecution.accountId ?? paperBrokerState.tws.selectedAccount ?? ""),
-    isPaper: paperBrokerState.tws.isPaper === true,
-    avgFillPrice:
-      event.avgFillPrice != null ? toNumber(event.avgFillPrice, null) : existingExecution.avgFillPrice,
-    filledQuantity,
-    remainingQuantity,
-    totalQuantity,
-    filledAt:
-      normalizedStatus === "filled"
-        ? existingExecution.filledAt || latestTradeTimestamp || nowIso
-        : existingExecution.filledAt,
-    cancelledAt:
-      normalizedStatus === "cancelled" || normalizedStatus === "api_cancelled" || normalizedStatus === "apicancelled"
-        ? existingExecution.cancelledAt || latestTradeTimestamp || nowIso
-        : existingExecution.cancelledAt,
-    lastSyncAt: nowIso
-  };
-
-  let nextOrder = sanitizePaperOrderPayload(
-    {
-      ...existingOrder,
-      execution: nextExecution
-    },
-    existingOrder
-  );
-
-  nextOrder = applyEntryExecutionToOrder(nextOrder, nextOrder.execution, trades);
-
-  if (JSON.stringify(nextOrder) === JSON.stringify(existingOrder)) {
-    return;
-  }
-
-  const storedOrder = updatePaperOrder(Number(orderRecord.id), nextOrder);
-  const valuation = buildPaperPortfolio({
-    orders: [storedOrder],
-    quotes: liveState.quotes,
-    polymarketMarkets: getPaperValuationPolymarketMarkets(),
-    optionMatches: buildPaperValuationOptionMatches()
-  });
-  const valuedOrder = valuation.openOrders[0] ?? valuation.closedOrders[0] ?? valuation.orders[0] ?? null;
-  if (valuedOrder) {
-    recordPaperOrderSnapshots([
-      buildPaperOrderSnapshot(
-        valuedOrder,
-        nextOrder.closedAt || nextExecution.filledAt || nextExecution.lastSyncAt || nowIso
-      )
-    ]);
-  }
-
-  paperBrokerState.tws = {
-    ...paperBrokerState.tws,
-    lastSyncAt: nowIso,
-    lastSyncError: null
-  };
-  syncStrategyCacheBrokerStatus();
-  invalidateStrategyResponseCache();
-  syncPaperOptionStreamSubscriptions();
-  schedulePaperPortfolioBroadcast(0);
-}
-
-twsPaperApi.on("status", (status) => {
-  paperBrokerState.tws = {
-    ...paperBrokerState.tws,
-    ...(status ?? {})
-  };
-  syncStrategyCacheBrokerStatus();
-  schedulePaperPortfolioBroadcast(0);
-});
-
-twsPaperApi.on("orderStatus", (event) => {
-  void handleTwsOrderStatusUpdate(event);
-});
 
 async function ensureInitialLiveStateReady() {
   if (!initialLiveStateReadyPromise) {
@@ -2769,588 +3050,8 @@ function getSmartDecisionPausePatch(order, { decision, reason, keepEnabled = tru
   });
 }
 
-async function maybeManageSmartEntryExecution(record, order, ibkrContext = null) {
-  if (!isIbkrPaperRoute(order) || !order?.execution || !isSmartEntryEnabled(order.execution)) {
-    return null;
-  }
-
-  const baseOrder = reconcileSmartEntryExecution(order);
-  const execution = baseOrder.execution ?? null;
-  if (!execution) {
-    return JSON.stringify(baseOrder) !== JSON.stringify(order) ? baseOrder : null;
-  }
-
-  const smartState = getSmartExecutionState(execution);
-  const executionStatus = String(execution.status ?? "").trim().toLowerCase();
-  const limitPrice = toNumber(execution.limitPrice, null);
-  const replaceCount = Math.max(Math.round(toNumber(smartState.replaceCount, 0) ?? 0), 0);
-  const maxReplaceCount = Math.max(
-    Math.round(toNumber(smartState.maxReplaceCount, SMART_ORDER_MAX_REPLACES) ?? SMART_ORDER_MAX_REPLACES),
-    0
-  );
-  const cooldownMs = Math.max(
-    Math.round(toNumber(smartState.cooldownMs, SMART_ORDER_COOLDOWN_MS) ?? SMART_ORDER_COOLDOWN_MS),
-    5000
-  );
-  const requestedLegs =
-    Array.isArray(execution.requestedLegs) && execution.requestedLegs.length
-      ? execution.requestedLegs
-      : buildRequestedExecutionLegs(baseOrder);
-
-  if (String(execution.orderType ?? "").trim().toUpperCase() !== "LMT") {
-    const disabledOrder = updateEntrySmartExecution(baseOrder, {
-      ...smartState,
-      enabled: false,
-      status: "disabled",
-      pendingLimitPrice: null,
-      lastDecision: "unsupported_order_type",
-      lastDecisionReason: "Smart pricing only runs on IBKR limit entry orders."
-    });
-    return JSON.stringify(disabledOrder) !== JSON.stringify(order) ? disabledOrder : null;
-  }
-
-  if (isExecutionConfirmationPending(execution)) {
-    return JSON.stringify(baseOrder) !== JSON.stringify(order) ? baseOrder : null;
-  }
-
-  if (limitPrice == null) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "missing_limit",
-      reason: "Smart pricing paused because this order does not have a valid limit price."
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  if (Number(execution.filledQuantity ?? 0) > 0 && !isIbkrFilledStatus(execution.status)) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "partial_fill",
-      reason: "Smart pricing paused because the order has already filled partially."
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  if (smartState.pendingLimitPrice != null) {
-    if (executionStatus === "cancelled") {
-      const replacementLimitPrice = toNumber(smartState.pendingLimitPrice, null);
-      if (replacementLimitPrice == null) {
-        const clearedOrder = updateEntrySmartExecution(baseOrder, {
-          ...smartState,
-          status: "watching",
-          pendingLimitPrice: null,
-          lastDecision: "replace_cleared",
-          lastDecisionReason: "Smart replacement target cleared before submission."
-        });
-        return JSON.stringify(clearedOrder) !== JSON.stringify(order) ? clearedOrder : null;
-      }
-
-      const replacementOrder = sanitizePaperOrderPayload(
-        {
-          ...baseOrder,
-          execution: {
-            ...execution,
-            status: "pending_submit",
-            statusText: "Submitting smart replacement",
-            statusDescription: "",
-            brokerOrderId: "",
-            orderRef: "",
-            limitPrice: replacementLimitPrice,
-            submittedAt: "",
-            lastSyncAt: "",
-            filledAt: "",
-            cancelledAt: "",
-            avgFillPrice: null,
-            filledQuantity: 0,
-            remainingQuantity: execution.totalQuantity ?? null,
-            lastError: "",
-            lastWarning: "",
-            warningMessages: [],
-            pendingReplyId: "",
-            pendingReplyMessages: [],
-            smart: {
-              ...smartState,
-              status: "watching",
-              replaceCount: replaceCount + 1,
-              pendingLimitPrice: null,
-              lastTriggeredAt: new Date().toISOString(),
-              lastDecision: "replace_submitted",
-              lastDecisionReason: `Smart replacement submitted at ${replacementLimitPrice.toFixed(2)}.`,
-              lastSuggestedLimitPrice: replacementLimitPrice
-            }
-          }
-        },
-        baseOrder
-      );
-
-      try {
-        const submission = await submitIbkrOptionOrder({
-          order: {
-            ...replacementOrder,
-            id: Number(record.id)
-          },
-          purpose: "entry"
-        }, ibkrContext ?? {});
-
-        return sanitizePaperOrderPayload(
-          {
-            ...replacementOrder,
-            execution: submission
-          },
-          replacementOrder
-        );
-      } catch (error) {
-        return getSmartDecisionPausePatch(baseOrder, {
-          decision: "replace_failed",
-          reason: `Smart replacement failed after cancel: ${error.message}`
-        });
-      }
-    }
-
-    if (["pending_cancel", "pre_cancelled", "submitted", "pre_submitted"].includes(executionStatus)) {
-      const pendingReplaceOrder = updateEntrySmartExecution(baseOrder, {
-        ...smartState,
-        status: "pending_replace"
-      });
-      return JSON.stringify(pendingReplaceOrder) !== JSON.stringify(order) ? pendingReplaceOrder : null;
-    }
-  }
-
-  if (!isIbkrWorkingStatus(execution.status) || ["pending_cancel", "pre_cancelled"].includes(executionStatus)) {
-    return JSON.stringify(baseOrder) !== JSON.stringify(order) ? baseOrder : null;
-  }
-
-  const comboQuote = buildSmartComboQuote(requestedLegs);
-  if (!comboQuote.ready) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "quotes_unavailable",
-      reason: comboQuote.reason || "Smart pricing is waiting for fresh option bid/ask quotes."
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  const thresholdPrice = Math.max(toNumber(smartState.thresholdPrice, 0) ?? 0, 0);
-  const guardrailLimitPrice = toNumber(smartState.guardrailLimitPrice, null);
-  const marketDrift = Number(comboQuote.midPrice ?? limitPrice) - limitPrice;
-  const smartDecision = String(smartState.lastDecision ?? "").trim().toLowerCase();
-  const nextWatchingOrder =
-    smartState.pendingLimitPrice == null &&
-    (
-      String(smartState.status ?? "").trim().toLowerCase() !== "watching" &&
-      (
-        String(smartState.status ?? "").trim().toLowerCase() !== "paused" ||
-        smartDecision === "quotes_unavailable"
-      )
-    )
-      ? updateEntrySmartExecution(baseOrder, {
-          ...smartState,
-          status: "watching",
-          lastDecision: smartDecision === "quotes_unavailable" ? "watching" : String(smartState.lastDecision ?? "watching"),
-          lastDecisionReason:
-            smartDecision === "quotes_unavailable"
-              ? "Smart pricing resumed after live option bid/ask quotes returned."
-              : String(smartState.lastDecisionReason ?? "Smart pricing is monitoring the live combo quote.")
-        })
-      : baseOrder;
-
-  if (marketDrift <= thresholdPrice + SMART_ORDER_EPSILON) {
-    return JSON.stringify(nextWatchingOrder) !== JSON.stringify(order) ? nextWatchingOrder : null;
-  }
-
-  if (guardrailLimitPrice != null && Number(comboQuote.midPrice ?? limitPrice) > guardrailLimitPrice + SMART_ORDER_EPSILON) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "guardrail_reached",
-      reason: `Smart pricing paused because the live combo moved beyond the ${guardrailLimitPrice.toFixed(2)} guardrail.`
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  if (replaceCount >= maxReplaceCount) {
-    const pausedOrder = getSmartDecisionPausePatch(baseOrder, {
-      decision: "replace_limit_reached",
-      reason: `Smart pricing used all ${maxReplaceCount} allowed replacements for this order.`
-    });
-    return JSON.stringify(pausedOrder) !== JSON.stringify(order) ? pausedOrder : null;
-  }
-
-  const lastTriggeredAtMs = smartState.lastTriggeredAt ? new Date(smartState.lastTriggeredAt).getTime() : 0;
-  if (lastTriggeredAtMs && Date.now() - lastTriggeredAtMs < cooldownMs) {
-    return JSON.stringify(nextWatchingOrder) !== JSON.stringify(order) ? nextWatchingOrder : null;
-  }
-
-  const replacementLimitPrice = buildSmartReplacementLimit(limitPrice, smartState, comboQuote);
-  if (!(replacementLimitPrice > limitPrice + SMART_ORDER_EPSILON)) {
-    return JSON.stringify(nextWatchingOrder) !== JSON.stringify(order) ? nextWatchingOrder : null;
-  }
-
-  try {
-    await cancelIbkrOrder({
-      accountId: execution.accountId,
-      orderId: execution.brokerOrderId
-    }, ibkrContext ?? {});
-
-    return updateEntrySmartExecution(
-      sanitizePaperOrderPayload(
-        {
-          ...baseOrder,
-          execution: {
-            ...execution,
-            status: "pending_cancel",
-            statusText: "Smart replace cancel requested",
-            statusDescription: `Smart repricing requested at ${replacementLimitPrice.toFixed(2)}.`,
-            lastSyncAt: new Date().toISOString()
-          }
-        },
-        baseOrder
-      ),
-      {
-        ...smartState,
-        status: "pending_replace",
-        pendingLimitPrice: replacementLimitPrice,
-        lastTriggeredAt: new Date().toISOString(),
-        lastDecision: "replace_requested",
-        lastDecisionReason: `Smart repricing requested: ${limitPrice.toFixed(2)} -> ${replacementLimitPrice.toFixed(2)}.`,
-        lastMarketPrice: Number(comboQuote.midPrice ?? limitPrice),
-        lastSuggestedLimitPrice: replacementLimitPrice
-      }
-    );
-  } catch (error) {
-    return getSmartDecisionPausePatch(baseOrder, {
-      decision: "cancel_failed",
-      reason: `Smart repricing paused because the broker cancel request failed: ${error.message}`
-    });
-  }
-}
-
-function applyBrokerClosePrices(order, tradeFillMap) {
-  const nextLegs = (order.legs ?? []).map((leg) => {
-    if (leg?.kind !== "option") {
-      return leg;
-    }
-
-    const fill = tradeFillMap.get(String(leg.brokerConid ?? "").trim()) ?? null;
-    if (!fill || fill.avgPrice == null) {
-      return leg;
-    }
-
-    const quantity = Math.max(Number(leg.quantity ?? 0) || 0, 0);
-    const contractMultiplier = Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1);
-    const units = quantity * contractMultiplier;
-    const entryPrice = Number(leg.entryPrice ?? 0) || 0;
-    const closedPrice = fill.avgPrice;
-    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
-    const closedExposure = Math.abs(closedPrice * units);
-    const closedNetMarkedValue = direction * closedPrice * units;
-    const realizedProfitLossValue =
-      (String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? entryPrice - closedPrice : closedPrice - entryPrice) *
-      units;
-    const entryExposure = Math.abs(entryPrice * units);
-
-    return {
-      ...leg,
-      closedPrice,
-      closedExposure,
-      closedNetMarkedValue,
-      realizedProfitLossValue,
-      realizedProfitLossPercent: entryExposure > 0 ? (realizedProfitLossValue / entryExposure) * 100 : null
-    };
-  });
-
-  const closeSummary = nextLegs.reduce(
-    (totals, leg) => ({
-      currentHoldingValue: totals.currentHoldingValue + Math.max(Number(leg.closedExposure ?? 0) || 0, 0),
-      netMarkedValue: totals.netMarkedValue + (Number(leg.closedNetMarkedValue ?? 0) || 0),
-      profitLossValue: totals.profitLossValue + (Number(leg.realizedProfitLossValue ?? 0) || 0),
-      entryValue:
-        totals.entryValue +
-        Math.abs(
-          (Number(leg.entryPrice ?? 0) || 0) *
-            (leg.kind === "option"
-              ? (Number(leg.quantity ?? 0) || 0) * Math.max(Number(leg.contractMultiplier ?? 100) || 100, 1)
-              : Number(leg.quantity ?? 0) || 0)
-        )
-    }),
-    {
-      currentHoldingValue: 0,
-      netMarkedValue: 0,
-      profitLossValue: 0,
-      entryValue: 0
-    }
-  );
-
-  return sanitizePaperOrderPayload(
-    {
-      ...order,
-      closeSummary: {
-        currentHoldingValue: closeSummary.currentHoldingValue,
-        netMarkedValue: closeSummary.netMarkedValue,
-        profitLossValue: closeSummary.profitLossValue,
-        profitLossPercent:
-          closeSummary.entryValue > 0 ? (closeSummary.profitLossValue / closeSummary.entryValue) * 100 : null
-      },
-      legs: nextLegs
-    },
-    order
-  );
-}
-
-async function findLiveOrderForExecution(execution, orderBook, ibkrContext = null) {
-  if (!execution) {
-    return null;
-  }
-
-  const byOrderId = orderBook.liveOrdersById.get(String(execution.brokerOrderId ?? "").trim()) ?? null;
-  if (byOrderId) {
-    return byOrderId.raw;
-  }
-
-  const byOrderRef = orderBook.liveOrdersByRef.get(String(execution.orderRef ?? "").trim()) ?? null;
-  if (byOrderRef) {
-    return byOrderRef.raw;
-  }
-
-  if (execution.brokerOrderId && !isIbkrTerminalStatus(execution.status)) {
-    try {
-      return await fetchIbkrOrderStatus({
-        accountId: execution.accountId,
-        orderId: execution.brokerOrderId
-      }, ibkrContext ?? {});
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-async function syncSingleBrokerOrder(record, orderBook, { applyEntryFills = false, ibkrContext = null } = {}) {
-  const existingOrder = record.position;
-  let nextOrder = existingOrder;
-  let changed = false;
-
-  if (isIbkrPaperRoute(existingOrder)) {
-    const entryLiveOrder = await findLiveOrderForExecution(existingOrder.execution, orderBook, ibkrContext);
-    const entryTrades = orderBook.tradesByOrderRef.get(String(existingOrder.execution?.orderRef ?? "").trim()) ?? [];
-    const nextExecution = mergeExecutionState(existingOrder.execution, entryLiveOrder, entryTrades);
-    const nextEntryOrder = applyEntryExecutionToOrder(
-      sanitizePaperOrderPayload(
-        {
-          ...nextOrder,
-          execution: nextExecution
-        },
-        nextOrder
-      ),
-      nextExecution,
-      entryTrades,
-      { applyFills: applyEntryFills }
-    );
-
-    if (JSON.stringify(nextEntryOrder) !== JSON.stringify(nextOrder)) {
-      nextOrder = nextEntryOrder;
-      changed = true;
-    }
-
-    const smartManagedOrder = await maybeManageSmartEntryExecution(record, nextOrder, ibkrContext);
-    if (smartManagedOrder && JSON.stringify(smartManagedOrder) !== JSON.stringify(nextOrder)) {
-      nextOrder = smartManagedOrder;
-      changed = true;
-    }
-  }
-
-  if (String(nextOrder?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper") {
-    const exitLiveOrder = await findLiveOrderForExecution(nextOrder.closeExecution, orderBook, ibkrContext);
-    const exitTrades =
-      orderBook.tradesByOrderRef.get(String(nextOrder.closeExecution?.orderRef ?? "").trim()) ?? [];
-    const nextCloseExecution = mergeExecutionState(nextOrder.closeExecution, exitLiveOrder, exitTrades);
-
-    if (isIbkrFilledStatus(nextCloseExecution?.status)) {
-      const valuation = buildPaperPortfolio({
-        orders: [
-          {
-            ...record,
-            position: nextOrder
-          }
-        ],
-        quotes: liveState.quotes,
-        polymarketMarkets: getPaperValuationPolymarketMarkets(),
-        optionMatches: buildPaperValuationOptionMatches()
-      });
-      const valuedOrder = valuation.openOrders[0] ?? valuation.orders[0] ?? null;
-
-      if (valuedOrder) {
-        let closedOrder = closePaperOrderPayload(
-          {
-            ...nextOrder,
-            closeExecution: mapCloseExecutionToRoute(nextCloseExecution, nextOrder)
-          },
-          valuedOrder,
-          nextCloseExecution.filledAt || new Date().toISOString()
-        );
-        closedOrder = applyBrokerClosePrices(closedOrder, buildTradeFillMap(exitTrades));
-
-        if (JSON.stringify(closedOrder) !== JSON.stringify(nextOrder)) {
-          nextOrder = closedOrder;
-          changed = true;
-        }
-      }
-    } else {
-      const pendingExitOrder = sanitizePaperOrderPayload(
-        {
-          ...nextOrder,
-          closeExecution: mapCloseExecutionToRoute(nextCloseExecution, nextOrder)
-        },
-        nextOrder
-      );
-
-      if (JSON.stringify(pendingExitOrder) !== JSON.stringify(nextOrder)) {
-        nextOrder = pendingExitOrder;
-        changed = true;
-      }
-    }
-  }
-
-  return changed ? nextOrder : null;
-}
-
-function isIbkrTrackedOrder(order) {
-  return (
-    isIbkrPaperRoute(order) ||
-    String(order?.closeExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper" ||
-    String(order?.stockExecution?.route ?? "").trim().toLowerCase() === "ibkr-paper"
-  );
-}
-
-async function syncIbkrPaperOrdersForUser(userId, orderRecords = [], { applyEntryFills = false } = {}) {
-  const brokerState = getIbkrBrokerState(userId);
-  if (brokerState.syncing) {
-    return false;
-  }
-
-  const records = Array.isArray(orderRecords) ? orderRecords : [];
-  if (!records.length) {
-    return false;
-  }
-
-  brokerState.syncing = true;
-
-  try {
-    const ibkrContext = getIbkrContextForUser(userId);
-    const accountIdHint = String(
-      records.find((record) => String(record?.position?.execution?.accountId ?? "").trim())?.position?.execution?.accountId ??
-        records.find((record) => String(record?.position?.closeExecution?.accountId ?? "").trim())?.position?.closeExecution?.accountId ??
-        ""
-    ).trim();
-
-    const orderBook = await fetchIbkrOrderBook({
-      accountId: accountIdHint
-    }, ibkrContext);
-    const liveOrders = (orderBook.orders ?? []).map(normalizeIbkrLiveOrder);
-    const orderBookIndexes = {
-      ...orderBook,
-      liveOrdersById: new Map(liveOrders.map((order) => [String(order.brokerOrderId), order])),
-      liveOrdersByRef: new Map(liveOrders.map((order) => [String(order.orderRef), order])),
-      tradesByOrderRef: groupTradesByOrderRef(orderBook.trades)
-    };
-
-    let changed = false;
-
-    for (const record of records) {
-      const nextOrder = await syncSingleBrokerOrder(record, orderBookIndexes, {
-        applyEntryFills,
-        ibkrContext
-      });
-      if (!nextOrder) {
-        continue;
-      }
-
-      const storedOrder = updatePaperOrder(Number(record.id), nextOrder);
-      const valuation = buildPaperPortfolio({
-        orders: [storedOrder],
-        quotes: liveState.quotes,
-        polymarketMarkets: getPaperValuationPolymarketMarkets(),
-        optionMatches: buildPaperValuationOptionMatches()
-      });
-      const valuedOrder =
-        valuation.openOrders[0] ?? valuation.closedOrders[0] ?? valuation.orders[0] ?? null;
-
-      if (valuedOrder) {
-        recordPaperOrderSnapshots([
-          buildPaperOrderSnapshot(
-            valuedOrder,
-            nextOrder.closedAt ||
-              nextOrder.closeExecution?.filledAt ||
-              nextOrder.execution?.lastSyncAt ||
-              new Date().toISOString()
-          )
-        ]);
-      }
-      changed = true;
-    }
-
-    brokerState.lastSyncAt = new Date().toISOString();
-    brokerState.lastSyncError = null;
-    await refreshIbkrStatusCacheForUser(userId).catch(() => null);
-
-    if (changed) {
-      invalidateStrategyResponseCache();
-      syncPaperOptionStreamSubscriptions();
-      schedulePaperPortfolioBroadcast(0);
-    }
-
-    return changed;
-  } catch (error) {
-    brokerState.lastSyncAt = new Date().toISOString();
-    brokerState.lastSyncError = error.message;
-    await refreshIbkrStatusCacheForUser(userId).catch(() => null);
-    return false;
-  } finally {
-    brokerState.syncing = false;
-  }
-}
-
-async function syncIbkrPaperOrders({ userId = null, onlyOrderId = null, applyEntryFills = false } = {}) {
-  const normalizedUserId = userId == null ? null : String(userId).trim();
-  const targetOrderId = onlyOrderId == null ? null : Number(onlyOrderId);
-  const candidateRecords = normalizedUserId ? listPaperOrders(null, normalizedUserId) : listPaperOrders();
-
-  const orderRecords = candidateRecords.filter((record) => {
-    const order = record.position;
-    if (!isIbkrTrackedOrder(order)) {
-      return false;
-    }
-
-    if (targetOrderId != null && Number(record.id) !== targetOrderId) {
-      return false;
-    }
-
-    return String(order.status ?? "open").toLowerCase() !== "closed" || order.closeExecution;
-  });
-
-  if (!orderRecords.length) {
-    return false;
-  }
-
-  if (normalizedUserId) {
-    return await syncIbkrPaperOrdersForUser(normalizedUserId, orderRecords, { applyEntryFills });
-  }
-
-  const recordsByUserId = new Map();
-  for (const record of orderRecords) {
-    const recordUserId = String(record?.userId ?? "").trim() || "legacy";
-    if (!recordsByUserId.has(recordUserId)) {
-      recordsByUserId.set(recordUserId, []);
-    }
-    recordsByUserId.get(recordUserId).push(record);
-  }
-
-  let changed = false;
-
-  for (const [recordUserId, records] of recordsByUserId.entries()) {
-    const synced = await syncIbkrPaperOrdersForUser(recordUserId, records, { applyEntryFills });
-    if (synced) {
-      changed = true;
-    }
-  }
-
-  return changed;
+async function syncIbkrPaperOrders() {
+  return false;
 }
 
 function formatDiagnosticTimestamp(value) {
@@ -3388,7 +3089,7 @@ function buildStreamDiagnosticsResponse(userId = null) {
   return {
     generatedAt: new Date().toISOString(),
     options: {
-      provider: "Polygon / Massive websocket",
+      provider: "Live options websocket",
       state: getOptionStreamState(),
       trackedContracts: paperLiveState.desiredSymbols.size,
       subscribedContracts: paperLiveState.subscribedSymbols.size,
@@ -3562,248 +3263,125 @@ function recordPaperPortfolioSnapshotsIfDue(capturedAt = new Date().toISOString(
   paperLiveState.lastSnapshotAt = capturedAtMs;
 }
 
-function clearPaperOptionReconnectTimer() {
-  if (!paperLiveState.reconnectTimer) {
-    return;
-  }
-
-  clearTimeout(paperLiveState.reconnectTimer);
-  paperLiveState.reconnectTimer = null;
-}
-
-function schedulePaperOptionReconnect() {
+async function flushShortlistObservationQueue() {
   if (
-    paperLiveState.reconnectTimer ||
-    !process.env.POLYGON_API_KEY ||
-    !paperLiveState.desiredSymbols.size
+    shortlistObservationState.flushing ||
+    shortlistObservationState.queue.length === 0 ||
+    !IS_POSTGRES_BACKEND
   ) {
     return;
   }
 
-  paperLiveState.reconnectTimer = setTimeout(() => {
-    paperLiveState.reconnectTimer = null;
-    ensurePaperOptionStream();
-  }, 3000);
-}
-
-function closePaperOptionStream() {
-  clearPaperOptionReconnectTimer();
-
-  if (paperLiveState.socket) {
-    paperLiveState.socket.close();
-  }
-
-  paperLiveState.socket = null;
-  paperLiveState.authenticated = false;
-  paperLiveState.subscribedSymbols = new Set();
-}
-
-function sendPaperOptionStreamAction(action, symbols) {
-  if (
-    !paperLiveState.socket ||
-    paperLiveState.socket.readyState !== WebSocket.OPEN ||
-    !paperLiveState.authenticated ||
-    !symbols.length
-  ) {
-    return;
-  }
-
-  const params = symbols.map((symbol) => `Q.${symbol}`).join(",");
-  paperLiveState.socket.send(JSON.stringify({ action, params }));
-}
-
-function updatePaperOptionStreamSubscriptions() {
-  if (
-    !paperLiveState.socket ||
-    paperLiveState.socket.readyState !== WebSocket.OPEN ||
-    !paperLiveState.authenticated
-  ) {
-    return;
-  }
-
-  const desiredSymbols = [...paperLiveState.desiredSymbols];
-  const subscribedSymbols = [...paperLiveState.subscribedSymbols];
-  const toSubscribe = desiredSymbols.filter((symbol) => !paperLiveState.subscribedSymbols.has(symbol));
-  const toUnsubscribe = subscribedSymbols.filter((symbol) => !paperLiveState.desiredSymbols.has(symbol));
-
-  sendPaperOptionStreamAction("unsubscribe", toUnsubscribe);
-  sendPaperOptionStreamAction("subscribe", toSubscribe);
-
-  toUnsubscribe.forEach((symbol) => {
-    paperLiveState.subscribedSymbols.delete(symbol);
-  });
-  toSubscribe.forEach((symbol) => {
-    paperLiveState.subscribedSymbols.add(symbol);
-  });
-}
-
-function handlePaperOptionQuote(message) {
-  const startedAt = process.hrtime.bigint();
-  const contractSymbol = String(message?.sym ?? "").trim();
-  if (!contractSymbol || !paperLiveState.desiredSymbols.has(contractSymbol)) {
-    return;
-  }
-
-  const bid = toNonNegativeNumber(message.bp, null);
-  const ask = toNonNegativeNumber(message.ap, null);
-  const bidSize = toNonNegativeNumber(message.bs, null);
-  const askSize = toNonNegativeNumber(message.as, null);
-  const hasBid = bid != null && bid > 0;
-  const hasAsk = ask != null && ask > 0;
-  const midpoint =
-    hasBid && hasAsk ? (bid + ask) / 2
-    : hasBid ? bid
-    : hasAsk ? ask
-    : null;
-  const contractSeed = getPaperQuoteContractSeed(contractSymbol);
-
-  livePaperOptionQuotes.set(contractSymbol, {
-    ...contractSeed,
-    contractSymbol,
-    bid,
-    ask,
-    bidSize,
-    askSize,
-    mark: midpoint,
-    lastPrice: midpoint,
-    source: "polygon-websocket",
-    sourceLabel: "Polygon.io WebSocket",
-    isLive: true,
-    hasRealBidAsk: hasBid && hasAsk,
-    updatedAt:
-      Number.isFinite(Number(message.t)) && Number(message.t) > 0
-        ? new Date(Number(message.t)).toISOString()
-        : new Date().toISOString()
-  });
-  paperLiveState.lastQuoteAt =
-    Number.isFinite(Number(message.t)) && Number(message.t) > 0
-      ? new Date(Number(message.t)).toISOString()
-      : new Date().toISOString();
-  paperLiveState.lastMessageAt = paperLiveState.lastQuoteAt;
-  paperLiveState.quoteCountSinceSeedRefresh += 1;
+  shortlistObservationState.flushing = true;
+  const batch = shortlistObservationState.queue.splice(0, shortlistObservationState.queue.length);
 
   try {
-    recordPaperPortfolioSnapshotsIfDue(
-      Number.isFinite(Number(message.t)) && Number(message.t) > 0
-        ? new Date(Number(message.t)).toISOString()
-        : new Date().toISOString()
-    );
+    recordOptionShortlistObservations(batch);
   } catch (error) {
-    liveState.warnings = [...liveState.warnings, `Paper-trade history unavailable: ${error.message}`].slice(-8);
-  }
-
-  schedulePaperPortfolioBroadcast(PAPER_QUOTE_BROADCAST_DEBOUNCE_MS, "quote");
-
-  const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
-  if (durationMs >= PAPER_QUOTE_SLOW_PROCESS_MS) {
-    logWarn("Paper quote processing was slow", {
-      subsystem: "paper-options-stream",
-      contractSymbol,
-      durationMs: Number(durationMs.toFixed(1)),
-      quoteCountSinceSeedRefresh: paperLiveState.quoteCountSinceSeedRefresh,
-      cachedSeedCount: paperOrderSeedCache.seeds.size,
-      cacheLastRefreshAt: paperOrderSeedCache.lastRefreshAt,
-      cacheLastRefreshDurationMs: paperOrderSeedCache.lastRefreshDurationMs,
-      cacheLastRefreshError: paperOrderSeedCache.lastRefreshError,
-      broadcastTimerActive: paperLiveState.broadcastTimer != null,
-      broadcastInFlight: paperLiveState.broadcastInFlight
-    });
-  }
-}
-
-function handlePaperOptionStreamMessage(event) {
-  const rawData =
-    typeof event.data === "string"
-      ? event.data
-      : Buffer.isBuffer(event.data)
-        ? event.data.toString("utf8")
-        : "";
-
-  if (!rawData) {
-    return;
-  }
-
-  let messages = [];
-
-  try {
-    messages = JSON.parse(rawData);
-  } catch (error) {
-    logError("Unable to parse Massive options websocket payload", {
-      subsystem: "paper-options-stream",
+    shortlistObservationState.queue.unshift(...batch);
+    logWarn("Shortlist observation flush failed", {
+      subsystem: "shortlist-observations",
+      queuedCount: shortlistObservationState.queue.length,
       error
     });
-    paperLiveState.lastError = error.message;
+  } finally {
+    shortlistObservationState.flushing = false;
+    if (shortlistObservationState.queue.length > 0) {
+      shortlistObservationState.flushTimer = setTimeout(() => {
+        shortlistObservationState.flushTimer = null;
+        void flushShortlistObservationQueue();
+      }, SHORTLIST_OBSERVATION_FLUSH_INTERVAL_MS);
+    }
+  }
+}
+
+function scheduleShortlistObservationFlush() {
+  if (shortlistObservationState.flushTimer || shortlistObservationState.flushing || !IS_POSTGRES_BACKEND) {
     return;
   }
 
-  paperLiveState.lastMessageAt = new Date().toISOString();
+  shortlistObservationState.flushTimer = setTimeout(() => {
+    shortlistObservationState.flushTimer = null;
+    void flushShortlistObservationQueue();
+  }, SHORTLIST_OBSERVATION_FLUSH_INTERVAL_MS);
+}
 
-  messages.forEach((message) => {
-    if (message?.ev === "status") {
-      if (message.status === "auth_success") {
-        paperLiveState.authenticated = true;
-        paperLiveState.subscribedSymbols = new Set();
-        paperLiveState.lastAuthAt = new Date().toISOString();
-        paperLiveState.lastError = null;
-        updatePaperOptionStreamSubscriptions();
-      }
+function queueShortlistObservationSnapshot(contractSnapshot = {}, { quoteTimestamp = null } = {}) {
+  if (!IS_POSTGRES_BACKEND) {
+    return;
+  }
 
+  const contractSymbol = normalizeContractSymbol(contractSnapshot.contractSymbol);
+  if (!contractSymbol) {
+    return;
+  }
+
+  const contexts = getShortlistObservationContextsBySymbol().get(contractSymbol) ?? [];
+  if (!contexts.length) {
+    return;
+  }
+
+  const observedAt = new Date().toISOString();
+  const quoteTimestampIso = quoteTimestamp ? new Date(quoteTimestamp).toISOString() : observedAt;
+
+  contexts.forEach((context) => {
+    const key = toObservationContextKey(context.userId, contractSymbol);
+    const previous = shortlistObservationState.latestByUserContract.get(key) ?? null;
+    const nextSnapshot = {
+      bid: Number.isFinite(Number(contractSnapshot.bid)) ? Number(contractSnapshot.bid) : null,
+      ask: Number.isFinite(Number(contractSnapshot.ask)) ? Number(contractSnapshot.ask) : null,
+      bidSize: Number.isFinite(Number(contractSnapshot.bidSize)) ? Number(contractSnapshot.bidSize) : null,
+      askSize: Number.isFinite(Number(contractSnapshot.askSize)) ? Number(contractSnapshot.askSize) : null,
+      lastTradePrice:
+        Number.isFinite(Number(contractSnapshot.lastTradePrice)) ? Number(contractSnapshot.lastTradePrice) : null,
+      lastTradeSize:
+        Number.isFinite(Number(contractSnapshot.lastTradeSize)) ? Number(contractSnapshot.lastTradeSize) : null,
+      quoteTimestamp: quoteTimestampIso,
+      observedAt
+    };
+
+    const materialChange =
+      !previous ||
+      previous.bid !== nextSnapshot.bid ||
+      previous.ask !== nextSnapshot.ask ||
+      previous.bidSize !== nextSnapshot.bidSize ||
+      previous.askSize !== nextSnapshot.askSize ||
+      previous.lastTradePrice !== nextSnapshot.lastTradePrice;
+    const heartbeatDue =
+      !previous ||
+      new Date(observedAt).getTime() - new Date(previous.observedAt ?? 0).getTime() >= SHORTLIST_OBSERVATION_HEARTBEAT_MS;
+
+    if (!materialChange && !heartbeatDue) {
       return;
     }
 
-    if (message?.ev === "Q") {
-      handlePaperOptionQuote(message);
-    }
-  });
-}
-
-function ensurePaperOptionStream() {
-  if (!process.env.POLYGON_API_KEY || !paperLiveState.desiredSymbols.size) {
-    closePaperOptionStream();
-    return;
-  }
-
-  if (
-    paperLiveState.socket &&
-    (paperLiveState.socket.readyState === WebSocket.OPEN ||
-      paperLiveState.socket.readyState === WebSocket.CONNECTING)
-  ) {
-    if (paperLiveState.authenticated) {
-      updatePaperOptionStreamSubscriptions();
-    }
-    return;
-  }
-
-  clearPaperOptionReconnectTimer();
-  const socket = new WebSocket(MASSIVE_OPTIONS_WS_URL);
-
-  paperLiveState.socket = socket;
-  paperLiveState.authenticated = false;
-  paperLiveState.subscribedSymbols = new Set();
-
-  socket.onopen = () => {
-    paperLiveState.lastError = null;
-    socket.send(JSON.stringify({ action: "auth", params: process.env.POLYGON_API_KEY }));
-  };
-  socket.onmessage = (event) => {
-    handlePaperOptionStreamMessage(event);
-  };
-  socket.onerror = (error) => {
-    paperLiveState.lastError = error?.message ?? "Unknown error";
-    logError("Massive options websocket error", {
-      subsystem: "paper-options-stream",
-      error
+    shortlistObservationState.latestByUserContract.set(key, nextSnapshot);
+    shortlistObservationState.queue.push({
+      observedAt,
+      userId: context.userId,
+      source: context.source,
+      scannerType: context.scannerType,
+      scannerCandidateId: context.scannerCandidateId,
+      paperOrderId: context.paperOrderId,
+      contractSymbol,
+      underlyingSymbol: contractSnapshot.rootSymbol ?? context.underlyingSymbol ?? context.rootSymbol,
+      expiration: contractSnapshot.expiration ?? context.expiration,
+      strike: contractSnapshot.strike ?? context.strike,
+      optionType: contractSnapshot.optionType ?? context.optionType,
+      bid: nextSnapshot.bid,
+      ask: nextSnapshot.ask,
+      mark: Number.isFinite(Number(contractSnapshot.mark)) ? Number(contractSnapshot.mark) : null,
+      bidSize: nextSnapshot.bidSize,
+      askSize: nextSnapshot.askSize,
+      lastTradePrice: nextSnapshot.lastTradePrice,
+      lastTradeSize: nextSnapshot.lastTradeSize,
+      openInterest: Number.isFinite(Number(contractSnapshot.openInterest)) ? Number(contractSnapshot.openInterest) : null,
+      volume: Number.isFinite(Number(contractSnapshot.volume)) ? Number(contractSnapshot.volume) : null,
+      quoteTimestamp: quoteTimestampIso
     });
-  };
-  socket.onclose = () => {
-    if (paperLiveState.socket === socket) {
-      paperLiveState.socket = null;
-      paperLiveState.authenticated = false;
-      paperLiveState.subscribedSymbols = new Set();
-      paperLiveState.lastDisconnectAt = new Date().toISOString();
-      schedulePaperOptionReconnect();
-    }
-  };
+  });
+
+  scheduleShortlistObservationFlush();
 }
 
 function syncPaperOptionStreamSubscriptions() {
@@ -3817,14 +3395,7 @@ function syncPaperOptionStreamSubscriptions() {
     }
   });
 
-  if (!desiredSymbols.size) {
-    closePaperOptionStream();
-    schedulePaperPortfolioBroadcast(0);
-    return;
-  }
-
-  ensurePaperOptionStream();
-  updatePaperOptionStreamSubscriptions();
+  schedulePaperPortfolioBroadcast(0);
 }
 
 function isFreshWithin(refreshTimestamp, maxAgeMs) {
@@ -4442,90 +4013,6 @@ app.get("/api/stream-status", (request, response) => {
   response.json(buildStreamDiagnosticsResponse(request.user.id));
 });
 
-app.get("/api/market-status", async (_request, response) => {
-  response.json(await getPolygonMarketStatusPayload());
-});
-
-app.get("/api/brokers/ibkr/status", async (request, response) => {
-  const userId = request.user.id;
-  const brokerState = getIbkrBrokerState(userId);
-
-  if (!brokerState.status.updatedAt) {
-    await refreshIbkrStatusCacheForUser(userId).catch(() => null);
-  } else {
-    refreshIbkrStatusCacheForUser(userId).catch((error) => {
-      logWarn("Failed to refresh IBKR status cache after confirmation", {
-        subsystem: "ibkr",
-        userId,
-        orderId,
-        error
-      });
-      return null;
-    });
-  }
-
-  response.json({
-    ibkr: getIbkrStatusForUser(userId),
-    lastSyncAt: brokerState.lastSyncAt,
-    lastSyncError: brokerState.lastSyncError
-  });
-});
-
-app.get("/api/brokers/tws/status", (_request, response) => {
-  response.json({
-    tws: paperBrokerState.tws
-  });
-});
-
-app.post("/api/brokers/tws/connect", async (request, response) => {
-  const host = String(request.body?.host ?? "").trim();
-  const port = Number(request.body?.port ?? 0);
-
-  if (!host || !Number.isFinite(port)) {
-    response.status(400).json({
-      error: "host and port are required",
-      tws: paperBrokerState.tws
-    });
-    return;
-  }
-
-  try {
-    const status = await twsPaperApi.connect({
-      host,
-      port
-    });
-    paperBrokerState.tws = {
-      ...paperBrokerState.tws,
-      ...status
-    };
-    syncStrategyCacheBrokerStatus();
-    schedulePaperPortfolioBroadcast(0);
-
-    response.json({
-      tws: paperBrokerState.tws
-    });
-  } catch (error) {
-    paperBrokerState.tws = {
-      ...paperBrokerState.tws,
-      configured: true,
-      host,
-      port,
-      connected: false,
-      authenticated: false,
-      ready: false,
-      error: error.message,
-      updatedAt: new Date().toISOString()
-    };
-    syncStrategyCacheBrokerStatus();
-    schedulePaperPortfolioBroadcast(0);
-
-    response.status(502).json({
-      error: error.message,
-      tws: paperBrokerState.tws
-    });
-  }
-});
-
 app.post("/api/refresh", async (_request, response) => {
   try {
     await refreshLiveState({ includeOptions: true });
@@ -4792,44 +4279,6 @@ async function loadScannerIvRankMetrics(symbolContexts = [], researchMap = new M
         latest = getLatestIvRankDaily(symbol, today);
       } catch (_error) {
         latest = null;
-      }
-
-      if (latest?.date === today && latest.iv30 != null) {
-        return [symbol, latest];
-      }
-
-      if (!(currentSpot > 0)) {
-        return [symbol, latest];
-      }
-
-      try {
-        const snapshot = await fetchPolygonAtmIv30Snapshot({
-          symbol,
-          currentSpot,
-          asOfDate: today
-        });
-
-        if (!snapshot?.iv30) {
-          return [symbol, latest];
-        }
-
-        upsertIv30History(snapshot);
-        const ivHistory = listIv30History(symbol, 252);
-        const historyPoints = researchMap.get(symbol)?.historyPoints ?? [];
-        const rankMetrics = buildIvRankDailySnapshot({
-          symbol,
-          date: today,
-          currentIv30: snapshot.iv30,
-          ivHistory,
-          historyPoints
-        });
-
-        if (rankMetrics) {
-          upsertIvRankDaily(rankMetrics);
-          return [symbol, rankMetrics];
-        }
-      } catch (_error) {
-        return [symbol, latest];
       }
 
       return [symbol, latest];
@@ -5562,6 +5011,146 @@ app.get("/api/options/chain", async (request, response) => {
   }
 });
 
+app.get("/api/options/contract-from-chain-debug", async (request, response) => {
+  const symbol = String(request.query.symbol ?? "").trim().toUpperCase();
+  const expiration = String(request.query.expiration ?? "").trim();
+  const optionType = String(request.query.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
+  const contractSymbol = String(request.query.contractSymbol ?? "").trim().toUpperCase();
+  const strike = Number(request.query.strike ?? NaN);
+  const strikeMin = Number(request.query.strikeMin ?? NaN);
+  const strikeMax = Number(request.query.strikeMax ?? NaN);
+  const requestedLimit = Number(request.query.limit ?? 60);
+
+  if (!symbol || !expiration || (!contractSymbol && !(Number.isFinite(strike) && strike > 0))) {
+    response.status(400).json({
+      error: "symbol, expiration, and contractSymbol or strike are required"
+    });
+    return;
+  }
+
+  try {
+    const quoteMap = new Map(liveState.quotes.map((quote) => [quote.symbol, quote]));
+    const currentSpot = Number(quoteMap.get(symbol)?.regularMarketPrice ?? 0);
+    const chain = await fetchOptionChain({
+      symbol,
+      expiration,
+      optionType,
+      currentSpot,
+      strikeMin: Number.isFinite(strikeMin) && strikeMin > 0 ? strikeMin : undefined,
+      strikeMax: Number.isFinite(strikeMax) && strikeMax > 0 ? strikeMax : undefined,
+      limit: Number.isFinite(requestedLimit) ? requestedLimit : 60
+    });
+
+    const contracts = Array.isArray(chain?.contracts) ? chain.contracts : [];
+    const matched =
+      (contractSymbol
+        ? contracts.find((contract) => String(contract?.contractSymbol ?? "").trim().toUpperCase() === contractSymbol)
+        : null) ??
+      contracts.find((contract) => {
+        const contractStrike = Number(contract?.strike ?? NaN);
+        return Number.isFinite(contractStrike) && Number.isFinite(strike) && Math.abs(contractStrike - strike) < 0.01;
+      }) ??
+      null;
+
+    response.json({
+      generatedAt: new Date().toISOString(),
+      symbol,
+      expiration,
+      optionType,
+      requestedContractSymbol: contractSymbol || null,
+      requestedStrike: Number.isFinite(strike) ? strike : null,
+      chainSource: chain?.source ?? null,
+      chainSourceLabel: chain?.sourceLabel ?? null,
+      chainWarning: chain?.warning ?? null,
+      contractCount: contracts.length,
+      matched,
+      nearbyContracts: contracts.slice(0, 20)
+    });
+  } catch (error) {
+    response.status(502).json({
+      error: error.message
+    });
+  }
+});
+
+app.get("/api/options/shortlist-observations", (request, response) => {
+  if (!assertPostgresOnlyFeature(response, "Shortlist observations")) {
+    return;
+  }
+
+  const contractSymbol = normalizeContractSymbol(request.query.contractSymbol);
+  if (!contractSymbol) {
+    response.status(400).json({
+      error: "contractSymbol is required"
+    });
+    return;
+  }
+
+  response.json(
+    buildContractObservationPayloadForUser({
+      userId: request.user.id,
+      contractSymbol,
+      window: request.query.window ?? "today",
+      anchorAt: request.query.anchorAt ?? null,
+      limit: Number(request.query.limit ?? 100)
+    })
+  );
+});
+
+app.get("/api/options/shortlist-observations/summary", (request, response) => {
+  if (!assertPostgresOnlyFeature(response, "Shortlist observation summaries")) {
+    return;
+  }
+
+  const contractSymbol = normalizeContractSymbol(request.query.contractSymbol);
+  if (!contractSymbol) {
+    response.status(400).json({
+      error: "contractSymbol is required"
+    });
+    return;
+  }
+
+  const payload = buildContractObservationPayloadForUser({
+    userId: request.user.id,
+    contractSymbol,
+    window: request.query.window ?? "today",
+    anchorAt: request.query.anchorAt ?? null,
+    limit: Number(request.query.limit ?? 100)
+  });
+
+  response.json({
+    contractSymbol: payload.contractSymbol,
+    window: payload.window,
+    anchorAt: payload.anchorAt,
+    summary: payload.summary,
+    diagnostics: payload.diagnostics
+  });
+});
+
+app.get("/api/options/paper-order-execution-review/:orderId", (request, response) => {
+  if (!assertPostgresOnlyFeature(response, "Paper order execution review")) {
+    return;
+  }
+
+  const orderId = Number(request.params.orderId);
+  if (!Number.isInteger(orderId) || orderId <= 0) {
+    response.status(400).json({
+      error: "orderId must be a positive integer"
+    });
+    return;
+  }
+
+  const order = listPaperOrders(null, request.user.id).find((record) => Number(record.id) === orderId) ?? null;
+  if (!order) {
+    response.status(404).json({
+      error: "Paper order not found"
+    });
+    return;
+  }
+
+  response.json(buildPaperOrderExecutionReviewPayload(order, request.user.id));
+});
+
 app.get("/api/strategies/strategy-2/scan", async (request, response) => {
   const force = String(request.query.force ?? "").trim().toLowerCase() === "true";
   const requestedLimit = Number(request.query.limit ?? 12);
@@ -5731,10 +5320,34 @@ app.post("/api/strategies/strategy-5/scan", async (request, response) => {
 
 app.post("/api/gpt/strategy-query", requireApiKey, async (request, response) => {
   let query;
+  const usageEntry = {
+    id: crypto.randomUUID(),
+    method: request.method,
+    path: request.originalUrl || request.url,
+    ipAddress: request.ip,
+    userId: request.user?.id ?? null,
+    username: request.user?.username ?? null,
+    apiKeyId: request.apiKey?.id ?? null,
+    apiKeyLabel: request.apiKey?.label ?? null,
+    apiKeyPrefix: request.apiKey?.tokenPrefix ?? null,
+    authStatus: "authorized",
+    requestBody: createSafeGptRequestBody(request.body)
+  };
 
   try {
     query = sanitizeGptStrategyQueryRequest(request.body ?? {});
   } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 400,
+      responseTimeMs: getRequestDurationMs(request),
+      requestTicker: request.body?.ticker ?? null,
+      expectedPriceRangeLow: request.body?.expectedPriceRangeLow ?? null,
+      expectedPriceRangeHigh: request.body?.expectedPriceRangeHigh ?? null,
+      optionExpirationStartDate: request.body?.optionExpirationStartDate ?? null,
+      optionExpirationEndDate: request.body?.optionExpirationEndDate ?? null,
+      errorMessage: error.message
+    });
     response.status(400).json({ error: error.message });
     return;
   }
@@ -5742,82 +5355,152 @@ app.post("/api/gpt/strategy-query", requireApiKey, async (request, response) => 
   await ensureInitialLiveStateReady();
   await refreshCalendarState(false);
 
-  const generatedAt = new Date().toISOString();
-  const scannerTasks = {
-    thresholdHedge: buildThresholdHedgeGptResults({
-      ...query,
-      userId: request.user.id
-    }),
-    tradingViewScanner: buildTradingViewGptResults({
-      ...query,
-      userId: request.user.id
-    }),
-    coveredIncome: buildCoveredIncomeGptResults({
-      ...query,
-      userId: request.user.id
-    })
-  };
+  try {
+    const generatedAt = new Date().toISOString();
+    const scannerTasks = {
+      thresholdHedge: buildThresholdHedgeGptResults({
+        ...query,
+        userId: request.user.id
+      }),
+      tradingViewScanner: buildTradingViewGptResults({
+        ...query,
+        userId: request.user.id
+      }),
+      coveredIncome: buildCoveredIncomeGptResults({
+        ...query,
+        userId: request.user.id
+      })
+    };
 
-  const [thresholdResult, tradingViewResult, coveredIncomeResult] = await Promise.allSettled([
-    scannerTasks.thresholdHedge,
-    scannerTasks.tradingViewScanner,
-    scannerTasks.coveredIncome
-  ]);
-  const partialResults =
-    thresholdResult.status === "rejected" || tradingViewResult.status === "rejected" || coveredIncomeResult.status === "rejected";
-  const partialWarnings = [];
-  const results = {
-    thresholdHedge:
-      thresholdResult.status === "fulfilled"
-        ? thresholdResult.value
-        : {
-            count: 0,
-            items: [],
-            warnings: [thresholdResult.reason?.message ?? "Threshold Hedge query failed."]
-          },
-    tradingViewScanner:
-      tradingViewResult.status === "fulfilled"
-        ? tradingViewResult.value
-        : {
-            count: 0,
-            items: [],
-            warnings: [tradingViewResult.reason?.message ?? "TradingView query failed."]
-          },
-    coveredIncome:
-      coveredIncomeResult.status === "fulfilled"
-        ? coveredIncomeResult.value
-        : {
-            count: 0,
-            items: [],
-            warnings: [coveredIncomeResult.reason?.message ?? "Covered Income query failed."]
-          }
-  };
+    const [thresholdResult, tradingViewResult, coveredIncomeResult] = await Promise.allSettled([
+      scannerTasks.thresholdHedge,
+      scannerTasks.tradingViewScanner,
+      scannerTasks.coveredIncome
+    ]);
+    const partialResults =
+      thresholdResult.status === "rejected" || tradingViewResult.status === "rejected" || coveredIncomeResult.status === "rejected";
+    const partialWarnings = [];
+    const results = {
+      thresholdHedge:
+        thresholdResult.status === "fulfilled"
+          ? thresholdResult.value
+          : {
+              count: 0,
+              items: [],
+              warnings: [thresholdResult.reason?.message ?? "Threshold Hedge query failed."]
+            },
+      tradingViewScanner:
+        tradingViewResult.status === "fulfilled"
+          ? tradingViewResult.value
+          : {
+              count: 0,
+              items: [],
+              warnings: [tradingViewResult.reason?.message ?? "TradingView query failed."]
+            },
+      coveredIncome:
+        coveredIncomeResult.status === "fulfilled"
+          ? coveredIncomeResult.value
+          : {
+              count: 0,
+              items: [],
+              warnings: [coveredIncomeResult.reason?.message ?? "Covered Income query failed."]
+            }
+    };
 
-  for (const [key, result] of Object.entries(results)) {
-    if (result.warnings?.length) {
-      partialWarnings.push(...result.warnings.map((warning) => `${key}: ${warning}`));
+    for (const [key, result] of Object.entries(results)) {
+      if (result.warnings?.length) {
+        partialWarnings.push(...result.warnings.map((warning) => `${key}: ${warning}`));
+      }
     }
-  }
 
-  response.json({
-    requestId: crypto.randomUUID(),
-    generatedAt,
-    request: {
-      ticker: query.ticker,
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 200,
+      responseTimeMs: getRequestDurationMs(request),
+      requestTicker: query.ticker,
+      expectedPriceRangeLow: query.expectedPriceRangeLow,
+      expectedPriceRangeHigh: query.expectedPriceRangeHigh,
+      optionExpirationStartDate: query.optionExpirationStartDate,
+      optionExpirationEndDate: query.optionExpirationEndDate
+    });
+
+    response.json({
+      requestId: crypto.randomUUID(),
+      generatedAt,
+      request: {
+        ticker: query.ticker,
+        optionExpirationStartDate: query.optionExpirationStartDate,
+        optionExpirationEndDate: query.optionExpirationEndDate,
+        expectedPriceRangeLow: query.expectedPriceRangeLow,
+        expectedPriceRangeHigh: query.expectedPriceRangeHigh,
+        topX: query.topX
+      },
+      meta: {
+        authenticatedUserId: request.user.id,
+        authenticatedUsername: request.user.username,
+        scannersQueried: ["threshold-hedge", "tradingview-finder", "covered-income"],
+        partialResults,
+        warnings: partialWarnings
+      },
+      results
+    });
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      requestTicker: query.ticker,
+      expectedPriceRangeLow: query.expectedPriceRangeLow,
+      expectedPriceRangeHigh: query.expectedPriceRangeHigh,
       optionExpirationStartDate: query.optionExpirationStartDate,
       optionExpirationEndDate: query.optionExpirationEndDate,
-      expectedPriceRangeLow: query.expectedPriceRangeLow,
-      expectedPriceRangeHigh: query.expectedPriceRangeHigh
-    },
-    meta: {
-      authenticatedUserId: request.user.id,
-      authenticatedUsername: request.user.username,
-      scannersQueried: ["threshold-hedge", "tradingview-finder", "covered-income"],
-      partialResults,
-      warnings: partialWarnings
-    },
-    results
-  });
+      errorMessage: error.message
+    });
+    throw error;
+  }
+});
+
+app.get("/api/market-data", requireApiKey, async (request, response) => {
+  const symbol = normalizeDeltaHedgeTicker(String(request.query?.symbol ?? ""));
+  const interval = String(request.query?.interval ?? "1d").trim().toLowerCase();
+  const lookBackDays = Number(request.query?.look_back_days ?? 180);
+  const currDate = request.query?.curr_date == null ? null : String(request.query.curr_date).trim();
+
+  if (!symbol) {
+    response.status(400).json({ error: "symbol is required" });
+    return;
+  }
+
+  if (interval !== "1d") {
+    response.status(400).json({ error: "interval must be one of ['1d']" });
+    return;
+  }
+
+  if (!Number.isFinite(lookBackDays) || lookBackDays < 1 || lookBackDays > 3650) {
+    response.status(400).json({ error: "look_back_days must be between 1 and 3650" });
+    return;
+  }
+
+  try {
+    const payload = await fetchMarketDataSnapshot({
+      symbol,
+      currDate,
+      lookBackDays
+    });
+    response.json(payload);
+  } catch (error) {
+    if (error.message === "curr_date must be in YYYY-MM-DD format" || error.message === "curr_date must be a valid date") {
+      response.status(400).json({ error: error.message });
+      return;
+    }
+
+    if (error.message === "No market data found for the requested symbol/date window.") {
+      response.status(404).json({ error: error.message });
+      return;
+    }
+
+    response.status(502).json({ error: error.message });
+  }
 });
 
 app.get("/api/stocks/:symbol/technicals", async (request, response) => {
@@ -7957,7 +7640,7 @@ app.use((error, request, response, next) => {
   });
 });
 
-function startBackgroundJobs() {
+export function startBackgroundJobs() {
   let previousEventLoopTickMs = Date.now();
   setInterval(() => {
     const nowMs = Date.now();
@@ -8117,13 +7800,8 @@ function startBackgroundJobs() {
   }
 }
 
-app.listen(port, host, () => {
-  logInfo("HedgeHub server started", {
-    host,
-    port,
-    nodeEnv: process.env.NODE_ENV || "development"
-  });
-  if (
+function shouldBootBackgroundJobs() {
+  return (
     shouldStartBackgroundJobs() ||
     shouldRunBackgroundMarketRefresh() ||
     shouldRunBackgroundMacroRefresh() ||
@@ -8131,14 +7809,55 @@ app.listen(port, host, () => {
     shouldRunBackgroundPaperHeartbeat() ||
     shouldRunBackgroundIbkrSync() ||
     shouldRunBackgroundTwsSync()
-  ) {
+  );
+}
+
+function scheduleBackgroundStartup() {
+  if (shouldBootBackgroundJobs()) {
     setTimeout(() => {
       startBackgroundJobs();
     }, 250);
   } else {
     logInfo("HedgeHub background jobs are disabled", {
+      role: runtimeConfig.role,
       hint:
-        "Enable specific jobs with HEDGEHUB_BACKGROUND_* flags or set HEDGEHUB_BACKGROUND_JOBS=true."
+        "Enable specific jobs with HEDGEHUB_BACKGROUND_* flags or set HEDGEHUB_ENABLE_BACKGROUND_JOBS=true."
     });
   }
-});
+}
+
+export function startRuntime() {
+  if (runtimeConfig.enableHttp) {
+    return app.listen(port, host, () => {
+      logInfo("HedgeHub server started", {
+        host,
+        port,
+        nodeEnv: process.env.NODE_ENV || "development",
+        role: runtimeConfig.role,
+        enableHttp: runtimeConfig.enableHttp,
+        enableBackgroundJobs: runtimeConfig.enableBackgroundJobs
+      });
+      void syncDockerDiagnosticsBridgeFromSetting().catch((error) => {
+        logWarn("Docker diagnostics bridge bootstrap failed", {
+          subsystem: "docker-diagnostics-bridge",
+          error
+        });
+      });
+      scheduleBackgroundStartup();
+    });
+  }
+
+  logInfo("HedgeHub HTTP server disabled", {
+    role: runtimeConfig.role,
+    nodeEnv: process.env.NODE_ENV || "development",
+    enableHttp: runtimeConfig.enableHttp,
+    enableBackgroundJobs: runtimeConfig.enableBackgroundJobs
+  });
+  scheduleBackgroundStartup();
+  return null;
+}
+
+const entryScriptPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
+if (import.meta.url === entryScriptPath) {
+  startRuntime();
+}

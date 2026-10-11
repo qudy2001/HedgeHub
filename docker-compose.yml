@@ -18,8 +18,8 @@ services:
       timeout: 5s
       retries: 5
 
-  hedgehub:
-    container_name: ${HEDGEHUB_CONTAINER_NAME:-hedgehub}
+  web:
+    container_name: ${HEDGEHUB_WEB_CONTAINER_NAME:-hedgehub-web}
     image: ${HEDGEHUB_IMAGE:-ghcr.io/qudy2001/hedgehub-postgresql:latest}
     init: true
     restart: unless-stopped
@@ -32,6 +32,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8787
+      HEDGEHUB_ROLE: web
+      HEDGEHUB_ENABLE_HTTP: "true"
+      HEDGEHUB_ENABLE_BACKGROUND_JOBS: "false"
       DB_TYPE: ${DB_TYPE:-postgres}
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/optionsdb}
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
@@ -41,13 +44,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/app/data/hedgehub.db}
       TZ: ${HEDGEHUB_TZ:-Europe/London}
-      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
-      POLYGON_WS_URL: ${POLYGON_WS_URL:-}
-      IBKR_CP_BASE_URL: ${IBKR_CP_BASE_URL:-https://ibkr-gateway:5000/v1/api}
-      IBKR_CP_ACCOUNT_ID: ${IBKR_CP_ACCOUNT_ID:-}
-      IBKR_CP_ALLOW_SELF_SIGNED: ${IBKR_CP_ALLOW_SELF_SIGNED:-true}
-      IBKR_CP_REQUIRE_PAPER: ${IBKR_CP_REQUIRE_PAPER:-true}
-      IBKR_SYNC_INTERVAL_MS: ${IBKR_SYNC_INTERVAL_MS:-15000}
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
+      TIGER_BRIDGE_URL: ${TIGER_BRIDGE_URL:-http://tiger-bridge:8788}
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:-}
     volumes:
       - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
       - ${HEDGEHUB_DASHBOARDS_DIR:-./dashboards}:/app/dashboards
@@ -64,31 +63,52 @@ services:
       retries: 5
       start_period: 20s
 
-  ibkr-gateway:
-    profiles: ["ibkr"]
-    container_name: ${IBKR_GATEWAY_CONTAINER_NAME:-ibkr-gateway}
-    image: ${IBKR_GATEWAY_IMAGE:-ghcr.io/qudy2001/hedgehub-ibkr-gateway:latest}
+  scanner:
+    container_name: ${HEDGEHUB_SCANNER_CONTAINER_NAME:-hedgehub-scanner}
+    image: ${HEDGEHUB_IMAGE:-ghcr.io/qudy2001/hedgehub-postgresql:latest}
     init: true
     restart: unless-stopped
-    ports:
-      - "${IBKR_GATEWAY_HOST_PORT:-5001}:${IBKR_GATEWAY_PORT:-5000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
-      TZ: ${IBKR_GATEWAY_TZ:-Europe/London}
-      IBKR_GATEWAY_DIR: /opt/ibkr/clientportal.gw
-      IBKR_GATEWAY_CONF_PATH: root/conf.yaml
-      IBKR_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-5000}
+      NODE_ENV: production
+      PORT: 8787
+      HEDGEHUB_ROLE: scanner
+      HEDGEHUB_ENABLE_HTTP: "false"
+      HEDGEHUB_ENABLE_BACKGROUND_JOBS: "true"
+      DB_TYPE: ${DB_TYPE:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/optionsdb}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-optionsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SQLITE_DB_PATH: ${SQLITE_DB_PATH:-/app/data/hedgehub.db}
+      TZ: ${HEDGEHUB_TZ:-Europe/London}
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
+      TIGER_BRIDGE_URL: ${TIGER_BRIDGE_URL:-http://tiger-bridge:8788}
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:-}
     volumes:
-      - ${IBKR_GATEWAY_DIR:-./vendor/clientportal.gw}:/opt/ibkr/clientportal.gw
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -kfsS --connect-timeout 3 --max-time 10 https://127.0.0.1:${IBKR_GATEWAY_PORT:-5000}/ >/dev/null || exit 1"
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 45s
+      - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
+      - ${HEDGEHUB_DASHBOARDS_DIR:-./dashboards}:/app/dashboards
+
+  tiger-bridge:
+    container_name: ${TIGER_BRIDGE_CONTAINER_NAME:-tiger-bridge}
+    image: ${TIGER_BRIDGE_IMAGE:-ghcr.io/qudy2001/hedgehub-tiger-bridge:latest}
+    init: true
+    restart: unless-stopped
+    environment:
+      TIGER_BRIDGE_HOST: 0.0.0.0
+      TIGER_CONFIG_DIR: /config
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:?Set a private shared bridge token}
+      TIGER_CLAIM_DEVICE: ${TIGER_CLAIM_DEVICE:-false}
+    volumes:
+      # Host file must be the account's .properties file (not a folder); it lands
+      # inside the container under the SDK's default filename so props_path=/config resolves it.
+      - ${TIGER_CONFIG_FILE:?Set the path to your Tiger SDK .properties file}:/config/tiger_openapi_config.properties:ro
+    expose:
+      - "8788"
 
 volumes:
   postgres_data:

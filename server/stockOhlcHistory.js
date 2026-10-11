@@ -1,5 +1,6 @@
+import { tigerEnabled, tigerHistory } from "./providers/tiger.js";
+
 const STOOQ_DAILY_HISTORY_URL = "https://stooq.com/q/d/l/?i=d&s=";
-const POLYGON_DAILY_BARS_URL = "https://api.polygon.io/v2/aggs/ticker";
 const YAHOO_DAILY_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
 
 function normalizeTicker(value, fallback = "") {
@@ -21,16 +22,6 @@ function normalizeStooqStockSymbol(symbol) {
 function toNumber(value, fallback = null) {
   const numericValue = Number(value);
   return Number.isFinite(numericValue) ? numericValue : fallback;
-}
-
-function toIsoDate(date) {
-  return date.toISOString().slice(0, 10);
-}
-
-function addDays(date, days) {
-  const next = new Date(date);
-  next.setUTCDate(next.getUTCDate() + days);
-  return next;
 }
 
 async function fetchText(url) {
@@ -124,58 +115,6 @@ async function fetchStooqDailyBars({ symbol, lookbackPoints } = {}) {
   };
 }
 
-async function fetchPolygonDailyBars({ symbol, lookbackPoints, now = new Date() } = {}) {
-  if (!process.env.POLYGON_API_KEY) {
-    throw new Error("POLYGON_API_KEY not configured.");
-  }
-
-  const currentDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const desiredLookback = Math.max(Math.round(Number(lookbackPoints ?? 0) || 0), 60);
-  const fromIso = toIsoDate(addDays(currentDate, -(desiredLookback * 2 + 10)));
-  const toIso = toIsoDate(currentDate);
-
-  const url = new URL(`${POLYGON_DAILY_BARS_URL}/${encodeURIComponent(symbol)}/range/1/day/${fromIso}/${toIso}`);
-  url.searchParams.set("adjusted", "true");
-  url.searchParams.set("sort", "asc");
-  url.searchParams.set("limit", "50000");
-  url.searchParams.set("apiKey", process.env.POLYGON_API_KEY);
-
-  const payload = await fetchJson(url.toString());
-  const results = Array.isArray(payload?.results) ? payload.results : [];
-
-  const points = results
-    .map((bar) => {
-      const timestamp = Number(bar?.t ?? NaN);
-      if (!Number.isFinite(timestamp)) {
-        return null;
-      }
-
-      const close = toNumber(bar?.c, null);
-      if (close == null) {
-        return null;
-      }
-
-      return {
-        date: new Date(timestamp).toISOString().slice(0, 10),
-        open: toNumber(bar?.o, null),
-        high: toNumber(bar?.h, null),
-        low: toNumber(bar?.l, null),
-        close,
-        volume: toNumber(bar?.v, null)
-      };
-    })
-    .filter(Boolean)
-    .sort((left, right) => left.date.localeCompare(right.date))
-    .slice(-desiredLookback);
-
-  return {
-    source: "polygon",
-    sourceLabel: "Polygon.io",
-    symbol,
-    points
-  };
-}
-
 async function fetchYahooDailyBars({ symbol, lookbackPoints } = {}) {
   const desiredLookback = Math.max(Math.round(Number(lookbackPoints ?? 0) || 0), 60);
   const url = new URL(`${YAHOO_DAILY_CHART_URL}/${encodeURIComponent(symbol)}`);
@@ -223,31 +162,13 @@ async function fetchYahooDailyBars({ symbol, lookbackPoints } = {}) {
 }
 
 export async function fetchStockDailyOhlcHistory({ symbol, lookbackPoints, now = new Date() } = {}) {
+  if (tigerEnabled()) return tigerHistory(arguments[0]);
   const normalizedSymbol = normalizeTicker(symbol);
   if (!normalizedSymbol) {
     throw new Error("symbol is required");
   }
 
   const desiredLookback = Math.max(Math.round(Number(lookbackPoints ?? 0) || 0), 60);
-
-  let polygonError = null;
-  if (process.env.POLYGON_API_KEY) {
-    try {
-      const polygonResult = await fetchPolygonDailyBars({
-        symbol: normalizedSymbol,
-        lookbackPoints: desiredLookback,
-        now
-      });
-
-      if (polygonResult.points.length >= 2) {
-        return polygonResult;
-      }
-
-      polygonError = new Error("Polygon returned insufficient daily bars.");
-    } catch (error) {
-      polygonError = error;
-    }
-  }
 
   let yahooError = null;
   try {
@@ -257,10 +178,7 @@ export async function fetchStockDailyOhlcHistory({ symbol, lookbackPoints, now =
     });
 
     if (yahooResult.points.length >= 2) {
-      return {
-        ...yahooResult,
-        ...(polygonError ? { warning: `Polygon daily bars unavailable: ${polygonError.message}` } : {})
-      };
+      return yahooResult;
     }
 
     yahooError = new Error("Yahoo Finance returned insufficient daily bars.");
@@ -275,18 +193,7 @@ export async function fetchStockDailyOhlcHistory({ symbol, lookbackPoints, now =
 
   return {
     ...stooqResult,
-    ...(
-      polygonError || yahooError
-        ? {
-            warning: [
-              polygonError ? `Polygon daily bars unavailable: ${polygonError.message}` : null,
-              yahooError ? `Yahoo daily bars unavailable: ${yahooError.message}` : null
-            ]
-              .filter(Boolean)
-              .join(" | ")
-          }
-        : {}
-    )
+    ...(yahooError ? { warning: `Yahoo daily bars unavailable: ${yahooError.message}` } : {})
   };
 }
 

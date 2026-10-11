@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     expires_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS user_ibkr_settings (
-    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    config_json JSONB NOT NULL,
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -33,6 +33,30 @@ CREATE TABLE IF NOT EXISTS user_api_keys (
     last_used_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS gpt_api_request_logs (
+    id TEXT PRIMARY KEY,
+    system_name TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    ip_address TEXT,
+    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    username TEXT,
+    api_key_id TEXT REFERENCES user_api_keys(id) ON DELETE SET NULL,
+    api_key_label TEXT,
+    api_key_prefix TEXT,
+    auth_status TEXT NOT NULL,
+    status_code INT NOT NULL,
+    response_time_ms NUMERIC(12, 1),
+    request_ticker TEXT,
+    expected_price_range_low NUMERIC(14, 4),
+    expected_price_range_high NUMERIC(14, 4),
+    option_expiration_start_date DATE,
+    option_expiration_end_date DATE,
+    request_body_json JSONB,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS strategy_profiles (

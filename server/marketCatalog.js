@@ -20,7 +20,8 @@ export const quoteWatchlist = [
   { symbol: "FXB", sourceSymbol: "fxb.us", label: "Pound FX ETF", group: "Forex", provider: "stooq" },
   { symbol: "UUP", sourceSymbol: "uup.us", label: "Dollar Index ETF", group: "Global Trade", provider: "stooq" },
   { symbol: "SEA", sourceSymbol: "sea.us", label: "Shipping ETF", group: "Global Trade", provider: "stooq" },
-  { symbol: "IBIT", sourceSymbol: "ibit.us", label: "iShares Bitcoin Trust", group: "Strategy Proxy", provider: "stooq" }
+  { symbol: "IBIT", sourceSymbol: "ibit.us", label: "iShares Bitcoin Trust", group: "Strategy Proxy", provider: "stooq" },
+  { symbol: "ETHA", sourceSymbol: "etha.us", label: "iShares Ethereum Trust", group: "Strategy Proxy", provider: "stooq" }
 ];
 
 export const marketSections = [

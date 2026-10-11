@@ -1,9 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createMarketTimerContext } from "../marketTimers.js";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
-import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
-import { isTwsReady } from "../twsStatus.js";
 
 function formatCurrency(value) {
   if (value == null || value === "") {
@@ -191,66 +190,6 @@ function gcd(a, b) {
   return currentLeft;
 }
 
-function calculateIbkrNetLimitPrice(optionLegs) {
-  const normalizedLegs = (optionLegs ?? []).filter((leg) => Number(leg?.quantity ?? 0) > 0);
-  if (!normalizedLegs.length) {
-    return null;
-  }
-
-  if (normalizedLegs.length === 1) {
-    return Number(normalizedLegs[0].entryPrice ?? 0) || 0;
-  }
-
-  const comboQuantity = normalizedLegs.reduce(
-    (current, leg) => gcd(current, Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0)),
-    0
-  );
-  const normalizedComboQuantity = comboQuantity || 1;
-
-  return normalizedLegs.reduce((sum, leg) => {
-    const ratio = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0) / normalizedComboQuantity || 1;
-    const signedPrice =
-      leg.action === "SHORT" ? -(Number(leg.entryPrice ?? 0) || 0) : Number(leg.entryPrice ?? 0) || 0;
-    return sum + signedPrice * ratio;
-  }, 0);
-}
-
-function parseLimitPriceCents(value) {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) {
-    return null;
-  }
-
-  return Math.round(numericValue * 100);
-}
-
-function formatLimitPriceCents(value) {
-  return (Number(value ?? 0) / 100).toFixed(2);
-}
-
-function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
-  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
-  if (anchorCents == null) {
-    return [];
-  }
-
-  const windowOffsets = 10;
-  const priceCents = new Set();
-
-  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
-    priceCents.add(anchorCents + offset);
-  }
-
-  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
-  if (selectedCents != null) {
-    priceCents.add(selectedCents);
-  }
-
-  return Array.from(priceCents)
-    .sort((left, right) => left - right)
-    .map(formatLimitPriceCents);
-}
-
 function normalizeComboQuantityInput(value, fallback = 1) {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue) || numericValue <= 0) {
@@ -324,6 +263,7 @@ function buildDeltaHedgePaperOrderPayload({
   return {
     strategyId: strategyDefinition?.id ?? "strategy-4",
     strategyName: strategyDefinition?.name ?? "Delta Hedge Scanner",
+    strategySource: "Delta Hedge Scanner",
     combinationId: row.id,
     combinationLabel: `${row.symbol} · ${row.strategyType} · ${row.expiration}`,
     assetLabel: row.symbol,
@@ -559,24 +499,12 @@ export default function DeltaHedgeScannerWorkspace({
   const [paperTradeDate, setPaperTradeDate] = useState("");
   const [paperOrderState, setPaperOrderState] = useState(null);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
-  const [paperExecutionRoute, setPaperExecutionRoute] = useState("tws-paper");
   const [paperComboQuantity, setPaperComboQuantity] = useState(1);
   const [paperComboQuantityInput, setPaperComboQuantityInput] = useState("1");
-  const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
-  const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
-  const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
-  const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
-  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
   const [fundamentalsLoading, setFundamentalsLoading] = useState(false);
   const [fundamentalsError, setFundamentalsError] = useState("");
   const [fundamentals, setFundamentals] = useState(null);
   const hasHydratedSavedFiltersRef = useRef(false);
-  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const [twsStatus, setTwsStatus] = useState(() => paperPortfolio?.brokerStatus?.tws ?? null);
-  const ibkrReady = isIbkrReady(ibkrStatus);
-  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
-  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
-  const twsReady = isTwsReady(twsStatus);
 
   async function loadScan(force = false) {
     const nextRefreshing = payload != null;
@@ -952,13 +880,17 @@ export default function DeltaHedgeScannerWorkspace({
       optionRows
     };
   }, [directedSelectedRow, normalizedComboQuantity]);
-  const ibkrSuggestedLimitPrice = useMemo(
-    () => calculateIbkrNetLimitPrice(directedSelectedRow?.optionLegs ?? []),
-    [directedSelectedRow?.optionLegs]
-  );
-  const twsLimitPriceWindow = useMemo(
-    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
-    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
+  const executionQualityContracts = useMemo(
+    () =>
+      (directedSelectedRow?.optionLegs ?? [])
+        .filter((leg) => String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.contractSymbol ||
+            `${selectedRow?.symbol || "Option"} ${index + 1} · ${formatCurrency(leg.strike)} · ${leg.expiration || "n/a"}`
+        })),
+    [directedSelectedRow?.optionLegs, selectedRow?.symbol]
   );
   const marketTimerContext = useMemo(() => {
     if (!selectedRow) {
@@ -992,49 +924,11 @@ export default function DeltaHedgeScannerWorkspace({
   }, [marketTimerContext, onMarketTimerContextChange]);
 
   useEffect(() => {
-    if (paperPortfolio?.brokerStatus?.tws) {
-      setTwsStatus(paperPortfolio.brokerStatus.tws);
-    }
-  }, [paperPortfolio?.brokerStatus?.tws]);
-
-  useEffect(() => {
-    if (paperExecutionRoute !== "tws-paper") {
-      return;
-    }
-
-    let cancelled = false;
-
-    async function refreshTwsStatus() {
-      try {
-        const response = await fetch("/api/brokers/tws/status");
-        const payload = await response.json().catch(() => null);
-        if (!cancelled && response.ok) {
-          setTwsStatus(payload?.tws ?? null);
-        }
-      } catch (_error) {
-        // ignore
-      }
-    }
-
-    void refreshTwsStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, [paperExecutionRoute]);
-
-  useEffect(() => {
     setPaperOrderSaving(false);
     setPaperOrderState(null);
     setPaperTradeDate(selectedScenarioOrder?.purchaseDate ?? new Date().toISOString().slice(0, 10));
-    setPaperExecutionRoute("tws-paper");
     setPaperComboQuantity(1);
     setPaperComboQuantityInput("1");
-    setPaperIbkrOrderType("LMT");
-    setPaperIbkrTif("DAY");
-    setPaperIbkrOutsideRth(false);
-    setPaperIbkrSmartEnabled(false);
-    const nextSuggestedLimit = calculateIbkrNetLimitPrice(selectedRow?.optionLegs ?? []);
-    setPaperIbkrLimitPrice(nextSuggestedLimit == null ? "" : String(Number(nextSuggestedLimit.toFixed(2))));
   }, [selectedRow?.id]);
 
   useEffect(() => {
@@ -1093,13 +987,6 @@ export default function DeltaHedgeScannerWorkspace({
     }
 
     setStrategyDirection(normalizedNextDirection);
-
-    if (paperIbkrOrderType === "LMT") {
-      setPaperIbkrLimitPrice((current) => {
-        const parsed = Number(current);
-        return Number.isFinite(parsed) ? (-parsed).toFixed(2) : current;
-      });
-    }
   }
 
   function applyPaperComboQuantity(nextComboQuantity, { syncInput = true } = {}) {
@@ -1123,18 +1010,6 @@ export default function DeltaHedgeScannerWorkspace({
     setPaperComboQuantityInput(String(paperComboQuantity));
   }
 
-  useEffect(() => {
-    if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
-      setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
-    }
-  }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
-
-  useEffect(() => {
-    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
-      setPaperIbkrSmartEnabled(false);
-    }
-  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
-
   async function handleCreatePaperTrade() {
     if (!directedSelectedRow || !onCreatePaperOrder) {
       return;
@@ -1144,95 +1019,9 @@ export default function DeltaHedgeScannerWorkspace({
     setPaperOrderState(null);
 
     try {
-      if (paperExecutionRoute === "ibkr-paper") {
-        if (!ibkrReady) {
-          throw new Error(
-            ibkrStatus?.error || "IBKR paper gateway is not ready. Check the connection on the paper-trading page."
-          );
-        }
-
-        if (!(directedSelectedRow.optionLegs ?? []).length) {
-          throw new Error("This setup does not have any option legs to route to IBKR.");
-        }
-
-        if (paperIbkrOrderType === "LMT") {
-          if (paperIbkrLimitPrice === "") {
-            throw new Error("Enter an IBKR limit price before routing this order.");
-          }
-
-          const parsedLimitPrice = Number(paperIbkrLimitPrice);
-          const optionLegCount = (directedSelectedRow.optionLegs ?? []).length;
-          const allowsSignedNet = optionLegCount > 1;
-
-          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
-            throw new Error(
-              allowsSignedNet
-                ? "Enter a valid IBKR net limit price before routing this order."
-                : "Enter a valid (non-negative) IBKR limit price before routing this order."
-            );
-          }
-        }
-      }
-
-      if (paperExecutionRoute === "tws-paper") {
-        if (!twsReady) {
-          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
-        }
-
-        if (!(directedSelectedRow.optionLegs ?? []).length) {
-          throw new Error("This setup does not have any option legs to route to TWS.");
-        }
-
-        if (paperIbkrOrderType === "LMT") {
-          if (paperIbkrLimitPrice === "") {
-            throw new Error("Enter a TWS limit price before routing this order.");
-          }
-
-          const parsedLimitPrice = Number(paperIbkrLimitPrice);
-          const optionLegCount = (directedSelectedRow.optionLegs ?? []).length;
-          const allowsSignedNet = optionLegCount > 1;
-
-          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
-            throw new Error(
-              allowsSignedNet
-                ? "Enter a valid TWS net limit price before routing this order."
-                : "Enter a valid (non-negative) TWS limit price before routing this order."
-            );
-          }
-        }
-      }
-
-      const execution =
-        paperExecutionRoute === "ibkr-paper"
-          ? {
-              route: "ibkr-paper",
-              orderType: paperIbkrOrderType,
-              tif: paperIbkrTif,
-              outsideRth: paperIbkrOutsideRth,
-              limitPrice:
-                paperIbkrOrderType === "LMT"
-                  ? Number(paperIbkrLimitPrice)
-                  : null,
-              accountId: ibkrStatus?.selectedAccount ?? "",
-              smart: {
-                enabled: paperIbkrOrderType === "LMT" && paperIbkrSmartEnabled
-              }
-            }
-          : paperExecutionRoute === "tws-paper"
-            ? {
-                route: "tws-paper",
-                orderType: paperIbkrOrderType,
-                tif: paperIbkrTif,
-                outsideRth: paperIbkrOutsideRth,
-                limitPrice:
-                  paperIbkrOrderType === "LMT"
-                    ? Number(paperIbkrLimitPrice)
-                    : null,
-                accountId: twsStatus?.selectedAccount ?? ""
-              }
-          : {
-              route: "local-paper"
-            };
+      const execution = {
+        route: "local-paper"
+      };
       const createResponse = await onCreatePaperOrder(
         buildDeltaHedgePaperOrderPayload({
           row: directedSelectedRow,
@@ -1245,20 +1034,8 @@ export default function DeltaHedgeScannerWorkspace({
       const pendingConfirmation = getPendingConfirmation(createResponse?.order);
 
       setPaperOrderState({
-        tone:
-          (paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper") &&
-          createResponse?.message?.toLowerCase().includes("failed")
-            ? "warning"
-            : pendingConfirmation
-              ? "warning"
-              : "success",
-        message:
-          createResponse?.message ||
-          (paperExecutionRoute === "ibkr-paper"
-            ? "IBKR paper order submitted. You can monitor it from the paper-trading page."
-            : paperExecutionRoute === "tws-paper"
-              ? "TWS paper order submitted. You can monitor it from the paper-trading page."
-              : "Order saved to paper trading."),
+        tone: pendingConfirmation ? "warning" : "success",
+        message: createResponse?.message || "Order saved to paper trading.",
         confirmation: pendingConfirmation
       });
     } catch (error) {
@@ -1859,51 +1636,11 @@ export default function DeltaHedgeScannerWorkspace({
                                             </strong>
                                           </div>
                                           <div className="paper-order-ticket__status">
-                                            <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
-                                              {paperExecutionRoute === "ibkr-paper"
-                                                ? "IBKR route"
-                                                : paperExecutionRoute === "tws-paper"
-                                                  ? "TWS route"
-                                                  : "Local route"}
-                                            </span>
-                                            {paperExecutionRoute === "ibkr-paper" ? (
-                                              <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
-                                                {ibkrReady
-                                                  ? `Gateway ready${ibkrStatus?.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
-                                                  : "Gateway not ready"}
-                                              </span>
-                                            ) : paperExecutionRoute === "tws-paper" ? (
-                                              <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
-                                                {twsReady
-                                                  ? `TWS ready${twsStatus?.selectedAccount ? ` · ${twsStatus.selectedAccount}` : ""}`
-                                                  : "TWS not ready"}
-                                              </span>
-                                            ) : null}
+                                            <span className="pill pill--ghost">Local route</span>
                                             {selectedRow.opportunityKind === "delta-hedge" ? (
                                               <span className="pill pill--ghost">Hedge: Dynamic (no entry hedge)</span>
                                             ) : null}
                                           </div>
-                                          {paperExecutionRoute === "ibkr-paper" && !ibkrReady ? (
-                                            <p className="paper-order-ticket__note">
-                                              {ibkrReloginNeeded
-                                                  ? (
-                                                      <>
-                                                        IBKR session expired or was signed out. Re-login at{" "}
-                                                        <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
-                                                          {ibkrLoginUrl}
-                                                        </a>{" "}
-                                                        and wait a few seconds before routing this order.
-                                                      </>
-                                                    )
-                                                  : ibkrStatus?.error || "Start the IBKR Client Portal Gateway before routing this order."}
-                                            </p>
-                                          ) : null}
-                                          {paperExecutionRoute === "tws-paper" && !twsReady ? (
-                                            <p className="paper-order-ticket__note">
-                                              {twsStatus?.error ||
-                                                "Connect TWS and enable API socket clients, then enter the IP/port in the sidebar and connect."}
-                                            </p>
-                                          ) : null}
                                         </div>
                                         <div className="paper-order-ticket__actions">
                                           <label>
@@ -1913,17 +1650,6 @@ export default function DeltaHedgeScannerWorkspace({
                                               value={paperTradeDate}
                                               onChange={(event) => setPaperTradeDate(event.target.value)}
                                             />
-                                          </label>
-                                          <label>
-                                            <span>Execution</span>
-                                            <select
-                                              value={paperExecutionRoute}
-                                              onChange={(event) => setPaperExecutionRoute(event.target.value)}
-                                            >
-                                              <option value="local-paper">Local</option>
-                                              <option value="ibkr-paper">IBKR</option>
-                                              <option value="tws-paper">TWS</option>
-                                            </select>
                                           </label>
                                           <label>
                                             <span>Direction</span>
@@ -1960,91 +1686,11 @@ export default function DeltaHedgeScannerWorkspace({
                                               />
                                             </div>
                                           </label>
-                                          {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                                            <label>
-                                              <span>Order type</span>
-                                              <select
-                                                value={paperIbkrOrderType}
-                                                onChange={(event) => setPaperIbkrOrderType(event.target.value)}
-                                              >
-                                                <option value="LMT">Limit</option>
-                                                <option value="MKT">Market</option>
-                                              </select>
-                                            </label>
-                                          ) : null}
-                                          {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                                            <label>
-                                              <span>IBKR limit</span>
-                                              <input
-                                                type="number"
-                                                step="0.01"
-                                                value={paperIbkrLimitPrice}
-                                                onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                                              />
-                                            </label>
-                                          ) : null}
-                                          {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
-                                            <>
-                                              <label>
-                                                <span>TWS limit</span>
-                                                <input
-                                                  type="number"
-                                                  step="0.01"
-                                                  list="tws-limit-window-delta-hedge"
-                                                  value={paperIbkrLimitPrice}
-                                                  onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                                                />
-                                              </label>
-                                              <datalist id="tws-limit-window-delta-hedge">
-                                                {twsLimitPriceWindow.map((option) => (
-                                                  <option key={`tws-limit:${option}`} value={option} />
-                                                ))}
-                                              </datalist>
-                                            </>
-                                          ) : null}
-                                          {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                                            <label>
-                                              <span>TIF</span>
-                                              <select value={paperIbkrTif} onChange={(event) => setPaperIbkrTif(event.target.value)}>
-                                                <option value="DAY">DAY</option>
-                                                <option value="GTC">GTC</option>
-                                              </select>
-                                            </label>
-                                          ) : null}
-                                          {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                                            <label className="paper-order-ticket__toggle">
-                                              <span>Outside RTH</span>
-                                              <span className="paper-order-ticket__toggle-control">
-                                                <input
-                                                  type="checkbox"
-                                                  checked={paperIbkrOutsideRth}
-                                                  onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
-                                                />
-                                              </span>
-                                            </label>
-                                          ) : null}
-                                          {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                                            <label className="paper-order-ticket__toggle">
-                                              <span>Smart entry</span>
-                                              <span className="paper-order-ticket__toggle-control">
-                                                <input
-                                                  type="checkbox"
-                                                  checked={paperIbkrSmartEnabled}
-                                                  onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
-                                                />
-                                              </span>
-                                            </label>
-                                          ) : null}
                                           <button
                                             type="button"
                                             className={`finder-action ${paperOrderSaving ? "chart-toggle--active" : ""}`}
                                             onClick={handleCreatePaperTrade}
-                                            disabled={
-                                              paperOrderSaving ||
-                                              !onCreatePaperOrder ||
-                                              (paperExecutionRoute === "ibkr-paper" && !ibkrReady) ||
-                                              (paperExecutionRoute === "tws-paper" && !twsReady)
-                                            }
+                                            disabled={paperOrderSaving || !onCreatePaperOrder}
                                           >
                                             {paperOrderSaving ? "Saving..." : "Place order"}
                                           </button>
@@ -2282,6 +1928,8 @@ export default function DeltaHedgeScannerWorkspace({
                                           </table>
                                         </div>
                                       </article>
+
+                                      <OptionMicrostructurePanel contracts={executionQualityContracts} />
                                     </div>
                                   </>
                                 ) : (

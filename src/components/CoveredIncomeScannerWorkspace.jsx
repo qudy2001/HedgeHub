@@ -10,15 +10,17 @@ import {
   YAxis
 } from "recharts";
 import { createMarketTimerContext } from "../marketTimers.js";
-import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 import { getChartPalette } from "../theme.js";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
-import { isTwsReady } from "../twsStatus.js";
+import { buildOptionChainCallColumns, buildOptionChainSideColumns } from "../optionChainColumns.js";
 
-const COVERED_INCOME_FILTERS_STORAGE_KEY = "hedgehub:filters:covered-income";
+const COVERED_INCOME_SCANNER_FILTERS_STORAGE_KEY = "hedgehub:filters:covered-income";
+const COVERED_INCOME_DISPLAY_FILTERS_STORAGE_KEY = "hedgehub:filters:covered-income-display";
 const MAX_SORT_PRIORITIES = 4;
 const DEFAULT_RISK_FREE_RATE = 0.0425;
+const MAX_OPTION_CHAIN_CACHE_ENTRIES = 8;
 
 const defaultFilters = {
   symbols: "TSLA, AAPL, NVDA, SPY",
@@ -42,25 +44,25 @@ const strategyModeLabels = {
 };
 
 const columns = [
-  { key: "symbol", label: "Symbol" },
-  { key: "strategyType", label: "Strategy" },
-  { key: "expiryDate", label: "Expiry" },
-  { key: "dte", label: "DTE" },
-  { key: "stockPrice", label: "Spot" },
-  { key: "strikePrice", label: "Strike" },
-  { key: "annualizedReturnOnAllocatedCashPct", label: "Ann ret %" },
-  { key: "evAnnualized", label: "EV ann %" },
-  { key: "evPerBuyingPower", label: "EV/BP" },
-  { key: "ivRank", label: "IV rank" },
-  { key: "liquidityScore", label: "Liquidity" },
-  { key: "earningsFlag", label: "Earnings" },
-  { key: "beta", label: "Beta" },
-  { key: "sectorExposure", label: "Sector overlap" },
-  { key: "allocationImpact", label: "Alloc impact" },
-  { key: "netVegaImpact", label: "Net vega" },
-  { key: "correlationCluster", label: "Corr cluster" },
-  { key: "downsideBreakeven", label: "Down breakeven" },
-  { key: "finalStrategyScore", label: "Score" }
+  { key: "symbol", label: "Symbol", filterType: "text" },
+  { key: "strategyType", label: "Strategy", filterType: "text" },
+  { key: "expiryDate", label: "Expiry", filterType: "text" },
+  { key: "dte", label: "DTE", filterType: "range" },
+  { key: "stockPrice", label: "Spot", filterType: "range" },
+  { key: "strikePrice", label: "Strike", filterType: "range" },
+  { key: "annualizedReturnOnAllocatedCashPct", label: "Ann ret %", filterType: "range" },
+  { key: "evAnnualized", label: "EV ann %", filterType: "range" },
+  { key: "evPerBuyingPower", label: "EV/BP", filterType: "range" },
+  { key: "ivRank", label: "IV rank", filterType: "range" },
+  { key: "liquidityScore", label: "Liquidity", filterType: "range" },
+  { key: "earningsFlag", label: "Earnings", filterType: "text" },
+  { key: "beta", label: "Beta", filterType: "range" },
+  { key: "sectorExposure", label: "Sector overlap", filterType: "text" },
+  { key: "allocationImpact", label: "Alloc impact", filterType: "range" },
+  { key: "netVegaImpact", label: "Net vega", filterType: "range" },
+  { key: "correlationCluster", label: "Corr cluster", filterType: "text" },
+  { key: "downsideBreakeven", label: "Down breakeven", filterType: "range" },
+  { key: "finalStrategyScore", label: "Score", filterType: "range" }
 ];
 
 const COVERED_INCOME_DEFAULT_COLUMN_KEYS = [
@@ -81,6 +83,15 @@ const COVERED_INCOME_DEFAULT_COLUMN_KEYS = [
 
 const COVERED_INCOME_COMPACT_MEDIA_QUERY = "(max-width: 1240px)";
 const COVERED_INCOME_COMPACT_COLUMN_KEYS = COVERED_INCOME_DEFAULT_COLUMN_KEYS;
+const COVERED_INCOME_CHAIN_EXTENSION_COLUMNS = [
+  { key: "coveredIncomeAnnRetPct", label: "Ann ret %", kind: "custom" },
+  { key: "coveredIncomeEvPerBuyingPower", label: "EV/BP", kind: "custom" },
+  { key: "coveredIncomeIvRank", label: "IV rank", kind: "custom" },
+  { key: "coveredIncomeDownsideBufferPct", label: "Buffer", kind: "custom" },
+  { key: "coveredIncomeAssignmentRisk", label: "Risk", kind: "custom" }
+];
+const COVERED_INCOME_CHAIN_SIDE_COLUMNS = buildOptionChainSideColumns(COVERED_INCOME_CHAIN_EXTENSION_COLUMNS);
+const COVERED_INCOME_CHAIN_CALL_COLUMNS = buildOptionChainCallColumns(COVERED_INCOME_CHAIN_EXTENSION_COLUMNS);
 
 function matchesCoveredIncomeCompactViewport() {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -101,6 +112,41 @@ function ensureCoveredIncomeColumnsVisible(currentKeys = [], requiredKeys = []) 
   const nextKeys = currentKeys.filter((key) => columns.some((column) => column.key === key));
   const missingRequiredKeys = requiredKeys.filter((key) => !nextKeys.includes(key));
   return missingRequiredKeys.length ? [...nextKeys, ...missingRequiredKeys] : nextKeys;
+}
+
+function buildDefaultVisibleColumnKeys() {
+  return ensureCoveredIncomeColumnsVisible(
+    getDefaultCoveredIncomeVisibleColumnKeys(matchesCoveredIncomeCompactViewport()),
+    ["ivRank", "evPerBuyingPower"]
+  );
+}
+
+function buildEmptyTableFilters() {
+  return columns.reduce((result, column) => {
+    result[column.key] = column.filterType === "range" ? { min: "", max: "" } : "";
+    return result;
+  }, {});
+}
+
+function normalizeTableFilters(savedFilters = {}) {
+  const defaults = buildEmptyTableFilters();
+  if (!savedFilters || typeof savedFilters !== "object") {
+    return defaults;
+  }
+
+  return columns.reduce((result, column) => {
+    const savedValue = savedFilters[column.key];
+    if (column.filterType === "range") {
+      result[column.key] = {
+        min: typeof savedValue?.min === "string" || typeof savedValue?.min === "number" ? String(savedValue.min) : "",
+        max: typeof savedValue?.max === "string" || typeof savedValue?.max === "number" ? String(savedValue.max) : ""
+      };
+      return result;
+    }
+
+    result[column.key] = typeof savedValue === "string" ? savedValue : "";
+    return result;
+  }, defaults);
 }
 
 function formatCurrency(value) {
@@ -287,8 +333,186 @@ function buildScenarioOrderFromCoveredIncomeRow(row, generatedAt) {
   };
 }
 
-function buildInitialFilters() {
-  const saved = loadSavedFilters(COVERED_INCOME_FILTERS_STORAGE_KEY);
+function writeBoundedCacheRecord(current, key, value, maxEntries) {
+  const normalizedKey = String(key ?? "").trim();
+  if (!normalizedKey) {
+    return current && typeof current === "object" ? { ...current } : {};
+  }
+
+  const entries = Object.entries(current ?? {}).filter(([entryKey]) => entryKey !== normalizedKey);
+  entries.push([normalizedKey, value]);
+
+  return Object.fromEntries(entries.slice(-Math.max(Number(maxEntries) || 0, 0)));
+}
+
+function buildChainKey(symbol, expiration, optionType) {
+  return `${symbol}|${expiration}|${optionType}`;
+}
+
+function cloneCoveredIncomeScenarioOrder(order) {
+  if (!order) {
+    return null;
+  }
+
+  return {
+    ...order,
+    valuationContext: {
+      ...(order.valuationContext ?? {})
+    },
+    legs: (order.legs ?? []).map((leg) => ({
+      ...leg
+    }))
+  };
+}
+
+function buildCoveredIncomeLegTitle(leg) {
+  const strike = Number(leg?.strike ?? 0);
+  const strikeLabel = Number.isFinite(strike) ? strike.toFixed(2) : "0.00";
+  return `${leg?.action ?? "LONG"} ${String(leg?.optionType ?? "call").toUpperCase()} ${strikeLabel}`;
+}
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function formatShortDate(value) {
+  if (!value) {
+    return "";
+  }
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return parsed.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short"
+  });
+}
+
+function diffDaysIso(fromIso, toIso) {
+  if (!fromIso || !toIso) {
+    return null;
+  }
+
+  const from = new Date(`${fromIso}T00:00:00.000Z`);
+  const to = new Date(`${toIso}T00:00:00.000Z`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    return null;
+  }
+
+  return Math.round((to.getTime() - from.getTime()) / 86400000);
+}
+
+function buildWeeklyExpiryTabs(anchorIso, { pastWeeks = 4, futureWeeks = 12 } = {}) {
+  if (!anchorIso) {
+    return [];
+  }
+
+  const anchorDate = new Date(`${anchorIso}T00:00:00.000Z`);
+  if (Number.isNaN(anchorDate.getTime())) {
+    return [];
+  }
+
+  return Array.from({ length: pastWeeks + futureWeeks + 1 }, (_, index) => {
+    const nextDate = new Date(anchorDate);
+    nextDate.setUTCDate(nextDate.getUTCDate() + (index - pastWeeks) * 7);
+    return nextDate.toISOString().slice(0, 10);
+  });
+}
+
+function formatCompactCount(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: numericValue >= 1000 ? 1 : 0
+  }).format(numericValue);
+}
+
+function formatQuoteSizePair(bidSize, askSize) {
+  const numericBidSize = Number(bidSize);
+  const numericAskSize = Number(askSize);
+  if (!Number.isFinite(numericBidSize) || numericBidSize < 0 || !Number.isFinite(numericAskSize) || numericAskSize < 0) {
+    return null;
+  }
+
+  return `${Math.round(numericBidSize)}/${Math.round(numericAskSize)}`;
+}
+
+function formatContractChoiceLabel(contract) {
+  const strikeLabel = formatNumber(contract?.strike, 1);
+  const typeLabel = contract?.optionType === "put" ? "P" : "C";
+  const bidLabel = formatNumber(contract?.bid, 2);
+  const askLabel = formatNumber(contract?.ask, 2);
+  const quoteSizePair = formatQuoteSizePair(contract?.bidSize, contract?.askSize);
+  const sizeSuffix = quoteSizePair ? ` · size ${quoteSizePair}` : "";
+  const volumeSuffix =
+    contract?.volume != null && Number.isFinite(Number(contract.volume))
+      ? ` · vol ${formatCompactCount(contract.volume)}`
+      : "";
+  const openInterestSuffix =
+    contract?.openInterest != null && Number.isFinite(Number(contract.openInterest))
+      ? ` · oi ${formatCompactCount(contract.openInterest)}`
+      : "";
+
+  return `${strikeLabel}${typeLabel} · bid ${bidLabel} · ask ${askLabel}${sizeSuffix}${volumeSuffix}${openInterestSuffix}`;
+}
+
+function buildCoveredIncomeChainContext(row) {
+  if (!row) {
+    return null;
+  }
+
+  const matchContract = (contract, leg, expectedType) => {
+    if (!contract || !leg) {
+      return false;
+    }
+
+    const contractSymbol = String(contract.contractSymbol ?? "").trim();
+    const legContractSymbol = String(leg.contractSymbol ?? "").trim();
+    if (contractSymbol && legContractSymbol && contractSymbol === legContractSymbol) {
+      return true;
+    }
+
+    const strikeMatches = Math.abs(Number(contract.strike ?? NaN) - Number(leg.strike ?? NaN)) < 0.001;
+    const expiryMatches =
+      String(contract.expiration ?? "").trim() === String(row.expiryDate ?? "").trim();
+    const typeMatches =
+      String(contract.optionType ?? "").trim().toLowerCase() === String(expectedType ?? "").trim().toLowerCase();
+    return strikeMatches && expiryMatches && typeMatches;
+  };
+
+  const resolveLegContext = (contract) => {
+    if (matchContract(contract, row.put, "put")) {
+      return {
+        side: "put",
+        assignmentRisk: row.put?.assignmentRisk ?? "n/a"
+      };
+    }
+
+    if (matchContract(contract, row.call, "call")) {
+      return {
+        side: "call",
+        assignmentRisk: row.call?.assignmentRisk ?? "n/a"
+      };
+    }
+
+    return null;
+  };
+
+  return {
+    row,
+    resolveLegContext
+  };
+}
+
+function buildInitialScannerFilters() {
+  const saved = loadSavedFilters(COVERED_INCOME_SCANNER_FILTERS_STORAGE_KEY);
   if (!saved || typeof saved !== "object") {
     return defaultFilters;
   }
@@ -302,11 +526,24 @@ function buildInitialFilters() {
     targetDte: Array.isArray(saved.targetDte) && saved.targetDte.length
       ? saved.targetDte
       : defaultFilters.targetDte,
-    excludeEarningsBeforeExpiry: saved.excludeEarningsBeforeExpiry !== false,
-    visibleColumnKeys:
-      Array.isArray(saved.visibleColumnKeys) && saved.visibleColumnKeys.length
-        ? saved.visibleColumnKeys.filter((key) => columns.some((column) => column.key === key))
-        : getDefaultCoveredIncomeVisibleColumnKeys(matchesCoveredIncomeCompactViewport())
+    excludeEarningsBeforeExpiry: saved.excludeEarningsBeforeExpiry !== false
+  };
+}
+
+function buildInitialDisplayState() {
+  const saved = loadSavedFilters(COVERED_INCOME_DISPLAY_FILTERS_STORAGE_KEY);
+  const legacyScannerSaved = loadSavedFilters(COVERED_INCOME_SCANNER_FILTERS_STORAGE_KEY);
+  const defaultVisibleColumnKeys = buildDefaultVisibleColumnKeys();
+  const visibleColumnKeys =
+    Array.isArray(saved?.visibleColumnKeys) && saved.visibleColumnKeys.length
+      ? ensureCoveredIncomeColumnsVisible(saved.visibleColumnKeys, ["ivRank", "evPerBuyingPower"])
+      : Array.isArray(legacyScannerSaved?.visibleColumnKeys) && legacyScannerSaved.visibleColumnKeys.length
+        ? ensureCoveredIncomeColumnsVisible(legacyScannerSaved.visibleColumnKeys, ["ivRank", "evPerBuyingPower"])
+        : defaultVisibleColumnKeys;
+
+  return {
+    visibleColumnKeys,
+    tableFilters: normalizeTableFilters(saved?.tableFilters)
   };
 }
 
@@ -332,86 +569,6 @@ function buildRequestPayload(filters) {
     },
     excludeEarningsBeforeExpiry: filters.excludeEarningsBeforeExpiry !== false
   };
-}
-
-function calculateIbkrNetLimitPrice(optionLegs) {
-  const normalizedLegs = (optionLegs ?? []).filter((leg) => Number(leg?.quantity ?? 0) > 0);
-  if (!normalizedLegs.length) {
-    return null;
-  }
-
-  if (normalizedLegs.length === 1) {
-    return Number(normalizedLegs[0].entryPrice ?? 0) || 0;
-  }
-
-  const gcd = (left, right) => {
-    const safeLeft = Math.max(Math.round(Number(left ?? 0) || 0), 0);
-    const safeRight = Math.max(Math.round(Number(right ?? 0) || 0), 0);
-    if (!safeLeft) {
-      return safeRight;
-    }
-    if (!safeRight) {
-      return safeLeft;
-    }
-
-    let currentLeft = safeLeft;
-    let currentRight = safeRight;
-    while (currentRight) {
-      const remainder = currentLeft % currentRight;
-      currentLeft = currentRight;
-      currentRight = remainder;
-    }
-
-    return currentLeft;
-  };
-
-  const comboQuantity = normalizedLegs.reduce(
-    (current, leg) => gcd(current, Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0)),
-    0
-  );
-  const normalizedComboQuantity = comboQuantity || 1;
-
-  return normalizedLegs.reduce((sum, leg) => {
-    const ratio = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0) / normalizedComboQuantity || 1;
-    const signedPrice =
-      leg.action === "SHORT" ? -(Number(leg.entryPrice ?? 0) || 0) : Number(leg.entryPrice ?? 0) || 0;
-    return sum + signedPrice * ratio;
-  }, 0);
-}
-
-function parseLimitPriceCents(value) {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) {
-    return null;
-  }
-
-  return Math.round(numericValue * 100);
-}
-
-function formatLimitPriceCents(value) {
-  return (Number(value ?? 0) / 100).toFixed(2);
-}
-
-function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
-  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
-  if (anchorCents == null) {
-    return [];
-  }
-
-  const windowOffsets = 10;
-  const priceCents = new Set();
-  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
-    priceCents.add(anchorCents + offset);
-  }
-
-  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
-  if (selectedCents != null) {
-    priceCents.add(selectedCents);
-  }
-
-  return Array.from(priceCents)
-    .sort((left, right) => left - right)
-    .map(formatLimitPriceCents);
 }
 
 function getPendingConfirmation(order) {
@@ -515,6 +672,7 @@ function buildCoveredIncomePaperOrderPayload({
   return {
     strategyId: strategyDefinition?.id ?? "strategy-5",
     strategyName: strategyDefinition?.name ?? "Covered Income Scanner",
+    strategySource: "Covered Income Scanner",
     combinationId: order.id ?? row.id,
     combinationLabel:
       order.combinationLabel ??
@@ -720,6 +878,84 @@ function formatCell(row, key) {
     default:
       return "n/a";
   }
+}
+
+function readDisplayFilterValue(row, key) {
+  if (!row) {
+    return "";
+  }
+
+  switch (key) {
+    case "earningsFlag":
+      return row.risk?.earningsBeforeExpiry ? "Flag" : "Clear";
+    case "sectorExposure":
+      return row.intelligence?.portfolioImpact?.sectorOverlap ?? "";
+    default:
+      return formatCell(row, key);
+  }
+}
+
+function readRangeFilterValue(row, key) {
+  const rawValue = readSortValue(row, key);
+  switch (key) {
+    case "evPerBuyingPower":
+      return Number(rawValue) * 100;
+    default:
+      return rawValue;
+  }
+}
+
+function rowMatchesTableFilters(row, tableFilters) {
+  return columns.every((column) => {
+    const filterValue = tableFilters?.[column.key];
+    if (column.filterType === "range") {
+      const min = toOptionalNumber(filterValue?.min, null);
+      const max = toOptionalNumber(filterValue?.max, null);
+      if (min == null && max == null) {
+        return true;
+      }
+
+      const numericValue = Number(readRangeFilterValue(row, column.key));
+      if (!Number.isFinite(numericValue)) {
+        return false;
+      }
+      if (min != null && numericValue < min) {
+        return false;
+      }
+      if (max != null && numericValue > max) {
+        return false;
+      }
+      return true;
+    }
+
+    const needle = String(filterValue ?? "").trim().toLowerCase();
+    if (!needle) {
+      return true;
+    }
+
+    const haystack = String(readDisplayFilterValue(row, column.key) ?? "").trim().toLowerCase();
+    return haystack.includes(needle);
+  });
+}
+
+function formatDisplayFilterSummary(column, filterValue) {
+  if (column.filterType === "range") {
+    const min = String(filterValue?.min ?? "").trim();
+    const max = String(filterValue?.max ?? "").trim();
+    if (min && max) {
+      return `${min} to ${max}`;
+    }
+    if (min) {
+      return `>= ${min}`;
+    }
+    if (max) {
+      return `<= ${max}`;
+    }
+    return column.label;
+  }
+
+  const text = String(filterValue ?? "").trim();
+  return text || column.label;
 }
 
 function getHigherIsBetterTone(value, { goodMin, cautionMin }) {
@@ -1026,7 +1262,12 @@ export default function CoveredIncomeScannerWorkspace({
 }) {
   const detailRef = useRef(null);
   const hasNormalizedInitialColumnsRef = useRef(false);
-  const [filters, setFilters] = useState(() => buildInitialFilters());
+  const initialDisplayStateRef = useRef(null);
+  if (!initialDisplayStateRef.current) {
+    initialDisplayStateRef.current = buildInitialDisplayState();
+  }
+  const [filters, setFilters] = useState(() => buildInitialScannerFilters());
+  const [tableFilters, setTableFilters] = useState(() => initialDisplayStateRef.current.tableFilters);
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1034,19 +1275,16 @@ export default function CoveredIncomeScannerWorkspace({
   const [feedback, setFeedback] = useState("");
   const [selectedRowId, setSelectedRowId] = useState(null);
   const [sortState, setSortState] = useState([{ key: "finalStrategyScore", direction: "desc" }]);
+  const [strategyEditorOpen, setStrategyEditorOpen] = useState(false);
+  const [scenarioOrderDraft, setScenarioOrderDraft] = useState(null);
+  const [optionChains, setOptionChains] = useState({});
+  const [optionChainStatus, setOptionChainStatus] = useState({});
+  const [activeLegId, setActiveLegId] = useState("");
+  const [chainShowAll, setChainShowAll] = useState(false);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
   const [paperOrderState, setPaperOrderState] = useState(null);
   const [paperTradeDate, setPaperTradeDate] = useState("");
-  const [paperExecutionRoute, setPaperExecutionRoute] = useState("tws-paper");
-  const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
-  const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
-  const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
-  const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
-  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
-  const [twsStatus, setTwsStatus] = useState(() => paperPortfolio?.brokerStatus?.tws ?? null);
-  const [visibleColumnKeys, setVisibleColumnKeys] = useState(
-    () => buildInitialFilters().visibleColumnKeys ?? getDefaultCoveredIncomeVisibleColumnKeys(matchesCoveredIncomeCompactViewport())
-  );
+  const [visibleColumnKeys, setVisibleColumnKeys] = useState(() => initialDisplayStateRef.current.visibleColumnKeys);
 
   async function loadScan(force = false, nextFilters = filters) {
     const nextRefreshing = payload != null;
@@ -1112,8 +1350,12 @@ export default function CoveredIncomeScannerWorkspace({
     });
   }, [payload, visibleColumnKeys.length]);
 
+  const filteredRows = useMemo(() => {
+    return (payload?.rows ?? []).filter((row) => rowMatchesTableFilters(row, tableFilters));
+  }, [payload?.rows, tableFilters]);
+
   const sortedRows = useMemo(() => {
-    const rows = [...(payload?.rows ?? [])];
+    const rows = [...filteredRows];
     return rows.sort((left, right) => {
       for (const descriptor of sortState) {
         const comparison = compareRows(left, right, descriptor.key, descriptor.direction);
@@ -1123,7 +1365,7 @@ export default function CoveredIncomeScannerWorkspace({
       }
       return 0;
     });
-  }, [payload?.rows, sortState]);
+  }, [filteredRows, sortState]);
 
   const visibleColumns = useMemo(() => {
     const nextColumns = columns.filter((column) => visibleColumnKeys.includes(column.key));
@@ -1147,6 +1389,7 @@ export default function CoveredIncomeScannerWorkspace({
     if ((selectedRow.sharesRequired ?? 0) > 0) {
       rows.push({
         id: `${selectedRow.id}:stock`,
+        kind: "stock",
         action: "LONG",
         quantity: selectedRow.sharesRequired,
         strikeLabel: "Stock",
@@ -1164,6 +1407,7 @@ export default function CoveredIncomeScannerWorkspace({
     if (selectedRow.put) {
       rows.push({
         id: `${selectedRow.id}:put`,
+        kind: "option",
         action: "SHORT",
         quantity: selectedRow.contracts,
         strikeLabel: `${formatNumber(selectedRow.put.strike, 2)}P`,
@@ -1173,6 +1417,7 @@ export default function CoveredIncomeScannerWorkspace({
         volume: selectedRow.put.volume,
         openInterest: selectedRow.put.openInterest,
         spreadPct: calculateSpreadPercent(selectedRow.put.bid, selectedRow.put.ask),
+        contractSymbol: selectedRow.put.contractSymbol ?? "",
         referenceLabel: selectedRow.put.contractSymbol || `${selectedRow.symbol} put`,
         referenceMeta: `${selectedRow.put.assignmentRisk} assignment risk`
       });
@@ -1181,6 +1426,7 @@ export default function CoveredIncomeScannerWorkspace({
     if (selectedRow.call) {
       rows.push({
         id: `${selectedRow.id}:call`,
+        kind: "option",
         action: "SHORT",
         quantity: selectedRow.contracts,
         strikeLabel: `${formatNumber(selectedRow.call.strike, 2)}C`,
@@ -1190,6 +1436,7 @@ export default function CoveredIncomeScannerWorkspace({
         volume: selectedRow.call.volume,
         openInterest: selectedRow.call.openInterest,
         spreadPct: calculateSpreadPercent(selectedRow.call.bid, selectedRow.call.ask),
+        contractSymbol: selectedRow.call.contractSymbol ?? "",
         referenceLabel: selectedRow.call.contractSymbol || `${selectedRow.symbol} call`,
         referenceMeta: `${selectedRow.call.assignmentRisk} assignment risk`
       });
@@ -1197,6 +1444,16 @@ export default function CoveredIncomeScannerWorkspace({
 
     return rows;
   }, [selectedRow]);
+  const executionQualityContracts = useMemo(
+    () =>
+      selectedLegRows
+        .filter((leg) => leg?.kind === "option" && String(leg?.contractSymbol ?? "").trim())
+        .map((leg) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label: leg.referenceLabel || leg.contractSymbol
+        })),
+    [selectedLegRows]
+  );
 
   const assignmentScenarios = useMemo(() => {
     if (!selectedRow) {
@@ -1223,27 +1480,371 @@ export default function CoveredIncomeScannerWorkspace({
       `Above ${formatCurrency(selectedRow.call?.strike)}: existing shares can be called away while the short put expires worthless.`
     ];
   }, [selectedRow]);
-  const selectedScenarioOrder = useMemo(
+  const baseScenarioOrder = useMemo(
     () => buildScenarioOrderFromCoveredIncomeRow(selectedRow, payload?.generatedAt),
     [payload?.generatedAt, selectedRow]
   );
+  const selectedScenarioOrder = scenarioOrderDraft ?? baseScenarioOrder;
   const optionLegsForOrder = useMemo(
     () => (selectedScenarioOrder?.legs ?? []).filter((leg) => leg?.kind === "option"),
     [selectedScenarioOrder?.legs]
   );
-  const ibkrSuggestedLimitPrice = useMemo(
-    () => calculateIbkrNetLimitPrice(optionLegsForOrder),
-    [optionLegsForOrder]
+  const optionRootSymbol =
+    selectedScenarioOrder?.valuationContext?.underlyingSymbol ??
+    selectedScenarioOrder?.assetLabel ??
+    selectedRow?.symbol ??
+    "";
+  const chainSpot = Number(selectedScenarioOrder?.valuationContext?.currentProxySpot ?? selectedRow?.stockPrice ?? 0);
+  const activeOptionLeg =
+    optionLegsForOrder.find((leg) => leg.id === activeLegId) ?? optionLegsForOrder[optionLegsForOrder.length - 1] ?? null;
+  const activeChainExpiration = activeOptionLeg?.expiry ?? selectedScenarioOrder?.strategyCloseDate ?? "";
+  const activeExpiryTabs = useMemo(() => {
+    if (!activeChainExpiration) {
+      return [];
+    }
+
+    const tabs = buildWeeklyExpiryTabs(activeChainExpiration);
+    const minIso = todayIso();
+    return tabs.filter((value) => value >= minIso);
+  }, [activeChainExpiration]);
+  const activeCallChainKey =
+    optionRootSymbol && activeChainExpiration ? buildChainKey(optionRootSymbol, activeChainExpiration, "call") : "";
+  const activePutChainKey =
+    optionRootSymbol && activeChainExpiration ? buildChainKey(optionRootSymbol, activeChainExpiration, "put") : "";
+  const activeCallChain = activeCallChainKey ? optionChains[activeCallChainKey] ?? null : null;
+  const activePutChain = activePutChainKey ? optionChains[activePutChainKey] ?? null : null;
+  const activeCallChainStatus = activeCallChainKey ? optionChainStatus[activeCallChainKey] ?? null : null;
+  const activePutChainStatus = activePutChainKey ? optionChainStatus[activePutChainKey] ?? null : null;
+  const activeChainRows = useMemo(() => {
+    const contractsByStrike = new Map();
+
+    (activeCallChain?.contracts ?? []).forEach((contract) => {
+      const strike = Number(contract?.strike ?? NaN);
+      if (!Number.isFinite(strike)) {
+        return;
+      }
+
+      const row = contractsByStrike.get(strike) ?? { strike, call: null, put: null };
+      row.call = contract;
+      contractsByStrike.set(strike, row);
+    });
+
+    (activePutChain?.contracts ?? []).forEach((contract) => {
+      const strike = Number(contract?.strike ?? NaN);
+      if (!Number.isFinite(strike)) {
+        return;
+      }
+
+      const row = contractsByStrike.get(strike) ?? { strike, call: null, put: null };
+      row.put = contract;
+      contractsByStrike.set(strike, row);
+    });
+
+    const strikes = Array.from(contractsByStrike.keys()).sort((left, right) => left - right);
+    if (!strikes.length) {
+      return [];
+    }
+
+    if (chainShowAll) {
+      return strikes.map((strike) => contractsByStrike.get(strike));
+    }
+
+    const normalizedSpot = Number(chainSpot ?? 0);
+    const strikeWindow = 30;
+    const windowedStrikes =
+      Number.isFinite(normalizedSpot) && normalizedSpot > 0
+        ? [...strikes]
+            .sort((left, right) => {
+              const leftDistance = Math.abs(left - normalizedSpot);
+              const rightDistance = Math.abs(right - normalizedSpot);
+              return leftDistance === rightDistance ? left - right : leftDistance - rightDistance;
+            })
+            .slice(0, strikeWindow)
+            .sort((left, right) => left - right)
+        : strikes.slice(0, strikeWindow);
+
+    return windowedStrikes.map((strike) => contractsByStrike.get(strike));
+  }, [activeCallChain?.contracts, activePutChain?.contracts, chainShowAll, chainSpot]);
+  const coveredIncomeChainContext = useMemo(
+    () => buildCoveredIncomeChainContext(selectedRow),
+    [selectedRow]
   );
-  const twsLimitPriceWindow = useMemo(
-    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
-    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
-  );
-  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const ibkrReady = isIbkrReady(ibkrStatus);
-  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
-  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
-  const twsReady = isTwsReady(twsStatus);
+  function updateScenarioDraftLeg(legId, patch) {
+    setScenarioOrderDraft((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        legs: (current.legs ?? []).map((leg) => {
+          if (leg.id !== legId) {
+            return leg;
+          }
+
+          const nextLeg = {
+            ...leg,
+            ...patch
+          };
+
+          return {
+            ...nextLeg,
+            label: buildCoveredIncomeLegTitle(nextLeg)
+          };
+        })
+      };
+    });
+  }
+
+  function buildManualDraftLeg(order) {
+    const optionLegs = (order?.legs ?? []).filter((leg) => leg?.kind === "option");
+    const anchorLeg = optionLegs[optionLegs.length - 1] ?? null;
+    const spot = Number(order?.valuationContext?.currentProxySpot ?? 0);
+    const strikeHint = Number.isFinite(spot) && spot > 0 ? Math.round(spot) : Number(anchorLeg?.strike ?? 0) || 0;
+    const nextLegId = (() => {
+      const seed =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return `${order?.id ?? "order"}:option:manual:${seed}`;
+    })();
+
+    const draftLeg = {
+      action: "LONG",
+      ask: null,
+      askSize: null,
+      bid: null,
+      bidSize: null,
+      contractMultiplier: Number(anchorLeg?.contractMultiplier ?? 100) || 100,
+      contractSymbol: "",
+      entryPrice: 0,
+      expiry: anchorLeg?.expiry ?? order?.strategyCloseDate ?? order?.purchaseDate ?? "",
+      id: nextLegId,
+      impliedVolatility: Number(anchorLeg?.impliedVolatility ?? order?.legs?.[0]?.impliedVolatility ?? 0.24) || 0.24,
+      isLive: false,
+      kind: "option",
+      openInterest: null,
+      optionType: anchorLeg?.optionType ?? "call",
+      quantity: Math.max(Math.round(Number(anchorLeg?.quantity ?? 1) || 1), 1),
+      quoteSource: "Manual",
+      riskFreeRate: Number(anchorLeg?.riskFreeRate ?? DEFAULT_RISK_FREE_RATE) || DEFAULT_RISK_FREE_RATE,
+      rootSymbol: anchorLeg?.rootSymbol ?? order?.valuationContext?.underlyingSymbol ?? order?.assetLabel ?? "",
+      strike: strikeHint,
+      volume: null
+    };
+
+    return {
+      ...draftLeg,
+      label: buildCoveredIncomeLegTitle(draftLeg)
+    };
+  }
+
+  function handleAddDraftLeg() {
+    if (!selectedScenarioOrder) {
+      return;
+    }
+
+    const nextLeg = buildManualDraftLeg(selectedScenarioOrder);
+    setActiveLegId(nextLeg.id);
+    setScenarioOrderDraft((current) =>
+      current
+        ? {
+            ...current,
+            legs: [...(current.legs ?? []), nextLeg]
+          }
+        : current
+    );
+  }
+
+  function handleRemoveDraftLeg(legId) {
+    setActiveLegId((current) => (current === legId ? "" : current));
+    setScenarioOrderDraft((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        legs: (current.legs ?? []).filter((leg) => leg.id !== legId)
+      };
+    });
+  }
+
+  async function loadOptionChain({ expiration, optionType, strikeHint = 0, limit = 30, force = false }) {
+    if (!optionRootSymbol || !expiration) {
+      return null;
+    }
+
+    const requestKey = buildChainKey(optionRootSymbol, expiration, optionType);
+    const cached = optionChains[requestKey] ?? null;
+    const cachedLimit = Number(cached?.requestedLimit ?? NaN);
+    const cachedIsAll = cached && Number.isFinite(cachedLimit) && cachedLimit <= 0;
+    const normalizedLimit = Number(limit ?? 30);
+    const wantsAll = Number.isFinite(normalizedLimit) && normalizedLimit <= 0;
+    const hasSufficientCache = cached && (!wantsAll || cachedIsAll);
+
+    if (!force && (hasSufficientCache || optionChainStatus[requestKey]?.loading)) {
+      return cached;
+    }
+
+    setOptionChainStatus((current) => ({
+      ...current,
+      [requestKey]: {
+        loading: true,
+        error: null
+      }
+    }));
+
+    try {
+      const response = await fetch(
+        `/api/options/chain?symbol=${encodeURIComponent(optionRootSymbol)}&expiration=${encodeURIComponent(
+          expiration
+        )}&optionType=${encodeURIComponent(optionType)}&strikeHint=${encodeURIComponent(
+          strikeHint
+        )}&limit=${encodeURIComponent(limit)}`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Chain request failed with ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const enrichedPayload = {
+        ...payload,
+        requestedLimit: Number.isFinite(normalizedLimit) ? normalizedLimit : 30
+      };
+      setOptionChains((current) =>
+        writeBoundedCacheRecord(current, requestKey, enrichedPayload, MAX_OPTION_CHAIN_CACHE_ENTRIES)
+      );
+      setOptionChainStatus((current) =>
+        writeBoundedCacheRecord(
+          current,
+          requestKey,
+          {
+            loading: false,
+            error: null
+          },
+          MAX_OPTION_CHAIN_CACHE_ENTRIES
+        )
+      );
+      return enrichedPayload;
+    } catch (loadError) {
+      setOptionChainStatus((current) =>
+        writeBoundedCacheRecord(
+          current,
+          requestKey,
+          {
+            loading: false,
+            error: loadError.message
+          },
+          MAX_OPTION_CHAIN_CACHE_ENTRIES
+        )
+      );
+      return null;
+    }
+  }
+
+  function refreshVisibleOptionChains() {
+    if (optionRootSymbol && activeChainExpiration) {
+      const resolvedStrikeHint =
+        Number.isFinite(chainSpot) && chainSpot > 0 ? chainSpot : Number(activeOptionLeg?.strike ?? 0) || 0;
+      const requestLimit = chainShowAll ? 0 : 30;
+
+      loadOptionChain({
+        expiration: activeChainExpiration,
+        optionType: "call",
+        strikeHint: resolvedStrikeHint,
+        limit: requestLimit,
+        force: true
+      });
+      loadOptionChain({
+        expiration: activeChainExpiration,
+        optionType: "put",
+        strikeHint: resolvedStrikeHint,
+        limit: requestLimit,
+        force: true
+      });
+    }
+
+    optionLegsForOrder.forEach((leg) => {
+      loadOptionChain({
+        expiration: leg.expiry,
+        optionType: leg.optionType,
+        strikeHint: Number(leg.strike ?? chainSpot ?? 0) || 0,
+        force: true
+      });
+    });
+  }
+
+  function handleChainExpirationChange(nextExpiration) {
+    if (!activeOptionLeg || !nextExpiration) {
+      return;
+    }
+
+    updateScenarioDraftLeg(activeOptionLeg.id, {
+      expiry: nextExpiration,
+      contractSymbol: "",
+      quoteSource: "Manual",
+      isLive: false
+    });
+
+    const resolvedStrikeHint =
+      Number.isFinite(chainSpot) && chainSpot > 0 ? chainSpot : Number(activeOptionLeg?.strike ?? 0) || 0;
+    const requestLimit = chainShowAll ? 0 : 30;
+
+    loadOptionChain({
+      expiration: nextExpiration,
+      optionType: "call",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit,
+      force: true
+    });
+    loadOptionChain({
+      expiration: nextExpiration,
+      optionType: "put",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit,
+      force: true
+    });
+  }
+
+  function handleToggleShowAllStrikes() {
+    if (chainShowAll) {
+      setChainShowAll(false);
+      return;
+    }
+
+    setChainShowAll(true);
+  }
+
+  function applyChainContractToDraftLeg(legId, contract) {
+    if (!contract) {
+      return;
+    }
+
+    const currentAction = optionLegsForOrder.find((leg) => leg.id === legId)?.action ?? "LONG";
+    const nextEntryPrice =
+      currentAction === "SHORT"
+        ? Number(contract.bid ?? contract.mark ?? contract.lastPrice ?? 0)
+        : Number(contract.ask ?? contract.mark ?? contract.lastPrice ?? 0);
+
+    updateScenarioDraftLeg(legId, {
+      optionType: contract.optionType ?? "call",
+      expiry: contract.expiration ?? "",
+      strike: Number(contract.strike ?? 0),
+      contractSymbol: contract.contractSymbol ?? "",
+      bid: contract.bid ?? null,
+      ask: contract.ask ?? null,
+      bidSize: contract.bidSize ?? null,
+      askSize: contract.askSize ?? null,
+      volume: contract.volume ?? null,
+      openInterest: contract.openInterest ?? null,
+      entryPrice: Number.isFinite(nextEntryPrice) ? nextEntryPrice : 0,
+      quoteSource: contract.sourceLabel ?? contract.source ?? "chain",
+      isLive: contract.isLive === true,
+      hasRealBidAsk: contract.hasRealBidAsk === true
+    });
+  }
 
   useEffect(() => {
     if (!onMarketTimerContextChange) {
@@ -1272,47 +1873,135 @@ export default function CoveredIncomeScannerWorkspace({
   }, [onMarketTimerContextChange, selectedRow]);
 
   useEffect(() => {
-    if (paperPortfolio?.brokerStatus?.tws) {
-      setTwsStatus(paperPortfolio.brokerStatus.tws);
-    }
-  }, [paperPortfolio?.brokerStatus?.tws]);
+    setScenarioOrderDraft(baseScenarioOrder ? cloneCoveredIncomeScenarioOrder(baseScenarioOrder) : null);
+    setStrategyEditorOpen(false);
+    setActiveLegId("");
+    setChainShowAll(false);
+    setOptionChains({});
+    setOptionChainStatus({});
+    setPaperOrderSaving(false);
+    setPaperOrderState(null);
+    setPaperTradeDate(baseScenarioOrder?.purchaseDate ?? new Date().toISOString().slice(0, 10));
+  }, [baseScenarioOrder?.id]);
 
   useEffect(() => {
-    if (paperExecutionRoute !== "tws-paper") {
+    if (!strategyEditorOpen) {
       return;
     }
 
-    let cancelled = false;
+    const optionLegIds = optionLegsForOrder
+      .map((leg) => String(leg.id ?? ""))
+      .filter(Boolean);
 
-    async function refreshTwsStatus() {
-      try {
-        const response = await fetch("/api/brokers/tws/status");
-        const nextPayload = await response.json().catch(() => null);
-        if (!cancelled && response.ok) {
-          setTwsStatus(nextPayload?.tws ?? null);
-        }
-      } catch (_error) {
-        // ignore status refresh failures here
+    if (!optionLegIds.length) {
+      setActiveLegId("");
+      return;
+    }
+
+    setActiveLegId((current) =>
+      current && optionLegIds.includes(current) ? current : optionLegIds[optionLegIds.length - 1]
+    );
+  }, [strategyEditorOpen, optionLegsForOrder.map((leg) => `${leg?.id ?? ""}`).join("|")]);
+
+  useEffect(() => {
+    if (!strategyEditorOpen || !optionRootSymbol || !activeChainExpiration) {
+      return;
+    }
+
+    const resolvedStrikeHint =
+      Number.isFinite(chainSpot) && chainSpot > 0 ? chainSpot : Number(activeOptionLeg?.strike ?? 0) || 0;
+    const requestLimit = chainShowAll ? 0 : 30;
+
+    loadOptionChain({
+      expiration: activeChainExpiration,
+      optionType: "call",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit
+    });
+    loadOptionChain({
+      expiration: activeChainExpiration,
+      optionType: "put",
+      strikeHint: resolvedStrikeHint,
+      limit: requestLimit
+    });
+  }, [activeChainExpiration, activeOptionLeg?.strike, chainShowAll, chainSpot, optionRootSymbol, strategyEditorOpen]);
+
+  useEffect(() => {
+    if (!strategyEditorOpen || !optionRootSymbol) {
+      return;
+    }
+
+    optionLegsForOrder.forEach((leg) => {
+      if (!leg.expiry) {
+        return;
       }
-    }
 
-    void refreshTwsStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, [paperExecutionRoute]);
+      loadOptionChain({
+        expiration: leg.expiry,
+        optionType: leg.optionType ?? "call",
+        strikeHint: Number(leg.strike ?? chainSpot ?? 0) || 0
+      });
+    });
+  }, [
+    strategyEditorOpen,
+    optionRootSymbol,
+    chainSpot,
+    optionLegsForOrder
+      .map((leg) => `${leg?.id ?? ""}:${leg?.expiry ?? ""}:${leg?.optionType ?? ""}:${leg?.strike ?? ""}`)
+      .join("|")
+  ]);
 
   useEffect(() => {
-    if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
-      setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
+    if (!strategyEditorOpen || !optionRootSymbol) {
+      return;
     }
-  }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
 
-  useEffect(() => {
-    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
-      setPaperIbkrSmartEnabled(false);
-    }
-  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
+    optionLegsForOrder.forEach((leg) => {
+      if (!leg.expiry || !leg.contractSymbol) {
+        return;
+      }
+
+      const chainKey = buildChainKey(optionRootSymbol, leg.expiry, leg.optionType ?? "call");
+      const payloadForLeg = optionChains[chainKey];
+      const contracts = payloadForLeg?.contracts ?? [];
+      if (!contracts.length) {
+        return;
+      }
+
+      const contract = contracts.find((item) => item.contractSymbol === leg.contractSymbol);
+      if (!contract) {
+        return;
+      }
+
+      const nextBid = Number(contract.bid ?? NaN);
+      const nextAsk = Number(contract.ask ?? NaN);
+      const currentBid = Number(leg.bid ?? NaN);
+      const currentAsk = Number(leg.ask ?? NaN);
+      const shouldPatchBid = (!Number.isFinite(currentBid) || currentBid <= 0) && Number.isFinite(nextBid) && nextBid > 0;
+      const shouldPatchAsk = (!Number.isFinite(currentAsk) || currentAsk <= 0) && Number.isFinite(nextAsk) && nextAsk > 0;
+
+      if (!shouldPatchBid && !shouldPatchAsk) {
+        return;
+      }
+
+      updateScenarioDraftLeg(leg.id, {
+        ...(shouldPatchBid ? { bid: nextBid } : {}),
+        ...(shouldPatchAsk ? { ask: nextAsk } : {}),
+        bidSize: contract.bidSize ?? leg.bidSize ?? null,
+        askSize: contract.askSize ?? leg.askSize ?? null,
+        volume: contract.volume ?? leg.volume ?? null,
+        openInterest: contract.openInterest ?? leg.openInterest ?? null,
+        quoteSource: contract.sourceLabel ?? contract.source ?? leg.quoteSource ?? "chain",
+        isLive: contract.isLive === true,
+        hasRealBidAsk: contract.hasRealBidAsk === true
+      });
+    });
+  }, [
+    strategyEditorOpen,
+    optionRootSymbol,
+    optionChains,
+    optionLegsForOrder.map((leg) => `${leg?.id ?? ""}:${leg?.contractSymbol ?? ""}:${leg?.bid ?? ""}:${leg?.ask ?? ""}`).join("|")
+  ]);
 
   async function handleCreatePaperTrade() {
     if (!selectedRow || !selectedScenarioOrder || !onCreatePaperOrder) {
@@ -1323,85 +2012,9 @@ export default function CoveredIncomeScannerWorkspace({
     setPaperOrderState(null);
 
     try {
-      if (paperExecutionRoute === "ibkr-paper") {
-        if (!ibkrReady) {
-          throw new Error(
-            ibkrStatus?.error || "IBKR paper gateway is not ready. Check the connection on the paper-trading page."
-          );
-        }
-
-        if (!optionLegsForOrder.length) {
-          throw new Error("This setup does not have any option legs to route to IBKR.");
-        }
-
-        if (paperIbkrOrderType === "LMT") {
-          if (paperIbkrLimitPrice === "") {
-            throw new Error("Enter an IBKR limit price before routing this order.");
-          }
-
-          const parsedLimitPrice = Number(paperIbkrLimitPrice);
-          const allowsSignedNet = optionLegsForOrder.length > 1;
-          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
-            throw new Error(
-              allowsSignedNet
-                ? "Enter a valid IBKR net limit price before routing this order."
-                : "Enter a valid (non-negative) IBKR limit price before routing this order."
-            );
-          }
-        }
-      }
-
-      if (paperExecutionRoute === "tws-paper") {
-        if (!twsReady) {
-          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
-        }
-
-        if (!optionLegsForOrder.length) {
-          throw new Error("This setup does not have any option legs to route to TWS.");
-        }
-
-        if (paperIbkrOrderType === "LMT") {
-          if (paperIbkrLimitPrice === "") {
-            throw new Error("Enter a TWS limit price before routing this order.");
-          }
-
-          const parsedLimitPrice = Number(paperIbkrLimitPrice);
-          const allowsSignedNet = optionLegsForOrder.length > 1;
-          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
-            throw new Error(
-              allowsSignedNet
-                ? "Enter a valid TWS net limit price before routing this order."
-                : "Enter a valid (non-negative) TWS limit price before routing this order."
-            );
-          }
-        }
-      }
-
-      const execution =
-        paperExecutionRoute === "ibkr-paper"
-          ? {
-              route: "ibkr-paper",
-              orderType: paperIbkrOrderType,
-              tif: paperIbkrTif,
-              outsideRth: paperIbkrOutsideRth,
-              limitPrice: paperIbkrOrderType === "LMT" ? Number(paperIbkrLimitPrice) : null,
-              accountId: ibkrStatus?.selectedAccount ?? "",
-              smart: {
-                enabled: paperIbkrOrderType === "LMT" && paperIbkrSmartEnabled
-              }
-            }
-          : paperExecutionRoute === "tws-paper"
-            ? {
-                route: "tws-paper",
-                orderType: paperIbkrOrderType,
-                tif: paperIbkrTif,
-                outsideRth: paperIbkrOutsideRth,
-                limitPrice: paperIbkrOrderType === "LMT" ? Number(paperIbkrLimitPrice) : null,
-                accountId: twsStatus?.selectedAccount ?? ""
-              }
-            : {
-                route: "local-paper"
-              };
+      const execution = {
+        route: "local-paper"
+      };
 
       const createResponse = await onCreatePaperOrder(
         buildCoveredIncomePaperOrderPayload({
@@ -1415,20 +2028,8 @@ export default function CoveredIncomeScannerWorkspace({
       const pendingConfirmation = getPendingConfirmation(createResponse?.order);
 
       setPaperOrderState({
-        tone:
-          (paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper") &&
-          createResponse?.message?.toLowerCase().includes("failed")
-            ? "warning"
-            : pendingConfirmation
-              ? "warning"
-              : "success",
-        message:
-          createResponse?.message ||
-          (paperExecutionRoute === "ibkr-paper"
-            ? "IBKR paper order submitted. You can monitor it from the paper-trading page."
-            : paperExecutionRoute === "tws-paper"
-              ? "TWS paper order submitted. You can monitor it from the paper-trading page."
-              : "Order saved to paper trading."),
+        tone: pendingConfirmation ? "warning" : "success",
+        message: createResponse?.message || "Order saved to paper trading.",
         confirmation: pendingConfirmation
       });
     } catch (createError) {
@@ -1500,6 +2101,26 @@ export default function CoveredIncomeScannerWorkspace({
     }));
   }
 
+  function handleTableFilterChange(columnKey, nextValue, rangeKey = null) {
+    setTableFilters((current) => {
+      const existing = current?.[columnKey];
+      if (rangeKey) {
+        return {
+          ...current,
+          [columnKey]: {
+            ...(existing ?? { min: "", max: "" }),
+            [rangeKey]: nextValue
+          }
+        };
+      }
+
+      return {
+        ...current,
+        [columnKey]: nextValue
+      };
+    });
+  }
+
   function toggleVisibleColumn(columnKey) {
     setVisibleColumnKeys((current) => {
       if (current.includes(columnKey)) {
@@ -1550,23 +2171,89 @@ export default function CoveredIncomeScannerWorkspace({
     });
   }
 
-  function saveFilters() {
-    const saved = persistSavedFilters(COVERED_INCOME_FILTERS_STORAGE_KEY, {
-      ...filters,
-      visibleColumnKeys
-    });
-    setFeedback(saved ? "Scanner filters saved locally." : "Unable to save filters locally.");
+  function saveScannerFilters() {
+    const saved = persistSavedFilters(COVERED_INCOME_SCANNER_FILTERS_STORAGE_KEY, filters);
+    setFeedback(saved ? "Scanner filters saved locally." : "Unable to save scanner filters locally.");
   }
 
-  function resetFilters() {
+  function resetScannerFilters() {
     setFilters(defaultFilters);
-    setVisibleColumnKeys(
-      ensureCoveredIncomeColumnsVisible(
-        getDefaultCoveredIncomeVisibleColumnKeys(matchesCoveredIncomeCompactViewport()),
-        ["ivRank", "evPerBuyingPower"]
-      )
-    );
     setFeedback("Scanner filters reset to defaults.");
+  }
+
+  function saveDisplayFilters() {
+    const saved = persistSavedFilters(COVERED_INCOME_DISPLAY_FILTERS_STORAGE_KEY, {
+      visibleColumnKeys,
+      tableFilters
+    });
+    setFeedback(saved ? "Display filters saved locally." : "Unable to save display filters locally.");
+  }
+
+  function resetDisplayFilters() {
+    setTableFilters(buildEmptyTableFilters());
+    setVisibleColumnKeys(buildDefaultVisibleColumnKeys());
+    setFeedback("Display filters reset to defaults.");
+  }
+
+  function formatChainMetric(contract, column, side) {
+    if (!contract) {
+      return "—";
+    }
+
+    if (column.kind === "custom") {
+      const legContext = coveredIncomeChainContext?.resolveLegContext?.(contract) ?? null;
+      if (!legContext) {
+        return "—";
+      }
+
+      switch (column.key) {
+        case "coveredIncomeAnnRetPct":
+          return formatPercent(selectedRow?.returns?.annualizedReturnOnAllocatedCashPct);
+        case "coveredIncomeEvPerBuyingPower":
+          return formatDecimalAsPercent(selectedRow?.intelligence?.ev?.evPerBuyingPower ?? calculateEvPerBuyingPower(selectedRow));
+        case "coveredIncomeIvRank":
+          return formatPercent(selectedRow?.intelligence?.volatility?.ivRank52w);
+        case "coveredIncomeDownsideBufferPct":
+          return formatPercent(calculateDownsideBufferPct(selectedRow));
+        case "coveredIncomeAssignmentRisk":
+          return legContext.side === side ? legContext.assignmentRisk ?? "n/a" : "—";
+        default:
+          return "—";
+      }
+    }
+
+    const rawValue = contract[column.key];
+    if (rawValue == null) {
+      return "—";
+    }
+
+    const numericValue = Number(rawValue);
+    if (!Number.isFinite(numericValue)) {
+      return "—";
+    }
+
+    if (column.kind === "count") {
+      return formatCompactCount(numericValue);
+    }
+
+    if (column.kind === "price") {
+      return formatNumber(numericValue, 2);
+    }
+
+    if (column.kind === "number") {
+      return formatNumber(numericValue, column.digits ?? 3);
+    }
+
+    if (column.kind === "percent") {
+      const scaledValue = numericValue * (column.scale ?? 1);
+      if (!Number.isFinite(scaledValue)) {
+        return "—";
+      }
+
+      return `${scaledValue > 0 && column.key !== "impliedVolatility" ? "+" : ""}${scaledValue.toFixed(column.digits ?? 2)}%`;
+    }
+
+    return String(rawValue);
   }
 
   if (loading) {
@@ -1594,60 +2281,6 @@ export default function CoveredIncomeScannerWorkspace({
           </button>
         </div>
       </header>
-
-      {payload?.warnings?.length ? (
-        <div className="warning-strip">
-          {payload.warnings.map((warning) => (
-            <span key={warning}>{warning}</span>
-          ))}
-        </div>
-      ) : null}
-
-      {payload?.marketRegime ? (
-        <section className="selection-banner tv-finder__selection-banner">
-          <div className="selection-banner__title">
-            <span className="brand__eyebrow">Current market regime</span>
-            <strong>
-              {payload.marketRegime.volatilityRegime} / {payload.marketRegime.trendRegime} / {payload.marketRegime.marketRegime}
-            </strong>
-          </div>
-          <div className="selection-banner__actions">
-            <div className="detail-badges">
-              {(payload.marketRegime.recommended ?? []).map((item) => (
-                <span key={`covered-income:recommended:${item}`} className="pill pill--live">{item}</span>
-              ))}
-              {(payload.marketRegime.avoid ?? []).slice(0, 2).map((item) => (
-                <span key={`covered-income:avoid:${item}`} className="pill pill--ghost">Avoid: {item}</span>
-              ))}
-            </div>
-          </div>
-        </section>
-      ) : null}
-
-      {feedback ? (
-        <div className="screening-v2__notice screening-v2__notice--info">
-          <span>{feedback}</span>
-        </div>
-      ) : null}
-
-      <section className="screening-v2__summary-grid">
-        <article className="insight-card screening-v2__summary-card">
-          <span>Symbols scanned</span>
-          <strong>{payload?.summary?.symbolsScanned ?? 0}</strong>
-        </article>
-        <article className="insight-card screening-v2__summary-card">
-          <span>Avg allocated return</span>
-          <strong>{formatPercent(payload?.summary?.averageReturnOnAllocatedCashPct)}</strong>
-        </article>
-        <article className="insight-card screening-v2__summary-card">
-          <span>Avg annualized return</span>
-          <strong>{formatPercent(payload?.summary?.averageAnnualizedReturnOnAllocatedCashPct)}</strong>
-        </article>
-        <article className="insight-card screening-v2__summary-card">
-          <span>Avg final score</span>
-          <strong>{formatNumber(payload?.summary?.averageFinalScore, 1)}</strong>
-        </article>
-      </section>
 
       <article className="insight-card screening-v2__filters covered-income__filters-card">
         <div className="covered-income__filter-toolbar">
@@ -1772,50 +2405,161 @@ export default function CoveredIncomeScannerWorkspace({
           <button type="button" className="finder-action" onClick={() => loadScan(false, filters)}>
             Scan
           </button>
-          <button type="button" className="finder-action" onClick={saveFilters}>
-            Save filters
+          <button type="button" className="finder-action" onClick={saveScannerFilters}>
+            Save scanner filters
           </button>
-          <button type="button" className="finder-action" onClick={resetFilters}>
-            Reset filters
+          <button type="button" className="finder-action" onClick={resetScannerFilters}>
+            Reset scanner filters
           </button>
-          <details className="finder-menu">
-            <summary className="finder-control">
-              <span>Columns</span>
-            </summary>
-            <div className="finder-menu__panel">
-              <div className="finder-menu__header">
-                <strong>Visible columns</strong>
-                <div className="finder-menu__header-actions">
-                  <button type="button" className="finder-menu__reset" onClick={showAllColumns}>
-                    All
-                  </button>
-                  <button type="button" className="finder-menu__reset" onClick={showCompactColumns}>
-                    Compact
-                  </button>
-                </div>
-              </div>
-              <div className="finder-menu__list">
-                {columns.map((column) => {
-                  const isActive = visibleColumnKeys.includes(column.key);
-                  return (
-                    <button
-                      key={column.key}
-                      type="button"
-                      className={`finder-menu__option ${isActive ? "finder-menu__option--active" : ""}`}
-                      onClick={() => toggleVisibleColumn(column.key)}
-                      disabled={isActive && visibleColumnKeys.length === 1}
-                    >
-                      <span>{column.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </details>
         </div>
       </article>
 
+      {payload?.warnings?.length ? (
+        <div className="warning-strip">
+          {payload.warnings.map((warning) => (
+            <span key={warning}>{warning}</span>
+          ))}
+        </div>
+      ) : null}
+
+      {payload?.marketRegime ? (
+        <section className="selection-banner tv-finder__selection-banner">
+          <div className="selection-banner__title">
+            <span className="brand__eyebrow">Current market regime</span>
+            <strong>
+              {payload.marketRegime.volatilityRegime} / {payload.marketRegime.trendRegime} / {payload.marketRegime.marketRegime}
+            </strong>
+          </div>
+          <div className="selection-banner__actions">
+            <div className="detail-badges">
+              {(payload.marketRegime.recommended ?? []).map((item) => (
+                <span key={`covered-income:recommended:${item}`} className="pill pill--live">{item}</span>
+              ))}
+              {(payload.marketRegime.avoid ?? []).slice(0, 2).map((item) => (
+                <span key={`covered-income:avoid:${item}`} className="pill pill--ghost">Avoid: {item}</span>
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {feedback ? (
+        <div className="screening-v2__notice screening-v2__notice--info">
+          <span>{feedback}</span>
+        </div>
+      ) : null}
+
+      <section className="screening-v2__summary-grid">
+        <article className="insight-card screening-v2__summary-card">
+          <span>Symbols scanned</span>
+          <strong>{payload?.summary?.symbolsScanned ?? 0}</strong>
+        </article>
+        <article className="insight-card screening-v2__summary-card">
+          <span>Avg allocated return</span>
+          <strong>{formatPercent(payload?.summary?.averageReturnOnAllocatedCashPct)}</strong>
+        </article>
+        <article className="insight-card screening-v2__summary-card">
+          <span>Avg annualized return</span>
+          <strong>{formatPercent(payload?.summary?.averageAnnualizedReturnOnAllocatedCashPct)}</strong>
+        </article>
+        <article className="insight-card screening-v2__summary-card">
+          <span>Avg final score</span>
+          <strong>{formatNumber(payload?.summary?.averageFinalScore, 1)}</strong>
+        </article>
+      </section>
+
       <section className="screening-v2__selected-layout">
+        <article className="insight-card screening-v2__filters covered-income__filters-card covered-income__filters-card--display">
+          <div className="tv-finder__filter-row covered-income__filter-toolbar covered-income__filter-toolbar--display">
+            <span className="brand__eyebrow covered-income__filter-title">Display filters</span>
+
+            {columns.map((column) => (
+              <details key={column.key} className="finder-menu covered-income__display-filter-menu">
+                <summary className="finder-control tv-finder__filter-control">
+                  <span>{formatDisplayFilterSummary(column, tableFilters[column.key])}</span>
+                </summary>
+                <div className="finder-menu__panel">
+                  <div className="finder-menu__header">
+                    <strong>{column.label}</strong>
+                  </div>
+                  {column.filterType === "range" ? (
+                    <div className="finder-menu__custom covered-income__display-filter-fields">
+                      <label>
+                        <span>Min</span>
+                        <input
+                          value={tableFilters[column.key]?.min ?? ""}
+                          onChange={(event) => handleTableFilterChange(column.key, event.target.value, "min")}
+                          placeholder="Min"
+                        />
+                      </label>
+                      <label>
+                        <span>Max</span>
+                        <input
+                          value={tableFilters[column.key]?.max ?? ""}
+                          onChange={(event) => handleTableFilterChange(column.key, event.target.value, "max")}
+                          placeholder="Max"
+                        />
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="finder-menu__custom covered-income__display-filter-fields">
+                      <label>
+                        <span>Contains</span>
+                        <input
+                          value={tableFilters[column.key] ?? ""}
+                          onChange={(event) => handleTableFilterChange(column.key, event.target.value)}
+                          placeholder={column.label}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              </details>
+            ))}
+
+            <details className="finder-menu">
+              <summary className="finder-control">
+                <span>Columns</span>
+              </summary>
+              <div className="finder-menu__panel">
+                <div className="finder-menu__header">
+                  <strong>Visible columns</strong>
+                  <div className="finder-menu__header-actions">
+                    <button type="button" className="finder-menu__reset" onClick={showAllColumns}>
+                      All
+                    </button>
+                    <button type="button" className="finder-menu__reset" onClick={showCompactColumns}>
+                      Compact
+                    </button>
+                  </div>
+                </div>
+                <div className="finder-menu__list">
+                  {columns.map((column) => {
+                    const isActive = visibleColumnKeys.includes(column.key);
+                    return (
+                      <button
+                        key={column.key}
+                        type="button"
+                        className={`finder-menu__option ${isActive ? "finder-menu__option--active" : ""}`}
+                        onClick={() => toggleVisibleColumn(column.key)}
+                        disabled={isActive && visibleColumnKeys.length === 1}
+                      >
+                        <span>{column.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </details>
+            <button type="button" className="finder-action" onClick={saveDisplayFilters}>
+              Save display filters
+            </button>
+            <button type="button" className="finder-action" onClick={resetDisplayFilters}>
+              Reset display filters
+            </button>
+          </div>
+        </article>
+
         <article className="insight-card screening-v2__table-card">
           <div className="strategy-settings__page-head">
             <div>
@@ -1825,6 +2569,12 @@ export default function CoveredIncomeScannerWorkspace({
             <p className="card-copy">
               The main grid stays focused on decision metrics only: expectancy, regime fit, liquidity, and portfolio concentration.
             </p>
+          </div>
+
+          <div className="detail-badges covered-income__table-meta">
+            <span className="pill pill--ghost">
+              Showing {sortedRows.length} of {payload?.rows?.length ?? 0}
+            </span>
           </div>
 
           <div className="covered-income__color-guide" role="note" aria-label="Color guide for scanner columns">
@@ -1930,6 +2680,13 @@ export default function CoveredIncomeScannerWorkspace({
                   {selectedRow.intelligence?.portfolioImpact?.correlationCluster ?? "portfolio impact"}
                 </span>
               </div>
+              <button
+                type="button"
+                className={`chart-toggle ${strategyEditorOpen ? "chart-toggle--active" : ""}`}
+                onClick={() => setStrategyEditorOpen((current) => !current)}
+              >
+                {strategyEditorOpen ? "Close builder" : "Add to strategy builder"}
+              </button>
             </div>
           </section>
 
@@ -2016,6 +2773,478 @@ export default function CoveredIncomeScannerWorkspace({
               </div>
             </div>
 
+            {strategyEditorOpen && selectedScenarioOrder ? (
+              <div className="detail-panel detail-panel--contracts">
+                <section className="strategy-editor">
+                  <div className="strategy-editor__header">
+                    <div>
+                      <span className="brand__eyebrow">Strategy builder</span>
+                      <p className="detail-chart__copy">
+                        Change each option leg to long or short and replace it from the option chain.
+                      </p>
+                    </div>
+                    <div className="detail-badges">
+                      <span className={`pill ${activeCallChain?.isLive || activePutChain?.isLive ? "pill--live" : "pill--ghost"}`}>
+                        {activeCallChain?.isLive || activePutChain?.isLive ? "Live chain" : "Synthetic chain"}
+                      </span>
+                      <button type="button" className="chart-toggle chart-toggle--compact" onClick={handleAddDraftLeg}>
+                        Add Option Leg
+                      </button>
+                      <button type="button" className="chart-toggle" onClick={refreshVisibleOptionChains}>
+                        Refresh chain
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="strategy-editor__chain">
+                    <div className="strategy-editor__chain-head">
+                      <div className="strategy-editor__chain-title">
+                        <span className="brand__eyebrow">Option chain</span>
+                        <strong>
+                          {optionRootSymbol || selectedRow.symbol}
+                          {activeChainExpiration ? ` · ${activeChainExpiration}` : ""}
+                        </strong>
+                      </div>
+                      <div className="strategy-editor__chain-actions">
+                        <button
+                          type="button"
+                          className={`chart-toggle chart-toggle--compact ${chainShowAll ? "chart-toggle--active" : ""}`}
+                          onClick={handleToggleShowAllStrikes}
+                          disabled={!optionRootSymbol || !activeChainExpiration}
+                        >
+                          {chainShowAll ? "Show 30 strikes" : "Show all strikes"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {activeExpiryTabs.length ? (
+                      <div className="strategy-editor__expiry-tabs">
+                        {activeExpiryTabs.map((expiry) => {
+                          const dte = diffDaysIso(todayIso(), expiry);
+                          const dteLabel = `${dte >= 0 ? dte : `-${Math.abs(dte)}`}D`;
+
+                          return (
+                            <button
+                              key={`covered-income-expiry:${expiry}`}
+                              type="button"
+                              className={`expiry-tab ${expiry === activeChainExpiration ? "expiry-tab--active" : ""}`}
+                              onClick={() => handleChainExpirationChange(expiry)}
+                              disabled={!activeOptionLeg}
+                            >
+                              <span className="expiry-tab__date">{formatShortDate(expiry)}</span>
+                              <span className="expiry-tab__dte">{dteLabel}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+
+                    <div className="strategy-editor__chain-status">
+                      <span>Spot: {formatCurrency(chainSpot)}</span>
+                      <span>
+                        Chain:{" "}
+                        {activeCallChainStatus?.loading || activePutChainStatus?.loading
+                          ? "Loading..."
+                          : activeCallChainStatus?.error || activePutChainStatus?.error
+                            ? activeCallChainStatus?.error || activePutChainStatus?.error
+                            : activeCallChain?.warning ||
+                              activePutChain?.warning ||
+                              (activeCallChain?.isLive || activePutChain?.isLive ? "Live quotes" : "Synthetic quotes")}
+                      </span>
+                    </div>
+
+                    {activeChainRows.length ? (
+                      <div className="strategy-editor__chain-table-wrap">
+                        <table className="strategy-editor__chain-table">
+                          <thead>
+                            <tr>
+                              <th colSpan={COVERED_INCOME_CHAIN_SIDE_COLUMNS.length} className="chain-group chain-group--call">
+                                Calls
+                              </th>
+                              <th rowSpan={2} className="chain-strike-head">
+                                Strike
+                              </th>
+                              <th colSpan={COVERED_INCOME_CHAIN_SIDE_COLUMNS.length} className="chain-group chain-group--put">
+                                Puts
+                              </th>
+                            </tr>
+                            <tr>
+                              {COVERED_INCOME_CHAIN_CALL_COLUMNS.map((column) => (
+                                <th key={`covered-income-call:${column.key}`}>{column.label}</th>
+                              ))}
+                              {COVERED_INCOME_CHAIN_SIDE_COLUMNS.map((column) => (
+                                <th key={`covered-income-put:${column.key}`}>{column.label}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(() => {
+                              const spotSeparatorLabel = chainSpot > 0 ? `Spot ${formatNumber(chainSpot, 2)}` : "";
+                              let spotSeparatorInserted = false;
+                              const activeStrike = Number(activeOptionLeg?.strike ?? NaN);
+                              const activeType = String(activeOptionLeg?.optionType ?? "").toLowerCase();
+                              const activeContractSymbol = String(activeOptionLeg?.contractSymbol ?? "");
+                              const chainColumnSpan = COVERED_INCOME_CHAIN_SIDE_COLUMNS.length * 2 + 1;
+
+                              const renderSideCells = (side, contract, isActiveStrike, columnsForSide) =>
+                                columnsForSide.map((column) => {
+                                  if (column.kind === "select") {
+                                    const markValue = Number(contract?.mark ?? contract?.mid ?? NaN);
+                                    const markLabel = Number.isFinite(markValue) ? formatNumber(markValue, 2) : "—";
+                                    const contractSymbol = String(contract?.contractSymbol ?? "");
+                                    const isSelected =
+                                      (activeContractSymbol && contractSymbol && contractSymbol === activeContractSymbol) ||
+                                      (!activeContractSymbol && isActiveStrike && activeType === side);
+
+                                    return (
+                                      <td key={`${side}:${column.key}`} className="chain-metric">
+                                        <button
+                                          type="button"
+                                          className={`chain-quote chain-quote--${side} ${isSelected ? "chain-quote--active" : ""}`}
+                                          onClick={() => (activeOptionLeg?.id ? applyChainContractToDraftLeg(activeOptionLeg.id, contract) : null)}
+                                          disabled={!contract || !activeOptionLeg?.id}
+                                        >
+                                          {markLabel}
+                                        </button>
+                                      </td>
+                                    );
+                                  }
+
+                                  const changeValue =
+                                    column.key === "changePercent" ? Number(contract?.changePercent ?? NaN) : NaN;
+                                  const metricLabel = formatChainMetric(contract, column, side);
+                                  const metricToneClass =
+                                    column.key === "changePercent" && Number.isFinite(changeValue)
+                                      ? changeValue > 0
+                                        ? "chain-metric__value--pos"
+                                        : changeValue < 0
+                                          ? "chain-metric__value--neg"
+                                          : ""
+                                      : "";
+
+                                  return (
+                                    <td key={`${side}:${column.key}`} className="chain-metric">
+                                      <span className={`chain-metric__value ${metricToneClass}`}>{metricLabel}</span>
+                                    </td>
+                                  );
+                                });
+
+                              return [
+                                ...activeChainRows.flatMap((row) => {
+                                  const strike = Number(row?.strike ?? NaN);
+                                  const isActiveStrike =
+                                    Number.isFinite(activeStrike) && Number.isFinite(strike) && Math.abs(activeStrike - strike) < 0.001;
+                                  const shouldInsertSpotSeparator =
+                                    !spotSeparatorInserted && spotSeparatorLabel && Number.isFinite(strike) && strike >= chainSpot;
+
+                                  if (shouldInsertSpotSeparator) {
+                                    spotSeparatorInserted = true;
+                                  }
+
+                                  return [
+                                    shouldInsertSpotSeparator ? (
+                                      <tr key={`covered-income-spot:${activeChainExpiration}`} className="chain-spot-row">
+                                        <td colSpan={chainColumnSpan}>{spotSeparatorLabel}</td>
+                                      </tr>
+                                    ) : null,
+                                    <tr key={`covered-income-strike:${strike}`} className={isActiveStrike ? "chain-row chain-row--active" : "chain-row"}>
+                                      {renderSideCells("call", row.call, isActiveStrike, COVERED_INCOME_CHAIN_CALL_COLUMNS)}
+                                      <td className="chain-strike">{formatNumber(strike, 1)}</td>
+                                      {renderSideCells("put", row.put, isActiveStrike, COVERED_INCOME_CHAIN_SIDE_COLUMNS)}
+                                    </tr>
+                                  ].filter(Boolean);
+                                }),
+                                spotSeparatorLabel && activeChainRows.length && !spotSeparatorInserted ? (
+                                  <tr key={`covered-income-spot:${activeChainExpiration}:tail`} className="chain-spot-row">
+                                    <td colSpan={chainColumnSpan}>{spotSeparatorLabel}</td>
+                                  </tr>
+                                ) : null
+                              ].filter(Boolean);
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="strategy-editor__chain-empty">
+                        {activeCallChainStatus?.loading || activePutChainStatus?.loading
+                          ? "Loading option chain..."
+                          : activeCallChainStatus?.error || activePutChainStatus?.error
+                            ? activeCallChainStatus?.error || activePutChainStatus?.error
+                            : "No option contracts returned for this expiry."}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="strategy-editor__grid">
+                    {optionLegsForOrder.length ? (
+                      optionLegsForOrder.map((leg, index) => {
+                        const requestKey = optionRootSymbol && leg.expiry ? buildChainKey(optionRootSymbol, leg.expiry, leg.optionType) : "";
+                        const chainPayload = requestKey ? optionChains[requestKey] ?? null : null;
+                        const chainState = requestKey ? optionChainStatus[requestKey] ?? null : null;
+                        const chainContracts = [...(chainPayload?.contracts ?? [])].sort(
+                          (left, right) => Number(left?.strike ?? 0) - Number(right?.strike ?? 0)
+                        );
+                        const selectedContractValue = chainContracts.some(
+                          (contract) => contract.contractSymbol === leg.contractSymbol
+                        )
+                          ? leg.contractSymbol
+                          : "";
+                        const selectedChainContract = selectedContractValue
+                          ? chainContracts.find((contract) => contract.contractSymbol === selectedContractValue) ?? null
+                          : null;
+                        const chainBid = selectedChainContract?.bid ?? leg.bid;
+                        const chainAsk = selectedChainContract?.ask ?? leg.ask;
+                        const chainQuoteSize = formatQuoteSizePair(
+                          selectedChainContract?.bidSize ?? leg.bidSize,
+                          selectedChainContract?.askSize ?? leg.askSize
+                        );
+                        const spotSeparatorLabel = chainSpot > 0 ? `---------- Spot ${formatNumber(chainSpot, 2)} ----------` : "";
+                        let spotSeparatorInserted = false;
+
+                        return (
+                          <article
+                            key={leg.id}
+                            className={`strategy-editor__card ${leg.id === activeLegId ? "strategy-editor__card--active" : ""}`}
+                            onClick={() => setActiveLegId(leg.id)}
+                            onFocusCapture={() => setActiveLegId(leg.id)}
+                          >
+                            <div className="strategy-editor__card-head">
+                              <strong>Leg {index + 1}</strong>
+                              <div className="strategy-editor__card-actions">
+                                <span className="pill pill--ghost">{leg.contractSymbol || buildCoveredIncomeLegTitle(leg)}</span>
+                                <button
+                                  type="button"
+                                  className="chart-toggle chart-toggle--compact"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleRemoveDraftLeg(leg.id);
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="strategy-editor__row">
+                              <label>
+                                <span>Action</span>
+                                <select
+                                  value={leg.action}
+                                  onChange={(event) => {
+                                    const nextAction = event.target.value;
+                                    const nextEntryPrice =
+                                      nextAction === "SHORT"
+                                        ? Number(leg.bid ?? leg.entryPrice ?? 0)
+                                        : Number(leg.ask ?? leg.entryPrice ?? 0);
+                                    updateScenarioDraftLeg(leg.id, {
+                                      action: nextAction,
+                                      entryPrice: nextEntryPrice
+                                    });
+                                  }}
+                                >
+                                  <option value="LONG">Long</option>
+                                  <option value="SHORT">Short</option>
+                                </select>
+                              </label>
+
+                              <label>
+                                <span>Type</span>
+                                <select
+                                  value={leg.optionType}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      optionType: event.target.value,
+                                      contractSymbol: "",
+                                      quoteSource: "Manual",
+                                      isLive: false
+                                    })
+                                  }
+                                >
+                                  <option value="call">Call</option>
+                                  <option value="put">Put</option>
+                                </select>
+                              </label>
+
+                              <label>
+                                <span>Expiry</span>
+                                <input
+                                  type="date"
+                                  value={leg.expiry ?? ""}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      expiry: event.target.value,
+                                      contractSymbol: "",
+                                      quoteSource: "Manual",
+                                      isLive: false
+                                    })
+                                  }
+                                />
+                              </label>
+
+                              <label>
+                                <span>Qty</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  step="1"
+                                  value={leg.quantity ?? 1}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      quantity: Math.max(Number(event.target.value || 1), 1)
+                                    })
+                                  }
+                                />
+                              </label>
+                            </div>
+
+                            <div className="strategy-editor__row">
+                              <label>
+                                <span>Strike</span>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={leg.strike ?? 0}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      strike: Number(event.target.value || 0),
+                                      contractSymbol: "",
+                                      quoteSource: "Manual",
+                                      isLive: false
+                                    })
+                                  }
+                                />
+                              </label>
+
+                              <label>
+                                <span>Entry</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={leg.entryPrice ?? 0}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      entryPrice: Number(event.target.value || 0)
+                                    })
+                                  }
+                                />
+                              </label>
+
+                              <label>
+                                <span>Bid</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={leg.bid ?? 0}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      bid: Number(event.target.value || 0)
+                                    })
+                                  }
+                                />
+                              </label>
+
+                              <label>
+                                <span>Ask</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={leg.ask ?? 0}
+                                  onChange={(event) =>
+                                    updateScenarioDraftLeg(leg.id, {
+                                      ask: Number(event.target.value || 0)
+                                    })
+                                  }
+                                />
+                              </label>
+                            </div>
+
+                            <div className="strategy-editor__row">
+                              <label className="strategy-editor__contract-picker">
+                                <span>Option chain</span>
+                                <select
+                                  value={selectedContractValue}
+                                  onChange={(event) => {
+                                    const nextValue = event.target.value;
+                                    if (!nextValue) {
+                                      updateScenarioDraftLeg(leg.id, {
+                                        contractSymbol: "",
+                                        quoteSource: "Manual",
+                                        isLive: false
+                                      });
+                                      return;
+                                    }
+
+                                    const contract = chainContracts.find((item) => item.contractSymbol === nextValue) ?? null;
+                                    applyChainContractToDraftLeg(leg.id, contract);
+                                  }}
+                                  disabled={!optionRootSymbol || !leg.expiry}
+                                >
+                                  <option value="">
+                                    {optionRootSymbol && leg.expiry ? "Select contract" : "Select an expiry to load the chain."}
+                                  </option>
+                                  {chainContracts.map((contract) => {
+                                    const contractStrike = Number(contract?.strike ?? 0);
+                                    const shouldInsertSpotSeparator =
+                                      !spotSeparatorInserted &&
+                                      spotSeparatorLabel &&
+                                      Number.isFinite(contractStrike) &&
+                                      contractStrike >= chainSpot;
+
+                                    if (shouldInsertSpotSeparator) {
+                                      spotSeparatorInserted = true;
+                                    }
+
+                                    return [
+                                      shouldInsertSpotSeparator ? (
+                                        <option key={`covered-income-spot:${requestKey}`} value="__spot__" disabled>
+                                          {spotSeparatorLabel}
+                                        </option>
+                                      ) : null,
+                                      <option key={contract.contractSymbol} value={contract.contractSymbol}>
+                                        {formatContractChoiceLabel(contract)}
+                                      </option>
+                                    ];
+                                  })}
+                                  {spotSeparatorLabel && chainContracts.length && !spotSeparatorInserted ? (
+                                    <option key={`covered-income-spot:${requestKey}:tail`} value="__spot__" disabled>
+                                      {spotSeparatorLabel}
+                                    </option>
+                                  ) : null}
+                                </select>
+                              </label>
+                            </div>
+
+                            <div className="strategy-editor__quotes">
+                              <span>
+                                Chain status:{" "}
+                                {chainState?.loading
+                                  ? "Loading..."
+                                  : chainState?.error
+                                    ? chainState.error
+                                    : chainPayload?.warning ?? (chainPayload?.isLive ? "Live quotes" : "Synthetic quotes")}
+                              </span>
+                              <strong>
+                                {formatNumber(leg.strike, 1)}
+                                {leg.optionType === "put" ? "P" : "C"} · {formatNumber(chainBid, 2)} / {formatNumber(chainAsk, 2)}
+                                {chainQuoteSize ? ` · size ${chainQuoteSize}` : ""}
+                              </strong>
+                            </div>
+                          </article>
+                        );
+                      })
+                    ) : (
+                      <div className="strategy-editor__chain-empty">This setup has no option legs available for editing.</div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            ) : null}
+
+            <OptionMicrostructurePanel contracts={executionQualityContracts} />
+
             <div className="detail-panel detail-panel--controls">
               <h4>Trade context</h4>
               {paperOrderState ? (
@@ -2052,28 +3281,7 @@ export default function CoveredIncomeScannerWorkspace({
                     </strong>
                   </div>
                   <div className="paper-order-ticket__status">
-                    <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
-                      {paperExecutionRoute === "ibkr-paper"
-                        ? "IBKR paper"
-                        : paperExecutionRoute === "tws-paper"
-                          ? "TWS paper"
-                          : "Local paper"}
-                    </span>
-                    {paperExecutionRoute === "ibkr-paper" ? (
-                      <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
-                        {ibkrReady ? "IBKR ready" : "IBKR offline"}
-                      </span>
-                    ) : paperExecutionRoute === "tws-paper" ? (
-                      <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
-                        {twsReady ? "TWS ready" : "TWS offline"}
-                      </span>
-                    ) : null}
-                    {ibkrSuggestedLimitPrice != null ? (
-                      <span className="pill pill--ghost">
-                        Suggested {formatCurrency(Math.abs(ibkrSuggestedLimitPrice))}
-                        {optionLegsForOrder.length > 1 ? " net" : ""}
-                      </span>
-                    ) : null}
+                    <span className="pill pill--ghost">Local paper</span>
                   </div>
                   <p className="detail-chart__copy">
                     Send the selected covered income structure into the same paper-routing flow used by the TradingView finder.
@@ -2081,23 +3289,6 @@ export default function CoveredIncomeScannerWorkspace({
                 </div>
 
                 <div className="paper-order-ticket__controls">
-                  {paperExecutionRoute === "ibkr-paper" && !ibkrReady ? (
-                    <div className="screening-v2__notice screening-v2__notice--warning">
-                      <span>
-                        {ibkrStatus?.error || "IBKR paper gateway is not ready for order submission."}
-                      </span>
-                      {ibkrReloginNeeded ? (
-                        <a href={ibkrLoginUrl} target="_blank" rel="noreferrer" className="chart-toggle">
-                          Open IBKR login
-                        </a>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {paperExecutionRoute === "tws-paper" && !twsReady ? (
-                    <div className="screening-v2__notice screening-v2__notice--warning">
-                      <span>{twsStatus?.error || "TWS is not ready for paper-order submission."}</span>
-                    </div>
-                  ) : null}
                   <label>
                     <span>Entry date</span>
                     <input
@@ -2106,102 +3297,11 @@ export default function CoveredIncomeScannerWorkspace({
                       onChange={(event) => setPaperTradeDate(event.target.value)}
                     />
                   </label>
-                  <label>
-                    <span>Route</span>
-                    <select
-                      value={paperExecutionRoute}
-                      onChange={(event) => setPaperExecutionRoute(event.target.value)}
-                    >
-                      <option value="tws-paper">TWS paper</option>
-                      <option value="ibkr-paper">IBKR paper</option>
-                      <option value="local-paper">Local paper</option>
-                    </select>
-                  </label>
-                  {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                    <label>
-                      <span>Order type</span>
-                      <select
-                        value={paperIbkrOrderType}
-                        onChange={(event) => setPaperIbkrOrderType(event.target.value)}
-                      >
-                        <option value="LMT">Limit</option>
-                        <option value="MKT">Market</option>
-                      </select>
-                    </label>
-                  ) : null}
-                  {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                    <label>
-                      <span>IBKR limit</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={paperIbkrLimitPrice}
-                        onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                      />
-                    </label>
-                  ) : null}
-                  {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
-                    <>
-                      <label>
-                        <span>TWS limit</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          list="tws-limit-window-covered-income"
-                          value={paperIbkrLimitPrice}
-                          onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                        />
-                      </label>
-                      <datalist id="tws-limit-window-covered-income">
-                        {twsLimitPriceWindow.map((option) => (
-                          <option key={`tws-limit-covered-income:${option}`} value={option} />
-                        ))}
-                      </datalist>
-                    </>
-                  ) : null}
-                  {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                    <label>
-                      <span>TIF</span>
-                      <select value={paperIbkrTif} onChange={(event) => setPaperIbkrTif(event.target.value)}>
-                        <option value="DAY">DAY</option>
-                        <option value="GTC">GTC</option>
-                      </select>
-                    </label>
-                  ) : null}
-                  {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                    <label className="paper-order-ticket__toggle">
-                      <span>Outside RTH</span>
-                      <span className="paper-order-ticket__toggle-control">
-                        <input
-                          type="checkbox"
-                          checked={paperIbkrOutsideRth}
-                          onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
-                        />
-                      </span>
-                    </label>
-                  ) : null}
-                  {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                    <label className="paper-order-ticket__toggle">
-                      <span>Smart entry</span>
-                      <span className="paper-order-ticket__toggle-control">
-                        <input
-                          type="checkbox"
-                          checked={paperIbkrSmartEnabled}
-                          onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
-                        />
-                      </span>
-                    </label>
-                  ) : null}
                   <button
                     type="button"
                     className={`finder-action ${paperOrderSaving ? "chart-toggle--active" : ""}`}
                     onClick={handleCreatePaperTrade}
-                    disabled={
-                      !onCreatePaperOrder ||
-                      paperOrderSaving ||
-                      (paperExecutionRoute === "ibkr-paper" && !ibkrReady) ||
-                      (paperExecutionRoute === "tws-paper" && !twsReady)
-                    }
+                    disabled={!onCreatePaperOrder || paperOrderSaving}
                   >
                     {paperOrderSaving ? "Saving..." : "Place order"}
                   </button>

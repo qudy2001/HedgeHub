@@ -17,9 +17,92 @@ function formatTimestamp(value) {
   return date.toLocaleString("en-GB");
 }
 
+function formatNumber(value, options = {}) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "n/a";
+  }
+
+  return new Intl.NumberFormat("en-GB", options).format(numeric);
+}
+
+function formatResponseTime(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "n/a";
+  }
+
+  return `${formatNumber(numeric, {
+    minimumFractionDigits: numeric % 1 === 0 ? 0 : 1,
+    maximumFractionDigits: 1
+  })} ms`;
+}
+
+function formatPriceRange(low, high) {
+  const lowValue = Number(low);
+  const highValue = Number(high);
+  if (!Number.isFinite(lowValue) && !Number.isFinite(highValue)) {
+    return "n/a";
+  }
+
+  if (Number.isFinite(lowValue) && Number.isFinite(highValue)) {
+    return `${formatNumber(lowValue, { maximumFractionDigits: 2 })} - ${formatNumber(highValue, {
+      maximumFractionDigits: 2
+    })}`;
+  }
+
+  return Number.isFinite(lowValue)
+    ? `From ${formatNumber(lowValue, { maximumFractionDigits: 2 })}`
+    : `Up to ${formatNumber(highValue, { maximumFractionDigits: 2 })}`;
+}
+
+function formatApiKeyLabel(apiKey) {
+  const label = String(apiKey?.apiKeyLabel ?? "").trim();
+  const prefix = String(apiKey?.apiKeyPrefix ?? "").trim();
+  if (label && prefix) {
+    return `${label} (${prefix}…)`;
+  }
+  if (label) {
+    return label;
+  }
+  if (prefix) {
+    return `${prefix}…`;
+  }
+  return "n/a";
+}
+
+function formatRequestBody(value) {
+  if (!value || typeof value !== "object") {
+    return "n/a";
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (_error) {
+    return "n/a";
+  }
+}
+
+function getStatusTone(code) {
+  const numeric = Number(code);
+  if (!Number.isFinite(numeric)) {
+    return "ghost";
+  }
+
+  if (numeric >= 200 && numeric < 300) {
+    return "live";
+  }
+  if (numeric >= 400) {
+    return "warning";
+  }
+  return "ghost";
+}
+
 export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
   const [users, setUsers] = useState([]);
   const [apiKeys, setApiKeys] = useState([]);
+  const [apiUsageSummary, setApiUsageSummary] = useState(null);
+  const [apiUsageRequests, setApiUsageRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
@@ -42,6 +125,11 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
     return `${count} ${count === 1 ? "API key" : "API keys"}`;
   }, [apiKeys.length]);
 
+  const apiRequestCountLabel = useMemo(() => {
+    const count = apiUsageSummary?.totalRequests ?? apiUsageRequests.length;
+    return `${count} ${count === 1 ? "request" : "requests"}`;
+  }, [apiUsageRequests.length, apiUsageSummary?.totalRequests]);
+
   const handleAuthError = useCallback(
     (response) => {
       if (response.status !== 401) {
@@ -61,16 +149,19 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
     setError("");
 
     try {
-      const [usersResponse, keysResponse] = await Promise.all([
+      const [usersResponse, keysResponse, usageResponse] = await Promise.all([
         fetch("/api/admin/users"),
-        fetch("/api/admin/api-keys")
+        fetch("/api/admin/api-keys"),
+        fetch("/api/admin/api-usage")
       ]);
       handleAuthError(usersResponse);
       handleAuthError(keysResponse);
+      handleAuthError(usageResponse);
 
-      const [usersPayload, keysPayload] = await Promise.all([
+      const [usersPayload, keysPayload, usagePayload] = await Promise.all([
         usersResponse.json().catch(() => null),
-        keysResponse.json().catch(() => null)
+        keysResponse.json().catch(() => null),
+        usageResponse.json().catch(() => null)
       ]);
 
       if (!usersResponse.ok) {
@@ -79,11 +170,17 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
       if (!keysResponse.ok) {
         throw new Error(keysPayload?.error || `Failed to load API keys (${keysResponse.status})`);
       }
+      if (!usageResponse.ok) {
+        throw new Error(usagePayload?.error || `Failed to load API usage (${usageResponse.status})`);
+      }
 
       const nextUsers = Array.isArray(usersPayload?.users) ? usersPayload.users : [];
       const nextApiKeys = Array.isArray(keysPayload?.apiKeys) ? keysPayload.apiKeys : [];
+      const nextUsageRequests = Array.isArray(usagePayload?.requests) ? usagePayload.requests : [];
       setUsers(nextUsers);
       setApiKeys(nextApiKeys);
+      setApiUsageSummary(usagePayload?.summary ?? null);
+      setApiUsageRequests(nextUsageRequests);
       setSelectedUserId((current) => current || nextUsers[0]?.id || "");
       setNotice(null);
     } catch (loadError) {
@@ -273,8 +370,11 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
           <div className="status-block__actions">
             <span className="pill pill--ghost">{userCountLabel}</span>
             <span className="pill pill--live">{apiKeyCountLabel}</span>
+            <span className="pill pill--ghost">{apiRequestCountLabel}</span>
           </div>
-          <span className="timestamp">{loading ? "Loading…" : "Manage user access and GPT API keys."}</span>
+          <span className="timestamp">
+            {loading ? "Loading…" : "Manage user access, GPT API keys, and API usage visibility."}
+          </span>
         </div>
       </header>
 
@@ -429,6 +529,136 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
               <div className="app-state app-state--inline">No API keys issued yet.</div>
             )}
           </section>
+        </div>
+      </article>
+
+      <article className="insight-card admin-usage">
+        <div className="admin-usage__header">
+          <div>
+            <h3>GPT API usage summary</h3>
+            <p className="timestamp">
+              Latest activity {formatTimestamp(apiUsageSummary?.latestRequestAt)}. Unknown requests keep the source IP and
+              submitted body for investigation.
+            </p>
+          </div>
+          <button type="button" className="macro-layout-button" onClick={loadWorkspace} disabled={busy || loading}>
+            Refresh usage
+          </button>
+        </div>
+
+        <div className="admin-usage__summary-grid">
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Total requests</span>
+            <strong>{formatNumber(apiUsageSummary?.totalRequests ?? 0)}</strong>
+          </div>
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Successful</span>
+            <strong>{formatNumber(apiUsageSummary?.successCount ?? 0)}</strong>
+          </div>
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Authorized</span>
+            <strong>{formatNumber(apiUsageSummary?.authorizedCount ?? 0)}</strong>
+          </div>
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Unknown / rejected</span>
+            <strong>{formatNumber(apiUsageSummary?.unknownCount ?? 0)}</strong>
+          </div>
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Unique IPs</span>
+            <strong>{formatNumber(apiUsageSummary?.uniqueIpCount ?? 0)}</strong>
+          </div>
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Users seen</span>
+            <strong>{formatNumber(apiUsageSummary?.uniqueUserCount ?? 0)}</strong>
+          </div>
+          <div className="admin-usage__summary-card">
+            <span className="timestamp">Average response</span>
+            <strong>{formatResponseTime(apiUsageSummary?.averageResponseTimeMs)}</strong>
+          </div>
+        </div>
+
+        <div className="admin-usage__list">
+          <div className="admin-usage__list-header">
+            <h3>Recent GPT API requests</h3>
+            <span className="pill pill--ghost">{apiRequestCountLabel}</span>
+          </div>
+
+          {loading ? (
+            <div className="app-state app-state--inline">Loading API usage…</div>
+          ) : apiUsageRequests.length ? (
+            <div className="admin-usage__rows">
+              {apiUsageRequests.map((requestLog) => {
+                const statusTone = getStatusTone(requestLog.statusCode);
+                const isUnknown = requestLog.authStatus !== "authorized";
+                return (
+                  <div key={requestLog.id} className="admin-usage__row">
+                    <div className="admin-usage__row-top">
+                      <div className="admin-users__identity">
+                        <strong>
+                          {requestLog.requestTicker || "Unknown ticker"} · {requestLog.systemName || "gpt-strategy-query"}
+                        </strong>
+                        <span className="timestamp">
+                          {requestLog.method} {requestLog.path} · {formatTimestamp(requestLog.createdAt)}
+                        </span>
+                      </div>
+                      <div className="admin-users__badges">
+                        <span className={`pill pill--${statusTone}`}>{requestLog.statusCode || "n/a"}</span>
+                        <span className={`pill ${isUnknown ? "pill--warning" : "pill--ghost"}`}>
+                          {requestLog.authStatus || "unknown"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="admin-usage__meta-grid">
+                      <div>
+                        <span className="timestamp">User</span>
+                        <strong>{requestLog.username || "Unknown user"}</strong>
+                      </div>
+                      <div>
+                        <span className="timestamp">API key</span>
+                        <strong>{formatApiKeyLabel(requestLog)}</strong>
+                      </div>
+                      <div>
+                        <span className="timestamp">IP address</span>
+                        <strong>{requestLog.ipAddress || "n/a"}</strong>
+                      </div>
+                      <div>
+                        <span className="timestamp">Response time</span>
+                        <strong>{formatResponseTime(requestLog.responseTimeMs)}</strong>
+                      </div>
+                      <div>
+                        <span className="timestamp">Price range</span>
+                        <strong>
+                          {formatPriceRange(requestLog.expectedPriceRangeLow, requestLog.expectedPriceRangeHigh)}
+                        </strong>
+                      </div>
+                      <div>
+                        <span className="timestamp">Expiration window</span>
+                        <strong>
+                          {requestLog.optionExpirationStartDate || "n/a"} to {requestLog.optionExpirationEndDate || "n/a"}
+                        </strong>
+                      </div>
+                    </div>
+
+                    {requestLog.errorMessage ? (
+                      <div className="refresh-feedback refresh-feedback--warning admin-usage__feedback">
+                        {requestLog.errorMessage}
+                      </div>
+                    ) : null}
+
+                    {isUnknown ? (
+                      <div className="admin-usage__body">
+                        <span className="timestamp">Captured request body</span>
+                        <pre>{formatRequestBody(requestLog.requestBody)}</pre>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="app-state app-state--inline">No GPT API requests logged yet.</div>
+          )}
         </div>
       </article>
     </main>

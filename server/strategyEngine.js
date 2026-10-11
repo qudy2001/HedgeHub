@@ -1389,18 +1389,22 @@ function buildStrategyFinder({
       const buildLeg = (option, action) => {
         const price = pickOptionReferencePrice(option, option.projectedTargetPrice ?? 0.05);
         const quotes =
-          option.bid != null && option.ask != null
+          option.hasRealBidAsk === true && option.bid != null && option.ask != null
             ? {
                 bid: formatNumber(option.bid, 4),
                 ask: formatNumber(option.ask, 4)
               }
-            : estimateBidAsk(price);
+            : {
+                bid: null,
+                ask: null
+              };
 
         return {
           id: `${market.id}-${option.contractSymbol}-${action.toLowerCase()}`,
           contractSymbol: option.contractSymbol,
           action,
           entryPrice: formatNumber(price, 4),
+          mark: formatNumber(price, 4),
           strike: option.strike,
           expiration: option.expiration,
           optionType: option.optionType ?? "call",

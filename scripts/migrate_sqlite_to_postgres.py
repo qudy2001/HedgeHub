@@ -14,7 +14,6 @@ from pathlib import Path
 DEFAULT_TABLES = [
     "users",
     "user_sessions",
-    "user_ibkr_settings",
     "strategy_profiles",
     "strategy_watchlist",
     "setup_watchlist",

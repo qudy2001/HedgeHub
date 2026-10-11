@@ -67,7 +67,7 @@ echo "Building production assets..."
 npm run build
 
 echo "Starting HedgeHub on port ${DEFAULT_PORT}..."
-nohup env NODE_ENV=production PORT="${DEFAULT_PORT}" DB_TYPE="${DB_TYPE:-sqlite}" node server/index.js >> "${APP_LOG}" 2>&1 < /dev/null &
+nohup env NODE_ENV=production PORT="${DEFAULT_PORT}" DB_TYPE="${DB_TYPE:-sqlite}" node server/main.js >> "${APP_LOG}" 2>&1 < /dev/null &
 app_pid=$!
 disown "${app_pid}" 2>/dev/null || true
 echo "${app_pid}" > "${PID_FILE}"

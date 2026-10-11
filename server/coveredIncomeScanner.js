@@ -1355,11 +1355,12 @@ async function buildSymbolScan({
     ? quoteLookup(quoteResult.value).get(symbol)
     : null;
   const lastHistoryPoint = historyPoints[historyPoints.length - 1];
-  const currentPrice = getQuotePrice(quote) ?? toNumber(lastHistoryPoint?.close, null);
+  const liveQuotePrice = getQuotePrice(quote);
+  const currentPrice = liveQuotePrice > 0 ? liveQuotePrice : toNumber(lastHistoryPoint?.close, null);
   if (!(currentPrice > 0)) {
     throw new Error(`${symbol}: spot price unavailable.`);
   }
-  if (!getQuotePrice(quote)) {
+  if (!(liveQuotePrice > 0)) {
     warnings.push(QUOTE_STALENESS_WARNING);
   }
 

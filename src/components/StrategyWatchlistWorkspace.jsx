@@ -1,6 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { isIbkrReady } from "../ibkrStatus.js";
-import { isTwsReady } from "../twsStatus.js";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import PaperTradeScenarioPanel from "./PaperTradeScenarioPanel.jsx";
 
 function formatCurrency(value, currency = "USD", digits = 2) {
@@ -289,88 +288,6 @@ function getWatchlistLegReference(leg, scenarioOrder) {
   };
 }
 
-function gcd(a, b) {
-  if (!a) {
-    return b;
-  }
-
-  if (!b) {
-    return a;
-  }
-
-  let currentLeft = a;
-  let currentRight = b;
-  while (currentRight) {
-    const remainder = currentLeft % currentRight;
-    currentLeft = currentRight;
-    currentRight = remainder;
-  }
-
-  return currentLeft;
-}
-
-function calculateIbkrNetLimitPrice(optionLegs) {
-  const normalizedLegs = (optionLegs ?? []).filter((leg) => Number(leg?.quantity ?? 0) > 0);
-  if (!normalizedLegs.length) {
-    return null;
-  }
-
-  if (normalizedLegs.length === 1) {
-    return Number(normalizedLegs[0].entryPrice ?? 0) || 0;
-  }
-
-  const comboQuantity = normalizedLegs.reduce(
-    (current, leg) => gcd(current, Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0)),
-    0
-  );
-  const normalizedComboQuantity = comboQuantity || 1;
-
-  return normalizedLegs.reduce((sum, leg) => {
-    const ratio = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0) / normalizedComboQuantity || 1;
-    const signedPrice =
-      String(leg?.action ?? "LONG").trim().toUpperCase() === "SHORT"
-        ? -(Number(leg?.entryPrice ?? 0) || 0)
-        : Number(leg?.entryPrice ?? 0) || 0;
-    return sum + (signedPrice * ratio);
-  }, 0);
-}
-
-function parseLimitPriceCents(value) {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) {
-    return null;
-  }
-
-  return Math.round(numericValue * 100);
-}
-
-function formatLimitPriceCents(value) {
-  return (Number(value ?? 0) / 100).toFixed(2);
-}
-
-function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
-  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
-  if (anchorCents == null) {
-    return [];
-  }
-
-  const windowOffsets = 10;
-  const priceCents = new Set();
-
-  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
-    priceCents.add(anchorCents + offset);
-  }
-
-  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
-  if (selectedCents != null) {
-    priceCents.add(selectedCents);
-  }
-
-  return Array.from(priceCents)
-    .sort((left, right) => left - right)
-    .map(formatLimitPriceCents);
-}
-
 function normalizeComboQuantityInput(value, fallback = 1) {
   const numericValue = Number(value);
   if (!Number.isFinite(numericValue)) {
@@ -429,10 +346,6 @@ function invertLegAction(action) {
 
 function buildConfiguredOrderPayload(item, order, configuration = {}) {
   const payload = item?.payload && typeof item.payload === "object" ? item.payload : {};
-  const normalizedRoute =
-    configuration.route === "ibkr-paper" || configuration.route === "tws-paper"
-      ? configuration.route
-      : "local-paper";
   const normalizedDirection = normalizeStrategyDirection(configuration.direction);
   const comboQuantity = normalizeComboQuantityInput(configuration.comboQuantity, 1) ?? 1;
   const baseLegs = Array.isArray(order?.legs) ? order.legs : [];
@@ -450,6 +363,11 @@ function buildConfiguredOrderPayload(item, order, configuration = {}) {
   return {
     ...payload,
     ...order,
+    strategySource:
+      String(order?.strategySource ?? "").trim() ||
+      String(payload.strategySource ?? "").trim() ||
+      String(payload.source ?? "").trim() ||
+      String(item?.source ?? "").trim(),
     purchaseDate:
       String(configuration.purchaseDate ?? "").trim() ||
       String(order?.purchaseDate ?? "").trim() ||
@@ -469,37 +387,9 @@ function buildConfiguredOrderPayload(item, order, configuration = {}) {
           ? { ...payload.valuationContext }
           : payload.valuationContext,
     legs: configuredLegs,
-    execution:
-      normalizedRoute === "ibkr-paper"
-        ? {
-            route: "ibkr-paper",
-            orderType: configuration.orderType ?? "LMT",
-            tif: configuration.tif ?? "DAY",
-            outsideRth: configuration.outsideRth === true,
-            limitPrice:
-              configuration.orderType === "LMT"
-                ? Number(configuration.limitPrice)
-                : null,
-            accountId: configuration.ibkrAccountId ?? "",
-            smart: {
-              enabled: configuration.orderType === "LMT" && configuration.smartEnabled === true
-            }
-          }
-        : normalizedRoute === "tws-paper"
-          ? {
-              route: "tws-paper",
-              orderType: configuration.orderType ?? "LMT",
-              tif: configuration.tif ?? "DAY",
-              outsideRth: configuration.outsideRth === true,
-              limitPrice:
-                configuration.orderType === "LMT"
-                  ? Number(configuration.limitPrice)
-                  : null,
-              accountId: configuration.twsAccountId ?? ""
-            }
-          : {
-              route: "local-paper"
-          }
+    execution: {
+      route: "local-paper"
+    }
   };
 }
 
@@ -522,15 +412,9 @@ export default function StrategyWatchlistWorkspace({
   const [paperTradeDate, setPaperTradeDate] = useState("");
   const [paperOrderState, setPaperOrderState] = useState(null);
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
-  const [paperExecutionRoute, setPaperExecutionRoute] = useState("local-paper");
   const [paperStrategyDirection, setPaperStrategyDirection] = useState("LONG");
   const [paperComboQuantity, setPaperComboQuantity] = useState(1);
   const [paperComboQuantityInput, setPaperComboQuantityInput] = useState("1");
-  const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
-  const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
-  const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
-  const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
-  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
   const watchlistItems = useMemo(
     () => (Array.isArray(setupWatchlist) ? setupWatchlist : []),
     [setupWatchlist]
@@ -554,10 +438,6 @@ export default function StrategyWatchlistWorkspace({
   const canCreateOrder = typeof onCreatePaperOrder === "function";
   const canOpenDetail = typeof onOpenFinderRow === "function";
   const canConfirmExecution = typeof onConfirmPaperExecution === "function";
-  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const twsStatus = paperPortfolio?.brokerStatus?.tws ?? null;
-  const ibkrReady = isIbkrReady(ibkrStatus);
-  const twsReady = isTwsReady(twsStatus);
   const expandedItem = useMemo(
     () => sortedItems.find((item) => String(item?.id ?? "") === expandedItemId) ?? null,
     [expandedItemId, sortedItems]
@@ -573,10 +453,6 @@ export default function StrategyWatchlistWorkspace({
   const expandedScenarioOrder = useMemo(
     () => (expandedItem ? buildWatchlistScenarioOrder(expandedItem, expandedFinderRow) : null),
     [expandedFinderRow, expandedItem]
-  );
-  const expandedOptionLegs = useMemo(
-    () => (expandedScenarioOrder?.legs ?? []).filter((leg) => leg?.kind === "option"),
-    [expandedScenarioOrder]
   );
   const normalizedPaperComboQuantity = useMemo(
     () => normalizeComboQuantityInput(paperComboQuantity, 1),
@@ -599,6 +475,22 @@ export default function StrategyWatchlistWorkspace({
       }))
     };
   }, [expandedScenarioOrder, paperStrategyDirection]);
+  const expandedMicrostructureContracts = useMemo(
+    () =>
+      (directedExpandedScenarioOrder?.legs ?? [])
+        .filter((leg) => leg?.kind === "option" && String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.referenceLabel ||
+            `${directedExpandedScenarioOrder?.assetLabel || "Option"} ${index + 1} · ${describeWatchlistLeg(
+              leg,
+              directedExpandedScenarioOrder
+            )}`,
+          anchorAt: expandedItem?.createdAt ?? null
+        })),
+    [directedExpandedScenarioOrder, expandedItem?.createdAt]
+  );
   const previewScenarioOrder = useMemo(() => {
     if (!directedExpandedScenarioOrder) {
       return null;
@@ -619,15 +511,6 @@ export default function StrategyWatchlistWorkspace({
       })
     };
   }, [directedExpandedScenarioOrder, normalizedPaperComboQuantity]);
-  const ibkrSuggestedLimitPrice = useMemo(
-    () => calculateIbkrNetLimitPrice((directedExpandedScenarioOrder?.legs ?? []).filter((leg) => leg?.kind === "option")),
-    [directedExpandedScenarioOrder]
-  );
-  const twsLimitPriceWindow = useMemo(
-    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
-    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
-  );
-  const canRouteExpandedSetupToBroker = expandedOptionLegs.length > 0;
 
   useEffect(() => {
     if (!expandedItemId) {
@@ -644,17 +527,6 @@ export default function StrategyWatchlistWorkspace({
       return;
     }
 
-    const defaultSuggestedLimit = calculateIbkrNetLimitPrice(
-      (expandedScenarioOrder.legs ?? []).filter((leg) => leg?.kind === "option")
-    );
-    const defaultRoute = canRouteExpandedSetupToBroker
-      ? twsReady
-        ? "tws-paper"
-        : ibkrReady
-          ? "ibkr-paper"
-          : "tws-paper"
-      : "local-paper";
-
     setPaperTradeDate(
       String(expandedScenarioOrder.purchaseDate ?? "").trim() ||
         String(expandedItem?.createdAt ?? "").slice(0, 10) ||
@@ -662,30 +534,10 @@ export default function StrategyWatchlistWorkspace({
     );
     setPaperOrderState(null);
     setPaperOrderSaving(false);
-    setPaperExecutionRoute(defaultRoute);
     setPaperStrategyDirection("LONG");
     setPaperComboQuantity(1);
     setPaperComboQuantityInput("1");
-    setPaperIbkrOrderType("LMT");
-    setPaperIbkrTif("DAY");
-    setPaperIbkrOutsideRth(false);
-    setPaperIbkrSmartEnabled(false);
-    setPaperIbkrLimitPrice(
-      defaultSuggestedLimit != null ? String(Number(defaultSuggestedLimit.toFixed(2))) : ""
-    );
   }, [expandedItemId]);
-
-  useEffect(() => {
-    if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
-      setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
-    }
-  }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
-
-  useEffect(() => {
-    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
-      setPaperIbkrSmartEnabled(false);
-    }
-  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
 
   async function handleRemove(event, itemId) {
     event?.stopPropagation?.();
@@ -746,102 +598,22 @@ export default function StrategyWatchlistWorkspace({
     setPaperOrderState(null);
 
     try {
-      const optionLegs = Array.isArray(scenarioOrder?.legs)
-        ? scenarioOrder.legs.filter((leg) => leg?.kind === "option")
-        : [];
-
-      if (paperExecutionRoute === "ibkr-paper") {
-        if (!ibkrReady) {
-          throw new Error(
-            ibkrStatus?.error || "IBKR paper gateway is not ready. Check the connection on the paper-trading page."
-          );
-        }
-
-        if (!optionLegs.length) {
-          throw new Error("This saved setup does not have any option legs to route to IBKR.");
-        }
-
-        if (paperIbkrOrderType === "LMT") {
-          if (paperIbkrLimitPrice === "") {
-            throw new Error("Enter an IBKR limit price before routing this order.");
-          }
-
-          const parsedLimitPrice = Number(paperIbkrLimitPrice);
-          const allowsSignedNet = optionLegs.length > 1;
-
-          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
-            throw new Error(
-              allowsSignedNet
-                ? "Enter a valid IBKR net limit price before routing this order."
-                : "Enter a valid (non-negative) IBKR limit price before routing this order."
-            );
-          }
-        }
-      }
-
-      if (paperExecutionRoute === "tws-paper") {
-        if (!twsReady) {
-          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
-        }
-
-        if (!optionLegs.length) {
-          throw new Error("This saved setup does not have any option legs to route to TWS.");
-        }
-
-        if (paperIbkrOrderType === "LMT") {
-          if (paperIbkrLimitPrice === "") {
-            throw new Error("Enter a TWS limit price before routing this order.");
-          }
-
-          const parsedLimitPrice = Number(paperIbkrLimitPrice);
-          const allowsSignedNet = optionLegs.length > 1;
-
-          if (!Number.isFinite(parsedLimitPrice) || (!allowsSignedNet && parsedLimitPrice < 0)) {
-            throw new Error(
-              allowsSignedNet
-                ? "Enter a valid TWS net limit price before routing this order."
-                : "Enter a valid (non-negative) TWS limit price before routing this order."
-            );
-          }
-        }
-      }
-
       const response = await onCreatePaperOrder(buildConfiguredOrderPayload(item, scenarioOrder, {
         purchaseDate: paperTradeDate,
-        route: paperExecutionRoute,
         direction: paperStrategyDirection,
-        comboQuantity: paperComboQuantity,
-        orderType: paperIbkrOrderType,
-        limitPrice: paperIbkrLimitPrice,
-        tif: paperIbkrTif,
-        outsideRth: paperIbkrOutsideRth,
-        smartEnabled: paperIbkrSmartEnabled,
-        ibkrAccountId: ibkrStatus?.selectedAccount ?? "",
-        twsAccountId: twsStatus?.selectedAccount ?? ""
+        comboQuantity: paperComboQuantity
       }));
       const pendingConfirmation = getPendingConfirmation(response?.order);
 
       setPaperOrderState({
         tone: pendingConfirmation ? "warning" : "success",
-        message:
-          response?.message ??
-          (paperExecutionRoute === "ibkr-paper"
-            ? "IBKR paper order submitted."
-            : paperExecutionRoute === "tws-paper"
-              ? "TWS paper order submitted."
-              : "Paper order saved."),
+        message: response?.message ?? "Paper order saved.",
         confirmation: pendingConfirmation
       });
     } catch (error) {
       setPaperOrderState({
         tone: "error",
-        message:
-          error?.message ||
-          (paperExecutionRoute === "ibkr-paper"
-            ? "Failed to route order to IBKR."
-            : paperExecutionRoute === "tws-paper"
-              ? "Failed to route order to TWS."
-              : "Failed to create paper order"),
+        message: error?.message || "Failed to create paper order",
         confirmation: null
       });
     } finally {
@@ -1030,7 +802,6 @@ export default function StrategyWatchlistWorkspace({
                     scenarioOrder?.polymarketUrl ||
                     "";
                   const externalLabel = payload?.pageUrl ? "Open TradingView" : scenarioOrder?.polymarketUrl ? "Open Polymarket" : "";
-                  const hasBrokerRoutableOptionLegs = optionLegs.length > 0;
                   const removePending = isPending && pendingAction === "remove";
 
                   return (
@@ -1239,6 +1010,13 @@ export default function StrategyWatchlistWorkspace({
                                     </table>
                                   </div>
                                 </section>
+
+                                <OptionMicrostructurePanel
+                                  title="Microstructure"
+                                  contracts={expandedMicrostructureContracts}
+                                  anchorAt={expandedItem?.createdAt ?? null}
+                                  anchorLabel="Since watchlist"
+                                />
                               </div>
 
                               <section className="paper-order-ticket">
@@ -1250,52 +1028,12 @@ export default function StrategyWatchlistWorkspace({
                                     </strong>
                                   </div>
                                   <div className="paper-order-ticket__status">
-                                    <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
-                                      {paperExecutionRoute === "ibkr-paper"
-                                        ? "IBKR route"
-                                        : paperExecutionRoute === "tws-paper"
-                                          ? "TWS route"
-                                          : "Local route"}
-                                    </span>
-                                    {paperExecutionRoute === "ibkr-paper" ? (
-                                      <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
-                                        {ibkrReady
-                                          ? `Gateway ready${ibkrStatus?.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
-                                          : "Gateway not ready"}
-                                      </span>
-                                    ) : paperExecutionRoute === "tws-paper" ? (
-                                      <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
-                                        {twsReady
-                                          ? `TWS ready${twsStatus?.selectedAccount ? ` · ${twsStatus.selectedAccount}` : ""}`
-                                          : "TWS not ready"}
-                                      </span>
-                                    ) : null}
+                                    <span className="pill pill--ghost">Local route</span>
                                   </div>
-                                  {paperExecutionRoute === "ibkr-paper" ? (
-                                    <p className="paper-order-ticket__note">
-                                      {hasBrokerRoutableOptionLegs
-                                        ? ibkrReady
-                                          ? "HedgeHub will submit the option legs to your connected IBKR session and keep the local portfolio in sync."
-                                          : ibkrStatus?.error || "Start the IBKR gateway before routing this order."
-                                        : "This saved setup does not have any option legs to route to IBKR."}
-                                    </p>
-                                  ) : null}
-                                  {paperExecutionRoute === "tws-paper" ? (
-                                    <p className="paper-order-ticket__note">
-                                      {hasBrokerRoutableOptionLegs
-                                        ? twsReady
-                                          ? "HedgeHub will submit the option legs to your connected TWS session and keep order status synced."
-                                          : twsStatus?.error ||
-                                            "Connect TWS and enable API socket clients before routing this order."
-                                        : "This saved setup does not have any option legs to route to TWS."}
-                                    </p>
-                                  ) : null}
-                                  {paperExecutionRoute === "local-paper" ? (
-                                    <p className="paper-order-ticket__note">
-                                      Save the current setup directly into the local portfolio without sending it to a
-                                      broker connection.
-                                    </p>
-                                  ) : null}
+                                  <p className="paper-order-ticket__note">
+                                    Save the current setup directly into the local portfolio without sending it to a
+                                    broker connection.
+                                  </p>
                                 </div>
                                 <div className="paper-order-ticket__actions">
                                   <label>
@@ -1305,21 +1043,6 @@ export default function StrategyWatchlistWorkspace({
                                       value={paperTradeDate}
                                       onChange={(event) => setPaperTradeDate(event.target.value)}
                                     />
-                                  </label>
-                                  <label>
-                                    <span>Execution</span>
-                                    <select
-                                      value={paperExecutionRoute}
-                                      onChange={(event) => setPaperExecutionRoute(event.target.value)}
-                                    >
-                                      <option value="local-paper">Local</option>
-                                      <option value="ibkr-paper" disabled={!hasBrokerRoutableOptionLegs}>
-                                        IBKR
-                                      </option>
-                                      <option value="tws-paper" disabled={!hasBrokerRoutableOptionLegs}>
-                                        TWS
-                                      </option>
-                                    </select>
                                   </label>
                                   <label>
                                     <span>Direction</span>
@@ -1356,108 +1079,12 @@ export default function StrategyWatchlistWorkspace({
                                       />
                                     </div>
                                   </label>
-                                  {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                                    <label>
-                                      <span>Order type</span>
-                                      <select
-                                        value={paperIbkrOrderType}
-                                        onChange={(event) => setPaperIbkrOrderType(event.target.value)}
-                                      >
-                                        <option value="LMT">Limit</option>
-                                        <option value="MKT">Market</option>
-                                      </select>
-                                    </label>
-                                  ) : null}
-                                  {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                                    <label>
-                                      <span>IBKR limit</span>
-                                      <input
-                                        type="number"
-                                        step="0.01"
-                                        value={paperIbkrLimitPrice}
-                                        onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                                      />
-                                    </label>
-                                  ) : null}
-                                  {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
-                                    <>
-                                      <label>
-                                        <span>TWS limit</span>
-                                        <input
-                                          type="number"
-                                          step="0.01"
-                                          list="tws-limit-window-watchlist"
-                                          value={paperIbkrLimitPrice}
-                                          onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                                        />
-                                      </label>
-                                      <datalist id="tws-limit-window-watchlist">
-                                        {twsLimitPriceWindow.map((option) => (
-                                          <option key={`watchlist-tws-limit:${option}`} value={option} />
-                                        ))}
-                                      </datalist>
-                                    </>
-                                  ) : null}
-                                  {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                                    <label>
-                                      <span>TIF</span>
-                                      <select
-                                        value={paperIbkrTif}
-                                        onChange={(event) => setPaperIbkrTif(event.target.value)}
-                                      >
-                                        <option value="DAY">DAY</option>
-                                        <option value="GTC">GTC</option>
-                                      </select>
-                                    </label>
-                                  ) : null}
-                                  {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                                    <label className="paper-order-ticket__toggle">
-                                      <span>Outside RTH</span>
-                                      <span className="paper-order-ticket__toggle-control">
-                                        <input
-                                          type="checkbox"
-                                          checked={paperIbkrOutsideRth}
-                                          onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
-                                        />
-                                      </span>
-                                    </label>
-                                  ) : null}
-                                  {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                                    <label className="paper-order-ticket__toggle">
-                                      <span>Smart entry</span>
-                                      <span className="paper-order-ticket__toggle-control">
-                                        <input
-                                          type="checkbox"
-                                          checked={paperIbkrSmartEnabled}
-                                          onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
-                                        />
-                                      </span>
-                                    </label>
-                                  ) : null}
                                   <button
                                     type="button"
                                     className={`chart-toggle ${paperOrderSaving ? "chart-toggle--active" : ""}`}
                                     onClick={(event) => handleCreatePaperTrade(event, item, scenarioOrder)}
-                                    disabled={
-                                      paperOrderSaving ||
-                                      !canCreateOrder ||
-                                      !legRows.length ||
-                                      (paperExecutionRoute === "ibkr-paper" && (!hasBrokerRoutableOptionLegs || !ibkrReady)) ||
-                                      (paperExecutionRoute === "tws-paper" && (!hasBrokerRoutableOptionLegs || !twsReady))
-                                    }
-                                    title={
-                                      !legRows.length
-                                        ? "This saved setup has no tradable legs."
-                                        : paperExecutionRoute === "ibkr-paper" && !hasBrokerRoutableOptionLegs
-                                          ? "This saved setup does not have any option legs to route to IBKR."
-                                          : paperExecutionRoute === "ibkr-paper" && !ibkrReady
-                                            ? ibkrStatus?.error || "IBKR paper gateway is not ready."
-                                            : paperExecutionRoute === "tws-paper" && !hasBrokerRoutableOptionLegs
-                                              ? "This saved setup does not have any option legs to route to TWS."
-                                              : paperExecutionRoute === "tws-paper" && !twsReady
-                                                ? twsStatus?.error || "TWS is not ready."
-                                                : ""
-                                    }
+                                    disabled={paperOrderSaving || !canCreateOrder || !legRows.length}
+                                    title={!legRows.length ? "This saved setup has no tradable legs." : ""}
                                   >
                                     {paperOrderSaving ? "Saving..." : "Start new order"}
                                   </button>

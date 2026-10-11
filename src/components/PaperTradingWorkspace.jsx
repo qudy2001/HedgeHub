@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
+import PaperPortfolioHistoryChart from "./PaperPortfolioHistoryChart.jsx";
 import PaperTradeHistoryChart from "./PaperTradeHistoryChart.jsx";
 import PaperTradeScenarioPanel, { buildPaperTradeHeatmapBenchmark } from "./PaperTradeScenarioPanel.jsx";
-import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
 import { countTradingDaysBetween } from "../tradingCalendar.js";
 
 function formatCurrency(value, digits = 2) {
@@ -383,144 +384,6 @@ function buildPatchFromDraft(order, draft) {
   };
 }
 
-function isIbkrPaperOrder(order) {
-  return String(order?.execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
-}
-
-function isTwsPaperOrder(order) {
-  return String(order?.execution?.route ?? "").trim().toLowerCase() === "tws-paper";
-}
-
-function isTwsEntryFilled(order) {
-  return isTwsPaperOrder(order) && String(order?.execution?.status ?? "").trim().toLowerCase() === "filled";
-}
-
-function getSmartExecution(order) {
-  return order?.execution?.smart ?? null;
-}
-
-function normalizeSmartStatusLabel(value, enabled = false) {
-  if (enabled !== true) {
-    return "Disabled";
-  }
-
-  const normalized = String(value ?? "").trim();
-  if (!normalized) {
-    return "Watching";
-  }
-
-  return normalized
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function getSmartStatusTone(smartExecution) {
-  const status = String(smartExecution?.status ?? "").trim().toLowerCase();
-  if (smartExecution?.enabled !== true) {
-    return "";
-  }
-
-  if (status === "watching") {
-    return "positive";
-  }
-
-  if (status === "pending_replace") {
-    return "warning";
-  }
-
-  if (status === "paused") {
-    return "negative";
-  }
-
-  return "";
-}
-
-function normalizeExecutionStatusLabel(value) {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) {
-    return "n/a";
-  }
-
-  return normalized
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function getExecutionTone(execution) {
-  const status = String(execution?.status ?? "").trim().toLowerCase();
-
-  if (status === "filled") {
-    return "positive";
-  }
-
-  if (status === "cancelled" || status === "rejected" || status === "error" || status === "inactive") {
-    return "negative";
-  }
-
-  return "";
-}
-
-function isIbkrPaperExecution(execution) {
-  return String(execution?.route ?? "").trim().toLowerCase() === "ibkr-paper";
-}
-
-function isTwsPaperExecution(execution) {
-  return String(execution?.route ?? "").trim().toLowerCase() === "tws-paper";
-}
-
-function getActiveExecution(order) {
-  if (String(order?.status ?? "").toLowerCase() === "closed") {
-    if (isIbkrPaperExecution(order?.closeExecution) || isTwsPaperExecution(order?.closeExecution)) {
-      return {
-        phase: "exit",
-        execution: order.closeExecution
-      };
-    }
-
-    if (order?.execution) {
-      return {
-        phase: "entry",
-        execution: order.execution
-      };
-    }
-
-    return null;
-  }
-
-  if (
-    (isIbkrPaperExecution(order?.closeExecution) || isTwsPaperExecution(order?.closeExecution)) &&
-    String(order.closeExecution.status ?? "").trim()
-  ) {
-    return {
-      phase: "exit",
-      execution: order.closeExecution
-    };
-  }
-
-  if (order?.execution) {
-    return {
-      phase: "entry",
-      execution: order.execution
-    };
-  }
-
-  return null;
-}
-
-function isExecutionConfirmationPending(execution) {
-  return (
-    String(execution?.status ?? "").trim().toLowerCase() === "pending_confirmation" &&
-    String(execution?.pendingReplyId ?? "").trim().length > 0
-  );
-}
-
-function hasWorkingBrokerOrder(order) {
-  const activeExecution = getActiveExecution(order)?.execution;
-  const status = String(activeExecution?.status ?? "").trim().toLowerCase();
-
-  return ["pending_submit", "pre_submitted", "submitted", "pending_cancel", "pre_cancelled"].includes(status);
-}
-
 function hasBrokerPosition(order) {
   return (order?.legs ?? [])
     .filter((leg) => leg?.kind === "option")
@@ -762,6 +625,12 @@ const CLOSED_ORDER_TABLE_COLUMNS = [
 ];
 
 const CLOSED_ORDER_TABLE_COLUMN_COUNT = CLOSED_ORDER_TABLE_COLUMNS.length;
+const PAPER_TRADING_TABS = new Set(["open", "history"]);
+const HISTORY_SCOPE_LABELS = {
+  open: "Open exposure",
+  closed: "Closed history",
+  combined: "Combined portfolio"
+};
 
 function getCreatedTimePart(value) {
   const match = String(value ?? "").match(/(\d{2}:\d{2}:\d{2})/);
@@ -780,6 +649,203 @@ function getTimestampValue(value) {
   const date = new Date(normalizedValue);
 
   return Number.isNaN(date.getTime()) ? Number.NEGATIVE_INFINITY : date.getTime();
+}
+
+function getPaperTradingTabFromUrl() {
+  if (typeof window === "undefined") {
+    return "open";
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const nextTab = String(params.get("tab") ?? "").trim().toLowerCase();
+  return PAPER_TRADING_TABS.has(nextTab) ? nextTab : "open";
+}
+
+function updatePaperTradingTabQuery(tab) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  url.searchParams.set("tab", tab);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function getOrderStrategySourceLabel(order) {
+  return String(order?.strategySource ?? order?.source ?? "").trim() || "Unknown source";
+}
+
+function getOrderStrategyTypeLabel(order) {
+  return String(order?.strategyType ?? "").trim() || "Custom";
+}
+
+function getOrderAssetFilterLabel(order) {
+  return (
+    String(order?.assetLabel ?? "").trim() ||
+    String(order?.valuationContext?.underlyingSymbol ?? "").trim() ||
+    String(order?.valuationContext?.proxySymbol ?? "").trim() ||
+    "Unknown asset"
+  );
+}
+
+function getOrderTagFilterLabel(order) {
+  return String(getOrderTagLabel(order) ?? "").trim() || "Unknown tag";
+}
+
+function getDateInputStartMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(`${value}T00:00:00.000Z`).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function getDateInputEndMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(`${value}T23:59:59.999Z`).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function isTimestampWithinRange(value, startDate, endDate) {
+  const timestamp = getTimestampValue(value);
+  if (!Number.isFinite(timestamp)) {
+    return false;
+  }
+
+  const startMs = getDateInputStartMs(startDate);
+  const endMs = getDateInputEndMs(endDate);
+
+  if (startMs != null && timestamp < startMs) {
+    return false;
+  }
+
+  if (endMs != null && timestamp > endMs) {
+    return false;
+  }
+
+  return true;
+}
+
+function getClosedOrderTimestamp(order) {
+  if (order?.closedAt) {
+    return order.closedAt;
+  }
+
+  if (order?.closedDate) {
+    return `${order.closedDate}T23:59:59.999Z`;
+  }
+
+  return "";
+}
+
+function getBucketStartIso(value, granularity) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const hour = date.getUTCHours();
+
+  if (granularity === "month") {
+    return new Date(Date.UTC(year, month, 1, 0, 0, 0, 0)).toISOString();
+  }
+
+  if (granularity === "week") {
+    const dayOfWeek = date.getUTCDay();
+    const diffToMonday = (dayOfWeek + 6) % 7;
+    return new Date(Date.UTC(year, month, day - diffToMonday, 0, 0, 0, 0)).toISOString();
+  }
+
+  if (granularity === "day") {
+    return new Date(Date.UTC(year, month, day, 0, 0, 0, 0)).toISOString();
+  }
+
+  return new Date(Date.UTC(year, month, day, hour, 0, 0, 0)).toISOString();
+}
+
+function formatPortfolioBucketLabel(value, granularity) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  if (granularity === "month") {
+    return new Intl.DateTimeFormat("en-GB", {
+      month: "short",
+      year: "numeric"
+    }).format(date);
+  }
+
+  if (granularity === "week") {
+    return `Week of ${new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short"
+    }).format(date)}`;
+  }
+
+  if (granularity === "day") {
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short"
+    }).format(date);
+  }
+
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function buildAggregatedPortfolioHistory(orders, { granularity, startDate, endDate }) {
+  const bucketMap = new Map();
+
+  for (const order of orders ?? []) {
+    const orderBucketMap = new Map();
+
+    for (const candle of order?.history?.candles ?? []) {
+      if (!isTimestampWithinRange(candle?.bucketStart, startDate, endDate)) {
+        continue;
+      }
+
+      const bucketStart = getBucketStartIso(candle.bucketStart, granularity);
+      if (!bucketStart) {
+        continue;
+      }
+
+      orderBucketMap.set(bucketStart, {
+        bucketStart,
+        close: Number(candle.close ?? 0) || 0
+      });
+    }
+
+    for (const orderBucket of orderBucketMap.values()) {
+      const existingBucket = bucketMap.get(orderBucket.bucketStart) ?? {
+        bucketStart: orderBucket.bucketStart,
+        date: orderBucket.bucketStart,
+        label: formatPortfolioBucketLabel(orderBucket.bucketStart, granularity),
+        pnl: 0
+      };
+
+      existingBucket.pnl += orderBucket.close;
+      bucketMap.set(orderBucket.bucketStart, existingBucket);
+    }
+  }
+
+  return [...bucketMap.values()]
+    .sort((left, right) => left.bucketStart.localeCompare(right.bucketStart))
+    .map((bucket) => ({
+      ...bucket,
+      pnl: Number(bucket.pnl.toFixed(2))
+    }));
 }
 
 function getPurchaseDateTimeSortValue(order) {
@@ -1090,152 +1156,6 @@ function ActiveContractsTree({ order, compact = false }) {
   );
 }
 
-function BrokerExecutionPanel({
-  order,
-  orderBusy,
-  onRetryEntry,
-  onSyncExecution,
-  onCancelExecution,
-  onRespondExecutionConfirmation,
-  onToggleSmartExecution
-}) {
-  if (!isIbkrPaperOrder(order) && !isTwsPaperOrder(order)) {
-    return null;
-  }
-
-  const activeExecution = getActiveExecution(order);
-  const execution = activeExecution?.execution ?? order.execution ?? null;
-  const isIbkr = isIbkrPaperExecution(execution);
-  const isTws = isTwsPaperExecution(execution);
-  const smartExecution = activeExecution?.phase === "entry" ? getSmartExecution(order) : null;
-  const smartAvailable =
-    isIbkr && activeExecution?.phase !== "exit" && String(execution?.orderType ?? "").trim().toUpperCase() === "LMT";
-  const smartEnabled = smartExecution?.enabled === true;
-  const smartStatusTone = getSmartStatusTone(smartExecution);
-  const statusTone = getExecutionTone(execution);
-  const confirmationPending = isIbkr && isExecutionConfirmationPending(execution);
-  const stockConfirmationPending = isIbkrPaperExecution(order?.stockExecution) && isExecutionConfirmationPending(order?.stockExecution);
-  const normalizedStatus = String(execution?.status ?? "").trim().toLowerCase();
-  const canRetryEntry = isIbkr &&
-    !confirmationPending &&
-    activeExecution?.phase !== "exit" &&
-    ["cancelled", "rejected", "error", "inactive"].includes(normalizedStatus);
-  const canRetryTwsEntry =
-    isTws && activeExecution?.phase !== "exit" && ["cancelled", "rejected", "error", "inactive"].includes(normalizedStatus);
-
-  return (
-    <section className="paper-broker-panel">
-      <div className="paper-broker-panel__copy">
-        <span className="brand__eyebrow">{isTws ? "TWS paper execution" : "IBKR paper execution"}</span>
-        <strong>
-          {activeExecution?.phase === "exit" ? "Exit order" : "Entry order"} ·{" "}
-          <span className={statusTone}>{normalizeExecutionStatusLabel(execution?.status)}</span>
-        </strong>
-        <p>
-          Account {execution?.accountId || "n/a"}
-          {execution?.orderType ? ` · ${execution.orderType}` : ""}
-          {execution?.tif ? ` · ${execution.tif}` : ""}
-          {execution?.brokerOrderId ? ` · Order ${execution.brokerOrderId}` : ""}
-        </p>
-        {smartAvailable ? (
-          <small className={smartStatusTone}>
-            Smart entry {normalizeSmartStatusLabel(smartExecution?.status, smartEnabled)}
-          </small>
-        ) : null}
-        {smartAvailable && smartExecution?.lastDecisionReason ? <small>{smartExecution.lastDecisionReason}</small> : null}
-        {execution?.statusDescription ? <small>{execution.statusDescription}</small> : null}
-        {execution?.lastError ? <small className="negative">{execution.lastError}</small> : null}
-        {execution?.lastWarning ? <small>{execution.lastWarning}</small> : null}
-      </div>
-
-      <div className="paper-broker-panel__metrics">
-        <span>Filled {execution?.filledQuantity ?? "n/a"}</span>
-        <span>Remaining {execution?.remainingQuantity ?? "n/a"}</span>
-        <span>Avg fill {execution?.avgFillPrice != null ? formatCurrency(execution.avgFillPrice) : "n/a"}</span>
-        <span>
-          Last sync {execution?.lastSyncAt ? formatDateTimeLabel(execution.lastSyncAt, { includeSeconds: true }) : "n/a"}
-        </span>
-      </div>
-
-      <div className="paper-broker-panel__actions">
-        <button type="button" className="chart-toggle" onClick={onSyncExecution} disabled={orderBusy}>
-          {orderBusy ? "Working..." : "Sync broker"}
-        </button>
-        {confirmationPending && onRespondExecutionConfirmation ? (
-          <button
-            type="button"
-            className="chart-toggle"
-            onClick={() => onRespondExecutionConfirmation(true)}
-            disabled={orderBusy}
-          >
-            {orderBusy ? "Working..." : "Submit anyway"}
-          </button>
-        ) : null}
-        {confirmationPending && onRespondExecutionConfirmation ? (
-          <button
-            type="button"
-            className="chart-toggle"
-            onClick={() => onRespondExecutionConfirmation(false)}
-            disabled={orderBusy}
-          >
-            Decline
-          </button>
-        ) : null}
-        {stockConfirmationPending && onRespondExecutionConfirmation ? (
-          <button
-            type="button"
-            className="chart-toggle"
-            onClick={() => onRespondExecutionConfirmation(true)}
-            disabled={orderBusy}
-          >
-            {orderBusy ? "Working..." : "Submit stock hedge anyway"}
-          </button>
-        ) : null}
-        {stockConfirmationPending && onRespondExecutionConfirmation ? (
-          <button
-            type="button"
-            className="chart-toggle"
-            onClick={() => onRespondExecutionConfirmation(false)}
-            disabled={orderBusy}
-          >
-            Decline stock hedge
-          </button>
-        ) : null}
-        {isIbkr ? (
-          <button
-            type="button"
-            className="chart-toggle"
-            onClick={onCancelExecution}
-            disabled={orderBusy || confirmationPending || !hasWorkingBrokerOrder(order)}
-          >
-            Cancel broker order
-          </button>
-        ) : null}
-        {canRetryEntry || canRetryTwsEntry ? (
-          <button
-            type="button"
-            className="chart-toggle"
-            onClick={onRetryEntry}
-            disabled={orderBusy}
-          >
-            Retry entry
-          </button>
-        ) : null}
-        {smartAvailable && onToggleSmartExecution && isIbkr ? (
-          <button
-            type="button"
-            className={`chart-toggle ${smartEnabled ? "chart-toggle--active" : ""}`}
-            onClick={onToggleSmartExecution}
-            disabled={orderBusy || confirmationPending}
-          >
-            {smartEnabled ? "Disable smart entry" : "Enable smart entry"}
-          </button>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
 function OpenOrderDetails({
   order,
   draft,
@@ -1243,11 +1163,6 @@ function OpenOrderDetails({
   orderBusy,
   lastUpdated,
   onResetDraft,
-  onRetryEntry,
-  onSyncExecution,
-  onCancelExecution,
-  onToggleSmartExecution,
-  onRespondExecutionConfirmation,
   onSave,
   onDelete,
   onAddHedge,
@@ -1351,15 +1266,7 @@ function OpenOrderDetails({
         onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
         theme={theme}
       />
-      <BrokerExecutionPanel
-        order={order}
-        orderBusy={orderBusy}
-        onRetryEntry={onRetryEntry}
-        onSyncExecution={onSyncExecution}
-        onCancelExecution={onCancelExecution}
-        onToggleSmartExecution={onToggleSmartExecution}
-        onRespondExecutionConfirmation={onRespondExecutionConfirmation}
-      />
+      <OptionMicrostructurePanel title="Execution Review" orderId={order.id} anchorLabel="Since entry" />
 
       <div className="paper-order-editbar">
         <label>
@@ -1574,11 +1481,6 @@ function OpenOrderTableRows({
   onToggle,
   onToggleTree,
   onResetDraft,
-  onRetryEntry,
-  onSyncExecution,
-  onCancelExecution,
-  onToggleSmartExecution,
-  onRespondExecutionConfirmation,
   onSave,
   onClose,
   onDelete,
@@ -1677,17 +1579,7 @@ function OpenOrderTableRows({
             onClick={onClose}
             disabled={orderBusy}
           >
-            {orderBusy
-              ? "Working..."
-              : isIbkrPaperOrder(order)
-                ? order.closeExecution
-                  ? "Exit working"
-                  : "Send exit order"
-                : isTwsPaperOrder(order)
-                  ? isTwsEntryFilled(order)
-                    ? "Move to closed"
-                    : "Close anyway"
-                : "Close order"}
+            {orderBusy ? "Working..." : "Close order"}
           </button>
         </td>
       </tr>
@@ -1718,11 +1610,6 @@ function OpenOrderTableRows({
                 orderBusy={orderBusy}
                 lastUpdated={lastUpdated}
                 onResetDraft={onResetDraft}
-                onRetryEntry={onRetryEntry}
-                onSyncExecution={onSyncExecution}
-                onCancelExecution={onCancelExecution}
-                onToggleSmartExecution={onToggleSmartExecution}
-                onRespondExecutionConfirmation={onRespondExecutionConfirmation}
                 onSave={onSave}
                 onDelete={onDelete}
                 onAddHedge={onAddHedge}
@@ -1769,6 +1656,7 @@ function ClosedOrderDetails({
         onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
         theme={theme}
       />
+      <OptionMicrostructurePanel title="Execution Review" orderId={order.id} anchorLabel="Since entry" />
 
       <div className="paper-order-editbar">
         <div className="paper-order-editbar__copy">
@@ -2017,10 +1905,6 @@ export default function PaperTradingWorkspace({
   const closedOrders = paperPortfolio?.closedOrders ?? [];
   const allOrders = [...openOrders, ...closedOrders];
   const summary = paperPortfolio?.summary ?? {};
-  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const ibkrReady = isIbkrReady(ibkrStatus);
-  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
-  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
   const [drafts, setDrafts] = useState(() => buildDrafts(allOrders));
   const [busyOrderId, setBusyOrderId] = useState(null);
   const [feedbackByOrder, setFeedbackByOrder] = useState({});
@@ -2028,12 +1912,97 @@ export default function PaperTradingWorkspace({
   const [expandedTreeOrderIds, setExpandedTreeOrderIds] = useState([]);
   const [openSortConfig, setOpenSortConfig] = useState({ key: null, direction: "asc" });
   const [closedSortConfig, setClosedSortConfig] = useState({ key: null, direction: "asc" });
+  const [activeTab, setActiveTab] = useState(() => getPaperTradingTabFromUrl());
+  const [historyScope, setHistoryScope] = useState("combined");
+  const [historyGranularity, setHistoryGranularity] = useState("day");
+  const [historyStartDate, setHistoryStartDate] = useState("");
+  const [historyEndDate, setHistoryEndDate] = useState("");
+  const [historyStrategySource, setHistoryStrategySource] = useState("all");
+  const [historyStrategyType, setHistoryStrategyType] = useState("all");
+  const [historyAsset, setHistoryAsset] = useState("all");
+  const [historyTag, setHistoryTag] = useState("all");
   const openOrderHeatmapBenchmarks = useMemo(
     () =>
       Object.fromEntries(
         openOrders.map((order) => [String(order.id), buildPaperTradeHeatmapBenchmark(order, lastUpdated)])
       ),
     [openOrders, lastUpdated]
+  );
+  const historyFilterOptions = useMemo(
+    () => ({
+      strategySources: [...new Set(allOrders.map(getOrderStrategySourceLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      ),
+      strategyTypes: [...new Set(allOrders.map(getOrderStrategyTypeLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      ),
+      assets: [...new Set(allOrders.map(getOrderAssetFilterLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      ),
+      tags: [...new Set(allOrders.map(getOrderTagFilterLabel))].sort((left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" })
+      )
+    }),
+    [allOrders]
+  );
+  const filteredHistoryOrders = useMemo(
+    () =>
+      allOrders.filter((order) => {
+        if (historyStrategySource !== "all" && getOrderStrategySourceLabel(order) !== historyStrategySource) {
+          return false;
+        }
+
+        if (historyStrategyType !== "all" && getOrderStrategyTypeLabel(order) !== historyStrategyType) {
+          return false;
+        }
+
+        if (historyAsset !== "all" && getOrderAssetFilterLabel(order) !== historyAsset) {
+          return false;
+        }
+
+        if (historyTag !== "all" && getOrderTagFilterLabel(order) !== historyTag) {
+          return false;
+        }
+
+        return true;
+      }),
+    [allOrders, historyAsset, historyStrategySource, historyStrategyType, historyTag]
+  );
+  const scopedHistoryOrders = useMemo(() => {
+    if (historyScope === "open") {
+      return filteredHistoryOrders.filter((order) => String(order?.status ?? "").toLowerCase() !== "closed");
+    }
+
+    if (historyScope === "closed") {
+      return filteredHistoryOrders.filter((order) => String(order?.status ?? "").toLowerCase() === "closed");
+    }
+
+    return filteredHistoryOrders;
+  }, [filteredHistoryOrders, historyScope]);
+  const aggregatedPortfolioHistory = useMemo(
+    () =>
+      buildAggregatedPortfolioHistory(scopedHistoryOrders, {
+        granularity: historyGranularity,
+        startDate: historyStartDate,
+        endDate: historyEndDate
+      }),
+    [historyEndDate, historyGranularity, historyStartDate, scopedHistoryOrders]
+  );
+  const filteredClosedOrders = useMemo(
+    () =>
+      closedOrders.filter((order) => {
+        if (!filteredHistoryOrders.some((candidate) => String(candidate.id) === String(order.id))) {
+          return false;
+        }
+
+        const closedTimestamp = getClosedOrderTimestamp(order);
+        if ((historyStartDate || historyEndDate) && !isTimestampWithinRange(closedTimestamp, historyStartDate, historyEndDate)) {
+          return false;
+        }
+
+        return true;
+      }),
+    [closedOrders, filteredHistoryOrders, historyEndDate, historyStartDate]
   );
 
   useEffect(() => {
@@ -2063,6 +2032,39 @@ export default function PaperTradingWorkspace({
     const validOpenIds = new Set((openOrders ?? []).map((order) => String(order.id)));
     setExpandedTreeOrderIds((current) => current.filter((orderId) => validOpenIds.has(String(orderId))));
   }, [openOrders]);
+
+  useEffect(() => {
+    updatePaperTradingTabQuery(activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setActiveTab(getPaperTradingTabFromUrl());
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (historyStrategySource !== "all" && !historyFilterOptions.strategySources.includes(historyStrategySource)) {
+      setHistoryStrategySource("all");
+    }
+
+    if (historyStrategyType !== "all" && !historyFilterOptions.strategyTypes.includes(historyStrategyType)) {
+      setHistoryStrategyType("all");
+    }
+
+    if (historyAsset !== "all" && !historyFilterOptions.assets.includes(historyAsset)) {
+      setHistoryAsset("all");
+    }
+
+    if (historyTag !== "all" && !historyFilterOptions.tags.includes(historyTag)) {
+      setHistoryTag("all");
+    }
+  }, [historyAsset, historyFilterOptions, historyStrategySource, historyStrategyType, historyTag]);
 
   function updateDraft(orderId, updater) {
     setDrafts((current) => {
@@ -2113,17 +2115,7 @@ export default function PaperTradingWorkspace({
   async function handleClose(order) {
     const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
 
-    if (
-      !window.confirm(
-        isIbkrPaperOrder(order)
-          ? `Send an IBKR paper exit order for "${order.combinationLabel}"? The order will move to history after the broker exit fills.`
-          : isTwsPaperOrder(order)
-            ? isTwsEntryFilled(order)
-              ? `Move filled TWS order "${order.combinationLabel}" to closed history? Close/cancel orders manually inside TWS. HedgeHub will capture close fills from TWS executions when you move it to history.`
-              : `Move TWS order "${order.combinationLabel}" to closed history anyway? The entry order is not filled yet. This will not cancel anything in TWS. You can edit entry/exit prices in the closed history after moving it.`
-            : `Close open order "${order.combinationLabel}" and move it to history?`
-      )
-    ) {
+    if (!window.confirm(`Close open order "${order.combinationLabel}" and move it to history?`)) {
       return;
     }
 
@@ -2135,20 +2127,7 @@ export default function PaperTradingWorkspace({
 
     try {
       const patch = buildPatchFromDraft(order, draft);
-      const payload = await onClosePaperOrder(order.id, {
-        ...patch,
-        ...(isTwsPaperOrder(order) && !isTwsEntryFilled(order) ? { forceClose: true } : {})
-      });
-
-      if ((isIbkrPaperOrder(order) || isTwsPaperOrder(order)) && payload?.message) {
-        setFeedbackByOrder((current) => ({
-          ...current,
-          [String(order.id)]: {
-            tone: "success",
-            message: payload.message
-          }
-        }));
-      }
+      await onClosePaperOrder(order.id, patch);
     } catch (error) {
       setFeedbackByOrder((current) => ({
         ...current,
@@ -2326,196 +2305,6 @@ export default function PaperTradingWorkspace({
     }
   }
 
-  async function handleRetryEntry(order) {
-    setBusyOrderId(String(order.id));
-    setFeedbackByOrder((current) => ({
-      ...current,
-      [String(order.id)]: null
-    }));
-
-    try {
-      const payload = await onExecutePaperOrder(order.id, {
-        purpose: "entry"
-      });
-      const brokerLabel = isTwsPaperOrder(order) ? "TWS" : isIbkrPaperOrder(order) ? "IBKR" : "Broker";
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "success",
-          message: payload?.message ?? `${brokerLabel} paper entry order submitted.`
-        }
-      }));
-    } catch (error) {
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "error",
-          message: error.message
-        }
-      }));
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
-  async function handleSyncExecution(order) {
-    setBusyOrderId(String(order.id));
-    setFeedbackByOrder((current) => ({
-      ...current,
-      [String(order.id)]: null
-    }));
-
-    try {
-      const payload = await onSyncPaperExecution(order.id);
-      const nextPortfolio = payload?.paperPortfolio ?? null;
-      const syncedOrder =
-        (nextPortfolio?.openOrders ?? nextPortfolio?.orders ?? [])
-          .concat(nextPortfolio?.closedOrders ?? [])
-          .find((candidate) => String(candidate?.id) === String(order.id)) ?? null;
-
-      if (syncedOrder) {
-        setDrafts((current) => ({
-          ...current,
-          [String(order.id)]: buildDefaultDraft(syncedOrder)
-        }));
-      }
-
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "success",
-          message: payload?.message ?? "Broker execution synced."
-        }
-      }));
-    } catch (error) {
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "error",
-          message: error.message
-        }
-      }));
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
-  async function handleCancelExecution(order) {
-    if (!window.confirm(`Cancel the active IBKR paper order for "${order.combinationLabel}"?`)) {
-      return;
-    }
-
-    setBusyOrderId(String(order.id));
-    setFeedbackByOrder((current) => ({
-      ...current,
-      [String(order.id)]: null
-    }));
-
-    try {
-      const payload = await onCancelPaperExecution(order.id);
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "success",
-          message: payload?.message ?? "Cancel request sent to IBKR."
-        }
-      }));
-    } catch (error) {
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "error",
-          message: error.message
-        }
-      }));
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
-  async function handleToggleSmartExecution(order) {
-    const currentSmart = getSmartExecution(order) ?? {};
-    const nextEnabled = currentSmart.enabled !== true;
-
-    setBusyOrderId(String(order.id));
-    setFeedbackByOrder((current) => ({
-      ...current,
-      [String(order.id)]: null
-    }));
-
-    try {
-      await onUpdatePaperOrder(order.id, {
-        execution: {
-          smart: {
-            ...currentSmart,
-            enabled: nextEnabled,
-            status: nextEnabled ? "watching" : "disabled",
-            pendingLimitPrice: null,
-            lastDecision: nextEnabled ? "armed" : "disabled",
-            lastDecisionReason: nextEnabled
-              ? "Smart pricing enabled. HedgeHub will monitor this entry order and reprice stale limits conservatively."
-              : "Smart pricing disabled by user."
-          }
-        }
-      });
-
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "success",
-          message: nextEnabled ? "Smart entry enabled for this order." : "Smart entry disabled for this order."
-        }
-      }));
-    } catch (error) {
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "error",
-          message: error.message
-        }
-      }));
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
-  async function handleRespondExecutionConfirmation(order, confirmed) {
-    if (!onConfirmPaperExecution) {
-      return;
-    }
-
-    setBusyOrderId(String(order.id));
-    setFeedbackByOrder((current) => ({
-      ...current,
-      [String(order.id)]: null
-    }));
-
-    try {
-      const payload = await onConfirmPaperExecution(order.id, {
-        confirmed
-      });
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: confirmed === true ? "success" : "warning",
-          message:
-            payload?.message ??
-            (confirmed === true ? "Broker confirmation sent." : "Broker confirmation declined.")
-        }
-      }));
-    } catch (error) {
-      setFeedbackByOrder((current) => ({
-        ...current,
-        [String(order.id)]: {
-          tone: "error",
-          message: error.message
-        }
-      }));
-    } finally {
-      setBusyOrderId(null);
-    }
-  }
-
   async function handleDelete(order, label = "paper order") {
     if (!window.confirm(`Remove ${label} "${order.combinationLabel}"?`)) {
       return;
@@ -2543,7 +2332,7 @@ export default function PaperTradingWorkspace({
   }
 
   const groupedOpenOrders = groupOrdersByStrategy(openOrders);
-  const groupedClosedOrders = groupOrdersByStrategy(closedOrders);
+  const groupedClosedOrders = groupOrdersByStrategy(filteredClosedOrders);
 
   return (
     <main className="workspace workspace--paper-trading">
@@ -2558,19 +2347,7 @@ export default function PaperTradingWorkspace({
             <span className="pill pill--ghost">{summary.closedOrderCount ?? 0} closed</span>
           </div>
           <span className="timestamp">
-            {ibkrReady
-              ? "Manage local paper orders, or sync IBKR paper fills and exit orders without leaving HedgeHub."
-              : ibkrReloginNeeded
-                ? (
-                    <>
-                      IBKR session expired or was signed out. Re-login at{" "}
-                      <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
-                        {ibkrLoginUrl}
-                      </a>{" "}
-                      and HedgeHub should reconnect within a few seconds.
-                    </>
-                  )
-                : "Manage open paper orders, then close them into history with realized P&L snapshots."}
+            Manage open paper orders, then close them into history with realized P&amp;L snapshots.
           </span>
         </div>
       </header>
@@ -2604,6 +2381,23 @@ export default function PaperTradingWorkspace({
         </article>
       </section>
 
+      <section className="paper-tab-bar">
+        <button
+          type="button"
+          className={`chart-toggle ${activeTab === "open" ? "chart-toggle--active" : ""}`}
+          onClick={() => setActiveTab("open")}
+        >
+          Open Orders
+        </button>
+        <button
+          type="button"
+          className={`chart-toggle ${activeTab === "history" ? "chart-toggle--active" : ""}`}
+          onClick={() => setActiveTab("history")}
+        >
+          History &amp; P&amp;L
+        </button>
+      </section>
+
       {openOrders.length === 0 && closedOrders.length === 0 ? (
         <section className="paper-empty-state">
           <span className="brand__eyebrow">No paper trades yet</span>
@@ -2614,7 +2408,7 @@ export default function PaperTradingWorkspace({
         </section>
       ) : null}
 
-      {openOrders.length > 0 || closedOrders.length > 0 ? (
+      {activeTab === "open" && (openOrders.length > 0 || closedOrders.length > 0) ? (
         <section className="paper-group">
           <div className="section-heading">
             <span>Open orders</span>
@@ -2694,13 +2488,6 @@ export default function PaperTradingWorkspace({
                                   [String(order.id)]: buildDefaultDraft(order)
                                 }))
                               }
-                              onRetryEntry={() => handleRetryEntry(order)}
-                              onSyncExecution={() => handleSyncExecution(order)}
-                              onCancelExecution={() => handleCancelExecution(order)}
-                              onToggleSmartExecution={() => handleToggleSmartExecution(order)}
-                              onRespondExecutionConfirmation={(confirmed) =>
-                                handleRespondExecutionConfirmation(order, confirmed)
-                              }
                               onSave={() => handleSave(order)}
                               onClose={() => handleClose(order)}
                               onCloseLeg={handleCloseLeg}
@@ -2722,79 +2509,188 @@ export default function PaperTradingWorkspace({
         </section>
       ) : null}
 
-      {closedOrders.length ? (
-        <section className="paper-group">
-          <div className="section-heading">
-            <span>Closed order history</span>
-            <span className="pill pill--ghost">{summary.closedOrderCount ?? 0}</span>
+      {activeTab === "history" && (openOrders.length > 0 || closedOrders.length > 0) ? (
+        <section className="paper-group paper-group--history">
+          <div className="paper-history-toolbar">
+            <div className="paper-history-toolbar__intro">
+              <div className="section-heading">
+                <span>History &amp; P&amp;L</span>
+                <span className="pill pill--ghost">{filteredClosedOrders.length} closed matches</span>
+              </div>
+              <p className="paper-history-toolbar__copy">
+                Filter the archived paper book by source, structure, asset, and time window, then review the
+                aggregated portfolio P&amp;L and matching closed trades together.
+              </p>
+            </div>
+
+            <div className="paper-history-filters">
+              <label>
+                <span>Range start</span>
+                <input
+                  type="date"
+                  value={historyStartDate}
+                  onChange={(event) => setHistoryStartDate(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Range end</span>
+                <input
+                  type="date"
+                  value={historyEndDate}
+                  onChange={(event) => setHistoryEndDate(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Granularity</span>
+                <select value={historyGranularity} onChange={(event) => setHistoryGranularity(event.target.value)}>
+                  <option value="hour">Hour</option>
+                  <option value="day">Day</option>
+                  <option value="week">Week</option>
+                  <option value="month">Month</option>
+                </select>
+              </label>
+              <label>
+                <span>Scope</span>
+                <select value={historyScope} onChange={(event) => setHistoryScope(event.target.value)}>
+                  <option value="combined">Combined</option>
+                  <option value="open">Open</option>
+                  <option value="closed">Closed</option>
+                </select>
+              </label>
+              <label>
+                <span>Strategy source</span>
+                <select value={historyStrategySource} onChange={(event) => setHistoryStrategySource(event.target.value)}>
+                  <option value="all">All sources</option>
+                  {historyFilterOptions.strategySources.map((source) => (
+                    <option key={source} value={source}>
+                      {source}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Strategy type</span>
+                <select value={historyStrategyType} onChange={(event) => setHistoryStrategyType(event.target.value)}>
+                  <option value="all">All types</option>
+                  {historyFilterOptions.strategyTypes.map((strategyType) => (
+                    <option key={strategyType} value={strategyType}>
+                      {strategyType}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Asset / symbol</span>
+                <select value={historyAsset} onChange={(event) => setHistoryAsset(event.target.value)}>
+                  <option value="all">All assets</option>
+                  {historyFilterOptions.assets.map((asset) => (
+                    <option key={asset} value={asset}>
+                      {asset}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Tag</span>
+                <select value={historyTag} onChange={(event) => setHistoryTag(event.target.value)}>
+                  <option value="all">All tags</option>
+                  {historyFilterOptions.tags.map((tag) => (
+                    <option key={tag} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
 
-          <div className="paper-groups">
-            {groupedClosedOrders.map((group) => (
-              <section key={group.id} className="paper-subgroup">
-                <div className="section-heading">
-                  <span>{group.strategyName}</span>
-                  <span className="pill pill--ghost">{group.orders.length} closed</span>
-                </div>
+          <section className="paper-subgroup paper-subgroup--history-chart">
+            <PaperPortfolioHistoryChart
+              data={aggregatedPortfolioHistory}
+              theme={theme}
+              granularity={historyGranularity}
+              scopeLabel={HISTORY_SCOPE_LABELS[historyScope] ?? HISTORY_SCOPE_LABELS.combined}
+              rangeLabel={
+                historyStartDate || historyEndDate
+                  ? `${historyStartDate || "Beginning"} to ${historyEndDate || "Latest"}`
+                  : "All history"
+              }
+            />
+          </section>
 
-                <div className="paper-open-table-wrap">
-                  <table className="paper-open-table">
-                    <thead>
-                      <tr>
-                        {CLOSED_ORDER_TABLE_COLUMNS.map((column) => (
-                          <th key={column.key} scope="col">
-                            <SortableTableHeader
-                              column={column}
-                              sortConfig={closedSortConfig}
-                              onToggle={(key) =>
-                                setClosedSortConfig((current) => getNextSortConfig(current, key))
+          {filteredClosedOrders.length ? (
+            <div className="paper-groups">
+              {groupedClosedOrders.map((group) => (
+                <section key={group.id} className="paper-subgroup">
+                  <div className="section-heading">
+                    <span>{group.strategyName}</span>
+                    <span className="pill pill--ghost">{group.orders.length} closed</span>
+                  </div>
+
+                  <div className="paper-open-table-wrap">
+                    <table className="paper-open-table">
+                      <thead>
+                        <tr>
+                          {CLOSED_ORDER_TABLE_COLUMNS.map((column) => (
+                            <th key={column.key} scope="col">
+                              <SortableTableHeader
+                                column={column}
+                                sortConfig={closedSortConfig}
+                                onToggle={(key) =>
+                                  setClosedSortConfig((current) => getNextSortConfig(current, key))
+                                }
+                              />
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortOrders(group.orders, closedSortConfig, getClosedOrderSortValue).map((order) => {
+                          const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
+                          const isDirty = hasOrderDraftChanged(order, draft);
+                          const orderBusy = busyOrderId === String(order.id);
+
+                          return (
+                            <ClosedOrderTableRows
+                              key={order.id}
+                              order={order}
+                              draft={draft}
+                              isDirty={isDirty}
+                              orderBusy={orderBusy}
+                              isExpanded={expandedOrderKey === `order:${order.id}`}
+                              lastUpdated={lastUpdated}
+                              onToggle={() =>
+                                setExpandedOrderKey((current) =>
+                                  current === `order:${order.id}` ? null : `order:${order.id}`
+                                )
                               }
+                              onResetDraft={() =>
+                                setDrafts((current) => ({
+                                  ...current,
+                                  [String(order.id)]: buildDefaultDraft(order)
+                                }))
+                              }
+                              onSave={() => handleSave(order)}
+                              onDelete={() => handleDelete(order, "closed order")}
+                              onUpdateDraft={updateDraft}
+                              onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
+                              feedback={feedbackByOrder[String(order.id)]}
+                              theme={theme}
                             />
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortOrders(group.orders, closedSortConfig, getClosedOrderSortValue).map((order) => {
-                        const draft = drafts[String(order.id)] ?? buildDefaultDraft(order);
-                        const isDirty = hasOrderDraftChanged(order, draft);
-                        const orderBusy = busyOrderId === String(order.id);
-
-                        return (
-                          <ClosedOrderTableRows
-                            key={order.id}
-                            order={order}
-                            draft={draft}
-                            isDirty={isDirty}
-                            orderBusy={orderBusy}
-                            isExpanded={expandedOrderKey === `order:${order.id}`}
-                            lastUpdated={lastUpdated}
-                            onToggle={() =>
-                              setExpandedOrderKey((current) =>
-                                current === `order:${order.id}` ? null : `order:${order.id}`
-                              )
-                            }
-                            onResetDraft={() =>
-                              setDrafts((current) => ({
-                                ...current,
-                                [String(order.id)]: buildDefaultDraft(order)
-                              }))
-                            }
-                            onSave={() => handleSave(order)}
-                            onDelete={() => handleDelete(order, "closed order")}
-                            onUpdateDraft={updateDraft}
-                            onSaveCalculatorSnapshot={onSaveCalculatorSnapshot}
-                            feedback={feedbackByOrder[String(order.id)]}
-                            theme={theme}
-                          />
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            ))}
-          </div>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div className="paper-subempty-state">
+              <strong>No closed orders match these filters.</strong>
+              <span>Try widening the date range or resetting the source, type, asset, or tag filters.</span>
+            </div>
+          )}
         </section>
       ) : null}
     </main>

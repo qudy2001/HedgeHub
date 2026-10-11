@@ -9,11 +9,11 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import OptionMicrostructurePanel from "./OptionMicrostructurePanel.jsx";
 import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
-import { getIbkrGatewayLoginUrl, isIbkrReady, isIbkrReloginNeeded } from "../ibkrStatus.js";
-import { isTwsReady } from "../twsStatus.js";
 import { createMarketTimerContext } from "../marketTimers.js";
 import { getChartPalette } from "../theme.js";
+import { buildOptionChainCallColumns, buildOptionChainSideColumns } from "../optionChainColumns.js";
 import {
   buildTradingDateColumns,
   buildTradingDateRange,
@@ -28,27 +28,8 @@ import {
 } from "../../shared/polymarketSignals.js";
 import { loadSavedFilters, persistSavedFilters } from "../savedFilters.js";
 
-const OPTION_CHAIN_SIDE_COLUMNS = [
-  { key: "bid", label: "Bid", kind: "price" },
-  { key: "ask", label: "Ask", kind: "price" },
-  { key: "bidSize", label: "Bid x", kind: "count" },
-  { key: "askSize", label: "Ask x", kind: "count" },
-  { key: "mark", label: "Mark", kind: "select" },
-  { key: "changePercent", label: "Chg%", kind: "percent" },
-  { key: "volume", label: "Vol", kind: "count" },
-  { key: "openInterest", label: "OI", kind: "count" },
-  { key: "impliedVolatility", label: "IV", kind: "percent", scale: 100, digits: 2 },
-  { key: "delta", label: "Δ", kind: "number", digits: 3 },
-  { key: "gamma", label: "Γ", kind: "number", digits: 4 },
-  { key: "theta", label: "Θ", kind: "number", digits: 3 },
-  { key: "vega", label: "Vega", kind: "number", digits: 3 },
-  { key: "rho", label: "Rho", kind: "number", digits: 3 },
-  { key: "intrinsicValue", label: "Intrinsic", kind: "price" },
-  { key: "timeValue", label: "Time", kind: "price" },
-  { key: "premiumPercent", label: "Premium%", kind: "percent" },
-  { key: "lastPrice", label: "Last", kind: "price" }
-];
-const OPTION_CHAIN_CALL_COLUMNS = [...OPTION_CHAIN_SIDE_COLUMNS].reverse();
+const OPTION_CHAIN_SIDE_COLUMNS = buildOptionChainSideColumns();
+const OPTION_CHAIN_CALL_COLUMNS = buildOptionChainCallColumns();
 const LIVE_OPTION_QUOTES_POLL_MS = 5000;
 const MAX_OPTION_CHAIN_CACHE_ENTRIES = 8;
 const MAX_FINDER_DETAIL_CACHE_ENTRIES = 1;
@@ -260,66 +241,6 @@ function gcd(left, right) {
   }
 
   return currentLeft;
-}
-
-function calculateIbkrNetLimitPrice(optionLegs) {
-  const normalizedLegs = (optionLegs ?? []).filter((leg) => Number(leg?.quantity ?? 0) > 0);
-  if (!normalizedLegs.length) {
-    return null;
-  }
-
-  if (normalizedLegs.length === 1) {
-    return Number(normalizedLegs[0].entryPrice ?? 0) || 0;
-  }
-
-  const comboQuantity = normalizedLegs.reduce(
-    (current, leg) => gcd(current, Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0)),
-    0
-  );
-  const normalizedComboQuantity = comboQuantity || 1;
-
-  return normalizedLegs.reduce((sum, leg) => {
-    const ratio = Math.max(Math.round(Number(leg.quantity ?? 0) || 0), 0) / normalizedComboQuantity || 1;
-    const signedPrice =
-      leg.action === "SHORT" ? -(Number(leg.entryPrice ?? 0) || 0) : Number(leg.entryPrice ?? 0) || 0;
-    return sum + (signedPrice * ratio);
-  }, 0);
-}
-
-function parseLimitPriceCents(value) {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) {
-    return null;
-  }
-
-  return Math.round(numericValue * 100);
-}
-
-function formatLimitPriceCents(value) {
-  return (Number(value ?? 0) / 100).toFixed(2);
-}
-
-function buildTwsLimitPriceWindow(strategyLimitPrice, selectedLimitPrice) {
-  const anchorCents = parseLimitPriceCents(strategyLimitPrice) ?? parseLimitPriceCents(selectedLimitPrice);
-  if (anchorCents == null) {
-    return [];
-  }
-
-  const windowOffsets = 10;
-  const priceCents = new Set();
-
-  for (let offset = -windowOffsets; offset <= windowOffsets; offset += 1) {
-    priceCents.add(anchorCents + offset);
-  }
-
-  const selectedCents = parseLimitPriceCents(selectedLimitPrice);
-  if (selectedCents != null) {
-    priceCents.add(selectedCents);
-  }
-
-  return Array.from(priceCents)
-    .sort((left, right) => left - right)
-    .map(formatLimitPriceCents);
 }
 
 function formatWholeNumber(value) {
@@ -1093,8 +1014,8 @@ function formatQuoteSourceLabel(leg) {
     return "Polymarket";
   }
 
-  if (leg?.isLive === true || leg?.quoteSource === "polygon" || leg?.quoteSource === "Polygon.io") {
-    return "Polygon.io";
+  if (leg?.isLive === true || leg?.quoteSource === "live") {
+    return "Live";
   }
 
   if (
@@ -1621,6 +1542,7 @@ export default function StrategyFinderWorkspace({
   const detailRef = useRef(null);
   const liveTheoRowIdRef = useRef(null);
   const filterMenuRefs = useRef({});
+  const saveFiltersFeedbackTimeoutRef = useRef(null);
   const hasHydratedFiltersRef = useRef(false);
   const hasAutoRevealedHiddenDataRef = useRef(false);
   const [sortState, setSortState] = useState([{ key: "rewardRisk", direction: "desc" }]);
@@ -1664,6 +1586,7 @@ export default function StrategyFinderWorkspace({
   const [normalizedOptionVolumeMax, setNormalizedOptionVolumeMax] = useState("");
   const [midMinusTheoMin, setMidMinusTheoMin] = useState("");
   const [midMinusTheoMax, setMidMinusTheoMax] = useState("");
+  const [saveFiltersState, setSaveFiltersState] = useState("idle");
   const [controls, setControls] = useState(null);
   const [optionChains, setOptionChains] = useState({});
   const [optionChainStatus, setOptionChainStatus] = useState({});
@@ -1672,25 +1595,13 @@ export default function StrategyFinderWorkspace({
   const [paperOrderSaving, setPaperOrderSaving] = useState(false);
   const [watchlistSaving, setWatchlistSaving] = useState(false);
   const [watchlistNotice, setWatchlistNotice] = useState("");
-  const [paperExecutionRoute, setPaperExecutionRoute] = useState("tws-paper");
   const [paperComboQuantity, setPaperComboQuantity] = useState(1);
   const [paperComboQuantityInput, setPaperComboQuantityInput] = useState("1");
-  const [paperIbkrOrderType, setPaperIbkrOrderType] = useState("LMT");
-  const [paperIbkrLimitPrice, setPaperIbkrLimitPrice] = useState("");
-  const [paperIbkrTif, setPaperIbkrTif] = useState("DAY");
-  const [paperIbkrOutsideRth, setPaperIbkrOutsideRth] = useState(false);
-  const [paperIbkrSmartEnabled, setPaperIbkrSmartEnabled] = useState(false);
   const [optionPriceRefreshing, setOptionPriceRefreshing] = useState(false);
   const [optionPriceRefreshState, setOptionPriceRefreshState] = useState(null);
   const [finderRowDetails, setFinderRowDetails] = useState({});
   const [finderDetailLoadingId, setFinderDetailLoadingId] = useState("");
   const [finderDetailErrors, setFinderDetailErrors] = useState({});
-  const ibkrStatus = paperPortfolio?.brokerStatus?.ibkr ?? null;
-  const [twsStatus, setTwsStatus] = useState(() => paperPortfolio?.brokerStatus?.tws ?? null);
-  const ibkrReady = isIbkrReady(ibkrStatus);
-  const ibkrReloginNeeded = isIbkrReloginNeeded(ibkrStatus);
-  const ibkrLoginUrl = getIbkrGatewayLoginUrl();
-  const twsReady = isTwsReady(twsStatus);
   const minProfitThreshold = parseOptionalNumber(maxProfitMin);
   const maxProfitThreshold = parseOptionalNumber(maxProfitMax);
   const minLossThreshold = parseOptionalNumber(maxLossMin);
@@ -1703,37 +1614,6 @@ export default function StrategyFinderWorkspace({
   const normalizedOptionVolumeMaxThreshold = parseOptionalNumber(normalizedOptionVolumeMax);
   const midMinusTheoMinThreshold = parseOptionalNumber(midMinusTheoMin);
   const midMinusTheoMaxThreshold = parseOptionalNumber(midMinusTheoMax);
-
-  useEffect(() => {
-    if (paperPortfolio?.brokerStatus?.tws) {
-      setTwsStatus(paperPortfolio.brokerStatus.tws);
-    }
-  }, [paperPortfolio?.brokerStatus?.tws]);
-
-  useEffect(() => {
-    if (paperExecutionRoute !== "tws-paper") {
-      return;
-    }
-
-    let cancelled = false;
-
-    async function refreshTwsStatus() {
-      try {
-        const response = await fetch("/api/brokers/tws/status");
-        const payload = await response.json().catch(() => null);
-        if (!cancelled && response.ok) {
-          setTwsStatus(payload?.tws ?? null);
-        }
-      } catch (_error) {
-        // ignore
-      }
-    }
-
-    void refreshTwsStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, [paperExecutionRoute]);
 
   useEffect(() => {
     setFinderRowDetails({});
@@ -1943,6 +1823,14 @@ export default function StrategyFinderWorkspace({
     finder,
     quoteSizeThresholdOptionsKey
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (saveFiltersFeedbackTimeoutRef.current) {
+        window.clearTimeout(saveFiltersFeedbackTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const baseFilteredRows = useMemo(
     () =>
@@ -2658,7 +2546,7 @@ export default function StrategyFinderWorkspace({
   }
 
   function saveFilters() {
-    persistSavedFilters(STRATEGY_FINDER_FILTERS_STORAGE_KEY, {
+    const saved = persistSavedFilters(STRATEGY_FINDER_FILTERS_STORAGE_KEY, {
       dateFrom,
       dateTo,
       activeAssets,
@@ -2681,6 +2569,15 @@ export default function StrategyFinderWorkspace({
       midMinusTheoMax,
       visibleColumnKeys
     });
+
+    setSaveFiltersState(saved ? "saved" : "error");
+    if (saveFiltersFeedbackTimeoutRef.current) {
+      window.clearTimeout(saveFiltersFeedbackTimeoutRef.current);
+    }
+    saveFiltersFeedbackTimeoutRef.current = window.setTimeout(() => {
+      setSaveFiltersState("idle");
+      saveFiltersFeedbackTimeoutRef.current = null;
+    }, 2200);
   }
 
   function resetFilters() {
@@ -2814,17 +2711,6 @@ export default function StrategyFinderWorkspace({
         legConfigs: nextLegConfigs
       };
     });
-
-    if (paperIbkrOrderType === "LMT") {
-      setPaperIbkrLimitPrice((current) => {
-        const parsed = Number(current);
-        if (Number.isFinite(parsed)) {
-          return (-parsed).toFixed(2);
-        }
-
-        return current;
-      });
-    }
   }
 
   const liveOptionQuoteSpot = Number(
@@ -3169,6 +3055,21 @@ export default function StrategyFinderWorkspace({
         isLive: config.isLive === true || leg.isLive === true
     };
   });
+  const microstructureContracts = useMemo(
+    () =>
+      effectiveOptionLegs
+        .filter((leg) => String(leg?.contractSymbol ?? "").trim())
+        .map((leg, index) => ({
+          contractSymbol: String(leg.contractSymbol).trim(),
+          label:
+            leg.referenceLabel ||
+            `${selectedRow?.assetLabel || selectedRow?.marketContext?.proxySymbol || "Option"} ${index + 1} · ${formatNumber(
+              leg.strike,
+              1
+            )}${leg.optionType === "put" ? "P" : "C"} · ${leg.expiry || "n/a"}`
+        })),
+    [effectiveOptionLegs, selectedRow?.assetLabel, selectedRow?.marketContext?.proxySymbol]
+  );
   const strategyCloseDate =
     minIsoDate([polymarketResolutionDate, ...effectiveOptionLegs.map((leg) => leg.expiry)]) ||
     selectedRow?.strategyCloseDate ||
@@ -3453,23 +3354,9 @@ export default function StrategyFinderWorkspace({
       entryValue
     };
   });
-  const ibkrSuggestedLimitPrice = calculateIbkrNetLimitPrice(repricedOptionLegs);
-  const twsLimitPriceWindow = useMemo(
-    () => buildTwsLimitPriceWindow(ibkrSuggestedLimitPrice, paperIbkrLimitPrice),
-    [ibkrSuggestedLimitPrice, paperIbkrLimitPrice]
-  );
-
   useEffect(() => {
-    setPaperExecutionRoute("tws-paper");
     setPaperComboQuantity(1);
     setPaperComboQuantityInput("1");
-    setPaperIbkrOrderType("LMT");
-    setPaperIbkrTif("DAY");
-    setPaperIbkrOutsideRth(false);
-    setPaperIbkrSmartEnabled(false);
-    setPaperIbkrLimitPrice(
-      ibkrSuggestedLimitPrice == null ? "" : String(Number(ibkrSuggestedLimitPrice.toFixed(2)))
-    );
     setStrategyDirection(inferStrategyDirection(selectedRowSummary?.strategyType ?? selectedRow?.strategyType));
     setFinderRowDetails((current) => retainCacheEntries(current, [selectedRowId]));
     setFinderDetailErrors((current) => retainCacheEntries(current, [selectedRowId]));
@@ -3552,18 +3439,6 @@ export default function StrategyFinderWorkspace({
   function handlePaperComboQuantityBlur() {
     setPaperComboQuantityInput(String(paperComboQuantity));
   }
-
-  useEffect(() => {
-    if (paperIbkrOrderType === "LMT" && !paperIbkrLimitPrice && ibkrSuggestedLimitPrice != null) {
-      setPaperIbkrLimitPrice(String(Number(ibkrSuggestedLimitPrice.toFixed(2))));
-    }
-  }, [ibkrSuggestedLimitPrice, paperIbkrLimitPrice, paperIbkrOrderType]);
-
-  useEffect(() => {
-    if (paperIbkrOrderType !== "LMT" && paperIbkrSmartEnabled) {
-      setPaperIbkrSmartEnabled(false);
-    }
-  }, [paperIbkrOrderType, paperIbkrSmartEnabled]);
 
   function buildSetupWatchlistPayload() {
     if (!selectedRow) {
@@ -3697,39 +3572,10 @@ export default function StrategyFinderWorkspace({
     setPaperOrderState(null);
 
     try {
-      if (paperExecutionRoute === "ibkr-paper") {
-        if (!ibkrReady) {
-          throw new Error(
-            ibkrStatus?.error || "IBKR paper gateway is not ready. Check the connection on the paper-trading page."
-          );
-        }
-
-        if (!repricedOptionLegs.length) {
-          throw new Error("This setup does not have any option legs to route to IBKR.");
-        }
-
-        if (paperIbkrOrderType === "LMT" && paperIbkrLimitPrice === "") {
-          throw new Error("Enter an IBKR limit price before routing this order.");
-        }
-      }
-
-      if (paperExecutionRoute === "tws-paper") {
-        if (!twsReady) {
-          throw new Error(twsStatus?.error || "TWS is not ready. Connect it from the left sidebar first.");
-        }
-
-        if (!repricedOptionLegs.length) {
-          throw new Error("This setup does not have any option legs to route to TWS.");
-        }
-
-        if (paperIbkrOrderType === "LMT" && paperIbkrLimitPrice === "") {
-          throw new Error("Enter a TWS limit price before routing this order.");
-        }
-      }
-
       const baseOrderPayload = {
         strategyId: strategyDefinition?.id ?? "strategy-1",
         strategyName: strategyDefinition?.name ?? "Strategy",
+        strategySource: "Strategy Finder",
         combinationId: selectedRow.id,
         combinationLabel: `${selectedRow.assetLabel} · ${strategyTypeLabel} · ${strategyCloseDate}`,
         assetLabel: selectedRow.assetLabel,
@@ -3802,37 +3648,9 @@ export default function StrategyFinderWorkspace({
             isLive: true
           }))
         ],
-        execution:
-          paperExecutionRoute === "ibkr-paper"
-            ? {
-                route: "ibkr-paper",
-                orderType: paperIbkrOrderType,
-                tif: paperIbkrTif,
-                outsideRth: paperIbkrOutsideRth,
-                limitPrice:
-                  paperIbkrOrderType === "LMT"
-                    ? Number(paperIbkrLimitPrice)
-                    : null,
-                accountId: ibkrStatus?.selectedAccount ?? "",
-                smart: {
-                  enabled: paperIbkrOrderType === "LMT" && paperIbkrSmartEnabled
-                }
-              }
-            : paperExecutionRoute === "tws-paper"
-              ? {
-                  route: "tws-paper",
-                  orderType: paperIbkrOrderType,
-                  tif: paperIbkrTif,
-                  outsideRth: paperIbkrOutsideRth,
-                  limitPrice:
-                    paperIbkrOrderType === "LMT"
-                      ? Number(paperIbkrLimitPrice)
-                      : null,
-                  accountId: twsStatus?.selectedAccount ?? ""
-                }
-            : {
-                route: "local-paper"
-              }
+        execution: {
+          route: "local-paper"
+        }
       };
       const heatmapSnapshot = buildScenarioHeatmapSnapshot({
         startDate: valuationMinDate,
@@ -3894,20 +3712,9 @@ export default function StrategyFinderWorkspace({
       const pendingConfirmation = getPendingConfirmation(createResponse?.order);
 
       setPaperOrderState({
-        tone:
-          (paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper") &&
-          createResponse?.message?.toLowerCase().includes("failed")
-            ? "warning"
-            : pendingConfirmation
-              ? "warning"
-              : "success",
+        tone: pendingConfirmation ? "warning" : "success",
         message:
-          createResponse?.message ??
-          (paperExecutionRoute === "ibkr-paper"
-            ? "IBKR paper order submitted. You can monitor it from the paper-trading page."
-            : paperExecutionRoute === "tws-paper"
-              ? "TWS paper order submitted. You can monitor it from the paper-trading page."
-              : "Paper order saved. You can review or edit it from the paper-trading page."),
+          createResponse?.message ?? "Paper order saved. You can review or edit it from the paper-trading page.",
         confirmation: pendingConfirmation
       });
     } catch (error) {
@@ -5501,10 +5308,21 @@ export default function StrategyFinderWorkspace({
 
         <button
           type="button"
-          className="chart-toggle chart-toggle--compact"
+          className={`chart-toggle chart-toggle--compact finder-action ${
+            saveFiltersState === "saved"
+              ? "finder-action--success"
+              : saveFiltersState === "error"
+                ? "finder-action--error"
+                : ""
+          }`}
           onClick={saveFilters}
+          aria-live="polite"
         >
-          Save filters
+          {saveFiltersState === "saved"
+            ? "Saved"
+            : saveFiltersState === "error"
+              ? "Save failed"
+              : "Save filters"}
         </button>
 
         <details
@@ -6016,7 +5834,7 @@ export default function StrategyFinderWorkspace({
                                 <strong>Leg {index + 1}</strong>
                                 <div className="strategy-editor__card-actions">
                                   <span className="pill pill--ghost">
-                                    {leg.quoteSource === "polygon" ? "Polygon.io" : chainPayload?.sourceLabel ?? "Seeded"}
+                                    {leg.quoteSource === "live" ? "Live" : chainPayload?.sourceLabel ?? "Seeded"}
                                   </span>
                                   <button
                                     type="button"
@@ -6281,6 +6099,8 @@ export default function StrategyFinderWorkspace({
 	                      </div>
 	                    </div>
 
+                      <OptionMicrostructurePanel contracts={microstructureContracts} />
+
 	                    <div className="detail-panel detail-panel--controls">
 	                      <h4>Scenario controls</h4>
 	                      <div className="detail-mini-controls">
@@ -6457,48 +6277,8 @@ export default function StrategyFinderWorkspace({
                           </strong>
                         </div>
                         <div className="paper-order-ticket__status">
-                          <span className={`pill ${paperExecutionRoute === "local-paper" ? "pill--ghost" : "pill--live"}`}>
-                            {paperExecutionRoute === "ibkr-paper"
-                              ? "IBKR route"
-                              : paperExecutionRoute === "tws-paper"
-                                ? "TWS route"
-                                : "Local route"}
-                          </span>
-                          {paperExecutionRoute === "ibkr-paper" ? (
-                            <span className={`pill ${ibkrReady ? "pill--long" : "pill--warning"}`}>
-                              {ibkrReady
-                                ? `Gateway ready${ibkrStatus?.selectedAccount ? ` · ${ibkrStatus.selectedAccount}` : ""}`
-                                : "Gateway not ready"}
-                            </span>
-                          ) : paperExecutionRoute === "tws-paper" ? (
-                            <span className={`pill ${twsReady ? "pill--long" : "pill--warning"}`}>
-                              {twsReady
-                                ? `TWS ready${twsStatus?.selectedAccount ? ` · ${twsStatus.selectedAccount}` : ""}`
-                                : "TWS not ready"}
-                            </span>
-                          ) : null}
+                          <span className="pill pill--ghost">Local route</span>
                         </div>
-                        {paperExecutionRoute === "ibkr-paper" && !ibkrReady ? (
-                          <p className="paper-order-ticket__note">
-                            {ibkrReloginNeeded
-                                ? (
-                                    <>
-                                      IBKR session expired or was signed out. Re-login at{" "}
-                                      <a href={ibkrLoginUrl} target="_blank" rel="noreferrer">
-                                        {ibkrLoginUrl}
-                                      </a>{" "}
-                                      and wait a few seconds before routing this order.
-                                    </>
-                                  )
-                                : ibkrStatus?.error || "Start the IBKR Client Portal Gateway before routing this order."}
-                          </p>
-                        ) : null}
-                        {paperExecutionRoute === "tws-paper" && !twsReady ? (
-                          <p className="paper-order-ticket__note">
-                            {twsStatus?.error ||
-                              "Connect TWS and enable API socket clients, then enter the IP/port in the sidebar and connect."}
-                          </p>
-                        ) : null}
                       </div>
                       <div className="paper-order-ticket__actions">
                         <label>
@@ -6508,17 +6288,6 @@ export default function StrategyFinderWorkspace({
                             value={paperTradeDate}
                             onChange={(event) => setPaperTradeDate(event.target.value)}
                           />
-                        </label>
-                        <label>
-                          <span>Execution</span>
-                          <select
-                            value={paperExecutionRoute}
-                            onChange={(event) => setPaperExecutionRoute(event.target.value)}
-                          >
-                            <option value="local-paper">Local</option>
-                            <option value="ibkr-paper">IBKR</option>
-                            <option value="tws-paper">TWS</option>
-                          </select>
                         </label>
                         <label>
                           <span>Direction</span>
@@ -6555,91 +6324,11 @@ export default function StrategyFinderWorkspace({
                             />
                           </div>
                         </label>
-                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                          <label>
-                            <span>Order type</span>
-                            <select
-                              value={paperIbkrOrderType}
-                              onChange={(event) => setPaperIbkrOrderType(event.target.value)}
-                            >
-                              <option value="LMT">Limit</option>
-                              <option value="MKT">Market</option>
-                            </select>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                          <label>
-                            <span>IBKR limit</span>
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={paperIbkrLimitPrice}
-                              onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                            />
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "tws-paper" && paperIbkrOrderType === "LMT" ? (
-                          <>
-                            <label>
-                              <span>TWS limit</span>
-                              <input
-                                type="number"
-                                step="0.01"
-                                list="tws-limit-window-finder"
-                                value={paperIbkrLimitPrice}
-                                onChange={(event) => setPaperIbkrLimitPrice(event.target.value)}
-                              />
-                            </label>
-                            <datalist id="tws-limit-window-finder">
-                              {twsLimitPriceWindow.map((option) => (
-                                <option key={`tws-limit:${option}`} value={option} />
-                              ))}
-                            </datalist>
-                          </>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                          <label>
-                            <span>TIF</span>
-                            <select value={paperIbkrTif} onChange={(event) => setPaperIbkrTif(event.target.value)}>
-                              <option value="DAY">DAY</option>
-                              <option value="GTC">GTC</option>
-                            </select>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" || paperExecutionRoute === "tws-paper" ? (
-                          <label className="paper-order-ticket__toggle">
-                            <span>Outside RTH</span>
-                            <span className="paper-order-ticket__toggle-control">
-                              <input
-                                type="checkbox"
-                                checked={paperIbkrOutsideRth}
-                                onChange={(event) => setPaperIbkrOutsideRth(event.target.checked)}
-                              />
-                            </span>
-                          </label>
-                        ) : null}
-                        {paperExecutionRoute === "ibkr-paper" && paperIbkrOrderType === "LMT" ? (
-                          <label className="paper-order-ticket__toggle">
-                            <span>Smart entry</span>
-                            <span className="paper-order-ticket__toggle-control">
-                              <input
-                                type="checkbox"
-                                checked={paperIbkrSmartEnabled}
-                                onChange={(event) => setPaperIbkrSmartEnabled(event.target.checked)}
-                              />
-                            </span>
-                          </label>
-                        ) : null}
                         <button
                           type="button"
                           className={`chart-toggle ${paperOrderSaving ? "chart-toggle--active" : ""}`}
                           onClick={handleCreatePaperTrade}
-                          disabled={
-                            paperOrderSaving ||
-                            !onCreatePaperOrder ||
-                            (paperExecutionRoute === "ibkr-paper" && !ibkrReady) ||
-                            (paperExecutionRoute === "tws-paper" && !twsReady)
-                          }
+                          disabled={paperOrderSaving || !onCreatePaperOrder}
                         >
                           {paperOrderSaving ? "Saving..." : "Start new order"}
                         </button>

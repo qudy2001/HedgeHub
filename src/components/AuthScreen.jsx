@@ -15,7 +15,7 @@ export default function AuthScreen({
   const title = needsBootstrap ? "Create admin account" : "Sign in";
   const subtitle = needsBootstrap
     ? "Set up the first admin account for this HedgeHub instance."
-    : "Sign in to access your IBKR settings and trading records.";
+    : "Sign in to access your trading records.";
   const submitLabel = needsBootstrap ? "Create admin" : "Sign in";
 
   const validationError = useMemo(() => {

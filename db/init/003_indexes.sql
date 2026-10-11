@@ -41,6 +41,15 @@ CREATE INDEX IF NOT EXISTS user_api_keys_active_token_idx
     ON user_api_keys(token_hash)
     WHERE revoked_at IS NULL;
 
+CREATE INDEX IF NOT EXISTS gpt_api_request_logs_created_idx
+    ON gpt_api_request_logs(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS gpt_api_request_logs_user_created_idx
+    ON gpt_api_request_logs(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS gpt_api_request_logs_api_key_created_idx
+    ON gpt_api_request_logs(api_key_id, created_at DESC);
+
 CREATE INDEX IF NOT EXISTS setup_watchlist_user_created_idx
     ON setup_watchlist(user_id, created_at DESC);
 

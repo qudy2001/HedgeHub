@@ -743,7 +743,7 @@ export async function buildStockDeltaHedgeScan({
       "Scores reward liquidity, strong gamma response for a 1% move, and a lower one-day theta break-even move.",
       "Hedge plans are dynamic: no stock hedge is placed at entry. Instead, rebalancing is triggered when delta or price-move thresholds are hit.",
       "If the underlying does not move, theta decay will reduce P&L. Dynamic hedging cannot eliminate this carry cost.",
-      "Live Polygon chains are used when available; otherwise HedgeHub falls back to modeled option chains."
+      "Live option chains are used when available; otherwise HedgeHub falls back to modeled option chains."
     ],
     summary: {
       symbolsScanned: stockUniverse.length,

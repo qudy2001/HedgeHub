@@ -1086,6 +1086,7 @@ export default function PaperTradeScenarioPanel({
   const chartTheme = getChartPalette(theme);
   const [panelOpen, setPanelOpen] = useState(defaultOpen);
   const [activeSnapshotId, setActiveSnapshotId] = useState(null);
+  const [activeSnapshotRefreshNonce, setActiveSnapshotRefreshNonce] = useState(0);
   const [controls, setControls] = useState(() => buildDefaultControls(order, lastUpdated));
   const [chartMode, setChartMode] = useState("date");
   const [heatmapRangeMultiplier, setHeatmapRangeMultiplier] = useState(1);
@@ -1097,7 +1098,9 @@ export default function PaperTradeScenarioPanel({
   const sliderStackRef = useRef(null);
   const snapshots = order.calculatorSnapshots ?? [];
   const activeSnapshot =
-    snapshots.find((snapshot) => String(snapshot.id) === String(activeSnapshotId)) ?? null;
+    activeSnapshotId != null && activeSnapshotRefreshNonce === refreshNonce
+      ? snapshots.find((snapshot) => String(snapshot.id) === String(activeSnapshotId)) ?? null
+      : null;
   const scenarioOrder = activeSnapshot?.payload?.orderSnapshot ?? serializeScenarioOrder(order);
   const scenarioPolymarketEventUrl = getPolymarketEventUrl(scenarioOrder.polymarketUrl);
   const polymarketReferenceLine = buildPolymarketReferenceLine({
@@ -1110,6 +1113,7 @@ export default function PaperTradeScenarioPanel({
 
   useEffect(() => {
     setActiveSnapshotId(null);
+    setActiveSnapshotRefreshNonce(refreshNonce);
     setControls(buildDefaultControls(order, lastUpdated));
     setHeatmapRangeMultiplier(1);
     setHeatmapRowCount(13);
@@ -1124,6 +1128,7 @@ export default function PaperTradeScenarioPanel({
     }
 
     setActiveSnapshotId(null);
+    setActiveSnapshotRefreshNonce(refreshNonce);
     setControls(buildDefaultControls(order, lastUpdated));
     setHeatmapRangeMultiplier(1);
     setHeatmapRowCount(13);
@@ -1822,6 +1827,7 @@ export default function PaperTradeScenarioPanel({
 
   function handleLoadSnapshot(snapshot) {
     setActiveSnapshotId(snapshot.id);
+    setActiveSnapshotRefreshNonce(refreshNonce);
     setHeatmapRangeMultiplier(snapshot.payload?.heatmapSnapshot?.rangeMultiplier ?? 1);
     setHeatmapRowCount(snapshot.payload?.heatmapSnapshot?.rowCount ?? 13);
     setControls(
@@ -1840,6 +1846,7 @@ export default function PaperTradeScenarioPanel({
 
   function handleResetToLive() {
     setActiveSnapshotId(null);
+    setActiveSnapshotRefreshNonce(refreshNonce);
     setControls(buildDefaultControls(order, lastUpdated));
     setHeatmapRangeMultiplier(1);
     setHeatmapRowCount(13);

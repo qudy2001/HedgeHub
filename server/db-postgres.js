@@ -347,8 +347,11 @@ export function removeStrategyFromWatchlist(strategyId, userId = "legacy") {
 }
 
 export function listSetupWatchlist(userId = "legacy") {
+  const whereClause =
+    userId == null ? "" : `WHERE user_id = ${quoteLiteral(String(userId).trim() || "legacy")}`;
   const rows = queryJson(`
     SELECT
+      user_id AS "userId",
       id,
       source,
       strategy_id AS "strategyId",
@@ -358,7 +361,7 @@ export function listSetupWatchlist(userId = "legacy") {
       created_at AS "createdAt",
       updated_at AS "updatedAt"
     FROM setup_watchlist
-    WHERE user_id = ${quoteLiteral(userId)}
+    ${whereClause}
     ORDER BY created_at DESC, id ASC
   `);
 
@@ -844,7 +847,7 @@ export function getLatestIvRankDaily(symbol, asOfDate = null) {
 }
 
 export function createScannerPromotion(promotion, userId = "legacy") {
-  const row = queryJson(
+  const row = mutateJson(
     `
       INSERT INTO scanner_promotions (
         user_id,
@@ -890,6 +893,297 @@ export function createScannerPromotion(promotion, userId = "legacy") {
     : null;
 }
 
+export function listScannerPromotions(userId = null, limit = 100) {
+  const whereClause =
+    userId == null ? "" : `WHERE promotions.user_id = ${quoteLiteral(String(userId).trim() || "legacy")}`;
+  const rows = queryJson(`
+    SELECT
+      promotions.id,
+      promotions.user_id AS "userId",
+      promotions.scanner_type AS "scannerType",
+      promotions.scanner_run_id AS "scannerRunId",
+      promotions.scanner_candidate_id AS "scannerCandidateId",
+      promotions.paper_order_id AS "paperOrderId",
+      promotions.symbol,
+      promotions.strategy_type AS "strategyType",
+      promotions.promotion_status AS "promotionStatus",
+      promotions.notes_json::text AS "notesJson",
+      candidates.payload_json::text AS "candidatePayloadJson",
+      promotions.created_at AS "createdAt"
+    FROM scanner_promotions AS promotions
+    LEFT JOIN scanner_candidates AS candidates
+      ON candidates.id = promotions.scanner_candidate_id
+    ${whereClause}
+    ORDER BY promotions.created_at DESC, promotions.id DESC
+    LIMIT ${Math.max(Number(limit) || 0, 0)}
+  `);
+
+  return rows.map((row) => ({
+    ...row,
+    notes: row.notesJson ? JSON.parse(row.notesJson) : {},
+    candidatePayload: row.candidatePayloadJson ? JSON.parse(row.candidatePayloadJson) : null
+  }));
+}
+
+export function recordOptionShortlistObservations(observations = []) {
+  if (!Array.isArray(observations) || observations.length === 0) {
+    return 0;
+  }
+
+  const values = observations
+    .map(
+      (observation) => `(
+        ${quoteLiteral(observation.observedAt ?? new Date().toISOString())},
+        ${quoteLiteral(observation.userId ?? "legacy")},
+        ${quoteLiteral(observation.source ?? "shortlist")},
+        ${quoteLiteral(observation.scannerType ?? null)},
+        ${quoteLiteral(observation.scannerCandidateId ?? null)},
+        ${quoteLiteral(observation.paperOrderId ?? null)},
+        ${quoteLiteral(String(observation.contractSymbol ?? "").trim())},
+        ${quoteLiteral(observation.underlyingSymbol ?? null)},
+        ${quoteLiteral(observation.expiration ?? null)},
+        ${quoteLiteral(observation.strike ?? null)},
+        ${quoteLiteral(observation.optionType ?? null)},
+        ${quoteLiteral(observation.bid ?? null)},
+        ${quoteLiteral(observation.ask ?? null)},
+        ${quoteLiteral(observation.mark ?? null)},
+        ${quoteLiteral(observation.bidSize ?? null)},
+        ${quoteLiteral(observation.askSize ?? null)},
+        ${quoteLiteral(observation.lastTradePrice ?? null)},
+        ${quoteLiteral(observation.lastTradeSize ?? null)},
+        ${quoteLiteral(observation.openInterest ?? null)},
+        ${quoteLiteral(observation.volume ?? null)},
+        ${quoteLiteral(observation.quoteTimestamp ?? null)}
+      )`
+    )
+    .join(",\n");
+
+  execute(`
+    INSERT INTO options_shortlist_observations (
+      observed_at,
+      user_id,
+      source,
+      scanner_type,
+      scanner_candidate_id,
+      paper_order_id,
+      contract_symbol,
+      underlying_symbol,
+      expiration,
+      strike,
+      option_type,
+      bid,
+      ask,
+      mark,
+      bid_size,
+      ask_size,
+      last_trade_price,
+      last_trade_size,
+      open_interest,
+      volume,
+      quote_timestamp
+    ) VALUES ${values}
+  `);
+
+  return observations.length;
+}
+
+export function listOptionShortlistObservations({
+  userId = "legacy",
+  contractSymbol,
+  fromTimestamp = null,
+  toTimestamp = null,
+  limit = 100
+} = {}) {
+  const conditions = [`user_id = ${quoteLiteral(String(userId).trim() || "legacy")}`];
+  if (contractSymbol) {
+    conditions.push(`contract_symbol = ${quoteLiteral(String(contractSymbol).trim())}`);
+  }
+  if (fromTimestamp) {
+    conditions.push(`observed_at >= ${quoteLiteral(fromTimestamp)}`);
+  }
+  if (toTimestamp) {
+    conditions.push(`observed_at <= ${quoteLiteral(toTimestamp)}`);
+  }
+
+  return queryJson(`
+    SELECT
+      id,
+      observed_at AS "observedAt",
+      user_id AS "userId",
+      source,
+      scanner_type AS "scannerType",
+      scanner_candidate_id AS "scannerCandidateId",
+      paper_order_id AS "paperOrderId",
+      contract_symbol AS "contractSymbol",
+      underlying_symbol AS "underlyingSymbol",
+      expiration,
+      strike,
+      option_type AS "optionType",
+      bid,
+      ask,
+      mark,
+      bid_size AS "bidSize",
+      ask_size AS "askSize",
+      last_trade_price AS "lastTradePrice",
+      last_trade_size AS "lastTradeSize",
+      open_interest AS "openInterest",
+      volume,
+      quote_timestamp AS "quoteTimestamp"
+    FROM options_shortlist_observations
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY observed_at DESC, id DESC
+    LIMIT ${Math.max(Number(limit) || 0, 0)}
+  `);
+}
+
+export function createOptionsHistoryIngestionRun(run = {}) {
+  return mutateJson(
+    `
+      INSERT INTO options_history_ingestion_runs (
+        dataset,
+        status,
+        requested_by,
+        source_path,
+        window_start,
+        window_end,
+        files_total,
+        files_completed,
+        rows_ingested,
+        details_json,
+        started_at,
+        completed_at,
+        error_text
+      ) VALUES (
+        ${quoteLiteral(run.dataset ?? "minute_aggregates")},
+        ${quoteLiteral(run.status ?? "queued")},
+        ${quoteLiteral(run.requestedBy ?? null)},
+        ${quoteLiteral(run.sourcePath ?? null)},
+        ${quoteLiteral(run.windowStart ?? null)},
+        ${quoteLiteral(run.windowEnd ?? null)},
+        ${quoteLiteral(run.filesTotal ?? 0)},
+        ${quoteLiteral(run.filesCompleted ?? 0)},
+        ${quoteLiteral(run.rowsIngested ?? 0)},
+        ${quoteJson(run.details ?? {})},
+        ${quoteLiteral(run.startedAt ?? null)},
+        ${quoteLiteral(run.completedAt ?? null)},
+        ${quoteLiteral(run.errorText ?? null)}
+      )
+      RETURNING
+        id,
+        dataset,
+        status,
+        requested_by AS "requestedBy",
+        source_path AS "sourcePath",
+        window_start AS "windowStart",
+        window_end AS "windowEnd",
+        files_total AS "filesTotal",
+        files_completed AS "filesCompleted",
+        rows_ingested AS "rowsIngested",
+        details_json::text AS "detailsJson",
+        requested_at AS "requestedAt",
+        started_at AS "startedAt",
+        completed_at AS "completedAt",
+        error_text AS "errorText"
+    `,
+    false
+  );
+}
+
+export function updateOptionsHistoryIngestionRun(id, patch = {}) {
+  const statements = [];
+  if (patch.status !== undefined) {
+    statements.push(`status = ${quoteLiteral(patch.status)}`);
+  }
+  if (patch.sourcePath !== undefined) {
+    statements.push(`source_path = ${quoteLiteral(patch.sourcePath)}`);
+  }
+  if (patch.windowStart !== undefined) {
+    statements.push(`window_start = ${quoteLiteral(patch.windowStart)}`);
+  }
+  if (patch.windowEnd !== undefined) {
+    statements.push(`window_end = ${quoteLiteral(patch.windowEnd)}`);
+  }
+  if (patch.filesTotal !== undefined) {
+    statements.push(`files_total = ${quoteLiteral(patch.filesTotal)}`);
+  }
+  if (patch.filesCompleted !== undefined) {
+    statements.push(`files_completed = ${quoteLiteral(patch.filesCompleted)}`);
+  }
+  if (patch.rowsIngested !== undefined) {
+    statements.push(`rows_ingested = ${quoteLiteral(patch.rowsIngested)}`);
+  }
+  if (patch.details !== undefined) {
+    statements.push(`details_json = ${quoteJson(patch.details ?? {})}`);
+  }
+  if (patch.startedAt !== undefined) {
+    statements.push(`started_at = ${quoteLiteral(patch.startedAt)}`);
+  }
+  if (patch.completedAt !== undefined) {
+    statements.push(`completed_at = ${quoteLiteral(patch.completedAt)}`);
+  }
+  if (patch.errorText !== undefined) {
+    statements.push(`error_text = ${quoteLiteral(patch.errorText)}`);
+  }
+
+  if (!statements.length) {
+    return null;
+  }
+
+  return mutateJson(
+    `
+      UPDATE options_history_ingestion_runs
+      SET ${statements.join(",\n")}
+      WHERE id = ${quoteLiteral(id)}
+      RETURNING
+        id,
+        dataset,
+        status,
+        requested_by AS "requestedBy",
+        source_path AS "sourcePath",
+        window_start AS "windowStart",
+        window_end AS "windowEnd",
+        files_total AS "filesTotal",
+        files_completed AS "filesCompleted",
+        rows_ingested AS "rowsIngested",
+        details_json::text AS "detailsJson",
+        requested_at AS "requestedAt",
+        started_at AS "startedAt",
+        completed_at AS "completedAt",
+        error_text AS "errorText"
+    `,
+    false
+  );
+}
+
+export function listOptionsHistoryIngestionRuns(limit = 20) {
+  const rows = queryJson(`
+    SELECT
+      id,
+      dataset,
+      status,
+      requested_by AS "requestedBy",
+      source_path AS "sourcePath",
+      window_start AS "windowStart",
+      window_end AS "windowEnd",
+      files_total AS "filesTotal",
+      files_completed AS "filesCompleted",
+      rows_ingested AS "rowsIngested",
+      details_json::text AS "detailsJson",
+      requested_at AS "requestedAt",
+      started_at AS "startedAt",
+      completed_at AS "completedAt",
+      error_text AS "errorText"
+    FROM options_history_ingestion_runs
+    ORDER BY requested_at DESC, id DESC
+    LIMIT ${Math.max(Number(limit) || 0, 0)}
+  `);
+
+  return rows.map((row) => ({
+    ...row,
+    details: row.detailsJson ? JSON.parse(row.detailsJson) : {}
+  }));
+}
+
 export function listPaperOrders(strategyId = null, userId = null) {
   const conditions = [];
   if (userId != null) {
@@ -918,7 +1212,7 @@ export function listPaperOrders(strategyId = null, userId = null) {
 }
 
 export function createPaperOrder(order) {
-  const row = queryJson(
+  const row = mutateJson(
     `
       INSERT INTO paper_orders (
         user_id,
@@ -1035,7 +1329,7 @@ export function deletePaperOrderSnapshots(orderId) {
 }
 
 export function createPaperCalculatorSnapshot(orderId, snapshotName, payload) {
-  const row = queryJson(
+  const row = mutateJson(
     `
       INSERT INTO paper_calculator_snapshots (
         order_id,
@@ -1560,6 +1854,127 @@ export function revokeUserApiKey(id) {
   `);
 }
 
+export function createGptApiRequestLog(entry = {}) {
+  const normalizedId = String(entry.id ?? "").trim();
+  if (!normalizedId) {
+    throw new Error("Log id is required");
+  }
+
+  mutateJson(`
+    INSERT INTO gpt_api_request_logs (
+      id,
+      system_name,
+      method,
+      path,
+      ip_address,
+      user_id,
+      username,
+      api_key_id,
+      api_key_label,
+      api_key_prefix,
+      auth_status,
+      status_code,
+      response_time_ms,
+      request_ticker,
+      expected_price_range_low,
+      expected_price_range_high,
+      option_expiration_start_date,
+      option_expiration_end_date,
+      request_body_json,
+      error_message
+    ) VALUES (
+      ${quoteLiteral(normalizedId)},
+      ${quoteLiteral(String(entry.systemName ?? "gpt-strategy-query").trim() || "gpt-strategy-query")},
+      ${quoteLiteral(String(entry.method ?? "POST").trim() || "POST")},
+      ${quoteLiteral(String(entry.path ?? "/api/gpt/strategy-query").trim() || "/api/gpt/strategy-query")},
+      ${quoteLiteral(entry.ipAddress == null ? null : String(entry.ipAddress).trim() || null)},
+      ${quoteLiteral(entry.userId == null ? null : String(entry.userId).trim() || null)},
+      ${quoteLiteral(entry.username == null ? null : String(entry.username).trim() || null)},
+      ${quoteLiteral(entry.apiKeyId == null ? null : String(entry.apiKeyId).trim() || null)},
+      ${quoteLiteral(entry.apiKeyLabel == null ? null : String(entry.apiKeyLabel).trim() || null)},
+      ${quoteLiteral(entry.apiKeyPrefix == null ? null : String(entry.apiKeyPrefix).trim() || null)},
+      ${quoteLiteral(String(entry.authStatus ?? "unknown").trim() || "unknown")},
+      ${Number(entry.statusCode ?? 0) || 0},
+      ${Number.isFinite(Number(entry.responseTimeMs)) ? Number(entry.responseTimeMs) : "NULL"},
+      ${quoteLiteral(entry.requestTicker == null ? null : String(entry.requestTicker).trim() || null)},
+      ${Number.isFinite(Number(entry.expectedPriceRangeLow)) ? Number(entry.expectedPriceRangeLow) : "NULL"},
+      ${Number.isFinite(Number(entry.expectedPriceRangeHigh)) ? Number(entry.expectedPriceRangeHigh) : "NULL"},
+      ${quoteLiteral(entry.optionExpirationStartDate == null ? null : String(entry.optionExpirationStartDate).trim() || null)}::date,
+      ${quoteLiteral(entry.optionExpirationEndDate == null ? null : String(entry.optionExpirationEndDate).trim() || null)}::date,
+      ${quoteJson(entry.requestBody ?? {})},
+      ${quoteLiteral(entry.errorMessage == null ? null : String(entry.errorMessage).trim() || null)}
+    )
+    RETURNING id
+  `);
+
+  return true;
+}
+
+export function listGptApiRequestLogs(limit = 100) {
+  const normalizedLimit = Math.max(Number(limit) || 100, 1);
+  const rows = queryJson(`
+    SELECT
+      id,
+      system_name AS "systemName",
+      method,
+      path,
+      ip_address AS "ipAddress",
+      user_id AS "userId",
+      username,
+      api_key_id AS "apiKeyId",
+      api_key_label AS "apiKeyLabel",
+      api_key_prefix AS "apiKeyPrefix",
+      auth_status AS "authStatus",
+      status_code AS "statusCode",
+      response_time_ms AS "responseTimeMs",
+      request_ticker AS "requestTicker",
+      expected_price_range_low AS "expectedPriceRangeLow",
+      expected_price_range_high AS "expectedPriceRangeHigh",
+      option_expiration_start_date::text AS "optionExpirationStartDate",
+      option_expiration_end_date::text AS "optionExpirationEndDate",
+      request_body_json::text AS "requestBodyJson",
+      error_message AS "errorMessage",
+      created_at AS "createdAt"
+    FROM gpt_api_request_logs
+    ORDER BY created_at DESC
+    LIMIT ${normalizedLimit}
+  `);
+
+  return rows.map((row) => ({
+    ...row,
+    requestBody: row.requestBodyJson ? JSON.parse(row.requestBodyJson) : {}
+  }));
+}
+
+export function summarizeGptApiRequestLogs() {
+  const row = queryJson(
+    `
+      SELECT
+        COUNT(*)::int AS "totalRequests",
+        SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END)::int AS "successCount",
+        SUM(CASE WHEN auth_status = 'authorized' THEN 1 ELSE 0 END)::int AS "authorizedCount",
+        SUM(CASE WHEN auth_status != 'authorized' THEN 1 ELSE 0 END)::int AS "unknownCount",
+        COUNT(DISTINCT COALESCE(ip_address, ''))::int AS "uniqueIpCount",
+        COUNT(DISTINCT COALESCE(user_id, ''))::int AS "uniqueUserCount",
+        ROUND(AVG(response_time_ms)::numeric, 1) AS "averageResponseTimeMs",
+        MAX(created_at) AS "latestRequestAt"
+      FROM gpt_api_request_logs
+    `,
+    false
+  ) ?? {};
+
+  return {
+    totalRequests: Number(row.totalRequests ?? 0) || 0,
+    successCount: Number(row.successCount ?? 0) || 0,
+    authorizedCount: Number(row.authorizedCount ?? 0) || 0,
+    unknownCount: Number(row.unknownCount ?? 0) || 0,
+    uniqueIpCount: Number(row.uniqueIpCount ?? 0) || 0,
+    uniqueUserCount: Number(row.uniqueUserCount ?? 0) || 0,
+    averageResponseTimeMs: Number.isFinite(Number(row.averageResponseTimeMs)) ? Number(row.averageResponseTimeMs) : null,
+    latestRequestAt: row.latestRequestAt ?? null
+  };
+}
+
 export function createSession({ tokenHash, userId, expiresAt } = {}) {
   if (!tokenHash || !userId || !expiresAt) {
     throw new Error("tokenHash, userId, and expiresAt are required");
@@ -1650,21 +2065,21 @@ export function deleteExpiredSessions(nowIso = new Date().toISOString()) {
   return lines.length;
 }
 
-export function getIbkrSettings(userId) {
-  const normalizedId = String(userId ?? "").trim();
-  if (!normalizedId) {
+export function getAppSetting(key) {
+  const normalizedKey = String(key ?? "").trim();
+  if (!normalizedKey) {
     return null;
   }
 
   const row = queryJson(
     `
       SELECT
-        user_id AS "userId",
-        config_json::text AS "configJson",
+        key,
+        value_json::text AS "valueJson",
         created_at AS "createdAt",
         updated_at AS "updatedAt"
-      FROM user_ibkr_settings
-      WHERE user_id = ${quoteLiteral(normalizedId)}
+      FROM app_settings
+      WHERE key = ${quoteLiteral(normalizedKey)}
       LIMIT 1
     `,
     false
@@ -1676,31 +2091,30 @@ export function getIbkrSettings(userId) {
 
   return {
     ...row,
-    config: JSON.parse(row.configJson ?? "{}")
+    value: JSON.parse(row.valueJson ?? "null")
   };
 }
 
-export function upsertIbkrSettings(userId, config) {
-  const normalizedId = String(userId ?? "").trim();
-  if (!normalizedId) {
-    throw new Error("User id is required");
+export function upsertAppSetting(key, value) {
+  const normalizedKey = String(key ?? "").trim();
+  if (!normalizedKey) {
+    throw new Error("Setting key is required");
   }
 
-  const payload = config && typeof config === "object" ? config : {};
   execute(`
-    INSERT INTO user_ibkr_settings (
-      user_id,
-      config_json
+    INSERT INTO app_settings (
+      key,
+      value_json
     ) VALUES (
-      ${quoteLiteral(normalizedId)},
-      ${quoteJson(payload)}
+      ${quoteLiteral(normalizedKey)},
+      ${quoteJson(value ?? null)}
     )
-    ON CONFLICT (user_id) DO UPDATE SET
-      config_json = EXCLUDED.config_json,
+    ON CONFLICT (key) DO UPDATE SET
+      value_json = EXCLUDED.value_json,
       updated_at = NOW()
   `);
 
-  return getIbkrSettings(normalizedId);
+  return getAppSetting(normalizedKey);
 }
 
 export function claimLegacyUserData(userId) {

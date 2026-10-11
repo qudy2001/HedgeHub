@@ -7,7 +7,6 @@ on:
       - master
       - codex/livedata
       - codex/postgresql
-      - codex/embedded-ibkr-gateway
     tags:
       - "v*"
   workflow_dispatch:
@@ -24,8 +23,6 @@ jobs:
         include:
           - dockerfile: ./Dockerfile
             suffix: ""
-          - dockerfile: ./deploy/hedgehub-ibkr/Dockerfile
-            suffix: "-ibkr"
 
     steps:
       - name: Check out repository
@@ -37,7 +34,7 @@ jobs:
         run: |
           image_name="ghcr.io/${GITHUB_REPOSITORY,,}"
 
-          if [[ "${GITHUB_REF_NAME}" == "codex/livedata" || "${GITHUB_REF_NAME}" == "codex/embedded-ibkr-gateway" ]]; then
+          if [[ "${GITHUB_REF_NAME}" == "codex/livedata" ]]; then
             image_name="${image_name}-livedata"
           elif [[ "${GITHUB_REF_NAME}" == "codex/postgresql" ]]; then
             image_name="${image_name}-postgresql"
