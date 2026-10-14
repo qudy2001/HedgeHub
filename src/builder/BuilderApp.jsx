@@ -301,7 +301,21 @@ const SUGGESTION_TAB_EMPTY = {
   social: "No social topics yet. Ask your AI connector to add some with category social.",
   other: "No topics about other tickers yet.",
 };
-function TopicCard({ topic, onAdd }) {
+function ItemAction({ added, onAdd, onRemove }) {
+  return added ? (
+    <div className="added-row">
+      <span className="badge positive">Added ✓</span>
+      <button className="danger-button" onClick={onRemove}>
+        Remove
+      </button>
+    </div>
+  ) : (
+    <div>
+      <button onClick={onAdd}>Add to strategy</button>
+    </div>
+  );
+}
+function TopicCard({ topic, added, onAdd, onRemove }) {
   return (
     <article className="detail-box topic-card">
       <div className="topic-head">
@@ -322,9 +336,7 @@ function TopicCard({ topic, onAdd }) {
       </div>
       <p className="topic-summary">{topic.summary}</p>
       <small>AI market topic · updated {sourceDate(topic.updatedAt)}</small>
-      <div>
-        <button onClick={() => onAdd(topic)}>Add to strategy</button>
-      </div>
+      <ItemAction added={added} onAdd={() => onAdd(topic)} onRemove={() => onRemove(added)} />
     </article>
   );
 }
@@ -334,10 +346,13 @@ function SuggestionsPanel({
   symbol,
   agentAvailable,
   onRefreshAgent,
+  items,
   onAddTopic,
   onAddSuggestion,
+  onRemoveItem,
 }) {
   const [chosen, setChosen] = useState(null);
+  const addedItem = (key) => items.find((i) => i.eventKey === key);
   const grouped = useMemo(() => {
     const groups = { general: [], ticker: [], social: [], other: [] };
     for (const topic of [...topics].sort((a, b) => b.weight - a.weight)) {
@@ -393,14 +408,24 @@ function SuggestionsPanel({
       {grouped[active].length ? (
         grouped[active].map((entry) =>
           entry.kind === "topic" ? (
-            <TopicCard key={`topic-${entry.topic.id}`} topic={entry.topic} onAdd={onAddTopic} />
+            <TopicCard
+              key={`topic-${entry.topic.id}`}
+              topic={entry.topic}
+              added={addedItem(`market topic ${entry.topic.id}`)}
+              onAdd={onAddTopic}
+              onRemove={(item) => onRemoveItem(item.id)}
+            />
           ) : (
             <article className="detail-box" key={entry.suggestion.id}>
               <strong>{entry.suggestion.title}</strong>
               <p>
                 {entry.suggestion.symbol} · {entry.suggestion.sentiment}
               </p>
-              <button onClick={() => onAddSuggestion(entry.suggestion)}>Add to strategy</button>
+              <ItemAction
+                added={addedItem(entry.suggestion.eventKey)}
+                onAdd={() => onAddSuggestion(entry.suggestion)}
+                onRemove={() => onRemoveItem(addedItem(entry.suggestion.eventKey).id)}
+              />
             </article>
           ),
         )
@@ -1202,7 +1227,7 @@ function Workspace({ demo, user, logout, presentation }) {
       setError(e.message);
     }
   }
-  async function removeItem(id) {
+  async function removeItem(id, keepDialog = false) {
     try {
       if (!demo)
         await api(
@@ -1211,7 +1236,7 @@ function Workspace({ demo, user, logout, presentation }) {
           "DELETE",
         );
       setItems((v) => v.filter((i) => i.id !== id));
-      setModal(null);
+      if (!keepDialog) setModal(null);
       setNotice("Item removed from this strategy. Discovery remains enabled.");
     } catch (e) {
       setError(e.message);
@@ -3397,6 +3422,8 @@ function Workspace({ demo, user, logout, presentation }) {
             <SuggestionsPanel
               topics={marketTopics}
               suggestions={agent?.suggestions ?? []}
+              items={items}
+              onRemoveItem={(id) => removeItem(id, true)}
               symbol={symbol}
               agentAvailable={agentAvailable}
               onRefreshAgent={refreshAgent}

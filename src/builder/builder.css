@@ -2429,3 +2429,17 @@ body.studio-body:before {
 .results-table .quote-list .negative { color: #ef4444; }
 .results-table .leg-price.ask { color: #ef4444; font-weight: 600; }
 .results-table .leg-price.bid { color: #22c55e; font-weight: 600; }
+
+.studio-dialog .added-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.studio-dialog .danger-button {
+  color: #bd414a;
+  border-color: #e3a5aa;
+}
+.studio-dialog .danger-button:hover {
+  background: #fdecee;
+  border-color: #bd414a;
+}
