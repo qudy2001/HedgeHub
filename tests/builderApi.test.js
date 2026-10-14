@@ -15,6 +15,10 @@ test("builder API persists layouts/items, isolates users, excludes unverified ev
   });
   const service = registerBuilderRoutes(app, {
     store,
+    loadMacro: async () => ({
+      events: [{ date: "2025-07-15", title: "CPI" }],
+      coveredUntil: "2025-10-01",
+    }),
     loadData: async (symbol) => ({
       symbol,
       spot: 220,
@@ -104,6 +108,9 @@ test("builder API persists layouts/items, isolates users, excludes unverified ev
     assert.equal(done.status, "completed");
     assert.ok(done.result.rows.length >= 6);
     assert.ok(done.result.rows.every((r) => r.catalystImpact === 0));
+    assert.ok(done.result.rows.every((r) => r.riskAdjustment?.calendar.points === 0));
+    assert.ok(done.result.rows.every((r) => r.riskAdjustment.calendar.status === "awaiting-ai"));
+    assert.ok(done.result.rows.some((r) => r.riskAdjustment.calendar.macro?.length === 1));
     await fetch(root + "/strategies/default/items/" + added.id, send("DELETE"));
     assert.equal(
       (await (await fetch(root + "/strategies/default")).json()).items.length,
@@ -166,5 +173,63 @@ test("cancelling a job during collection preserves cancelled state and skips sub
     release();
     await new Promise((r) => server.close(r));
     service.close();
+  }
+});
+
+test("a failing or malformed macro calendar never drops scan rows", async () => {
+  for (const loadMacro of [
+    async () => {
+      throw new Error("calendar down");
+    },
+    async () => ["not", "an", "object"],
+  ]) {
+    const store = createBuilderStore(":memory:"),
+      app = express();
+    app.use(express.json());
+    app.use((req, res, next) => {
+      req.user = { id: "a" };
+      next();
+    });
+    const service = registerBuilderRoutes(app, {
+      store,
+      loadMacro,
+      loadData: async (symbol) => ({
+        symbol,
+        spot: 220,
+        hv: 0.3,
+        asOf: "2025-07-01T12:00:00Z",
+        bars: [],
+        chain: [],
+        warnings: [],
+        source: "fixture",
+      }),
+    });
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise((r) => server.once("listening", r));
+    const root = `http://127.0.0.1:${server.address().port}/api/builder`;
+    try {
+      const job = await (
+        await fetch(root + "/scan", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            strategy: { ...DEFAULT_STRATEGY, symbols: ["AAPL"], pricingMode: "modeled" },
+          }),
+        })
+      ).json();
+      let done;
+      for (let i = 0; i < 100; i++) {
+        done = await (await fetch(root + "/jobs/" + job.id)).json();
+        if (done.status !== "queued" && done.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.equal(done.status, "completed");
+      assert.ok(done.result.rows.length >= 6);
+      assert.ok(done.result.rows.every((r) => r.riskAdjustment.calendar.macro === null));
+      assert.ok(done.result.rows.every((r) => Number.isFinite(r.overall) || r.overall === null));
+    } finally {
+      await new Promise((r) => server.close(r));
+      service.close();
+    }
   }
 });

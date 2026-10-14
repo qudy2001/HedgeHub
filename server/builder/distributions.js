@@ -51,6 +51,11 @@ export function createDistributionLoader({
               await wait(61000);
               r = await readTiger("/options/chain", { symbol, expiry }, 600000);
             }
+            if (!(r.data ?? []).length) {
+              complete = false;
+              warnings.push(`${expiry}: Tiger returned no contracts`);
+              continue;
+            }
             contracts.push(
               ...(r.data ?? []).map((c) =>
                 normalizeTigerContract(c, {

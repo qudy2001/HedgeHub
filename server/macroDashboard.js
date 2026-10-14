@@ -297,6 +297,7 @@ const SPARKLINE_LOOKBACKS = {
   "30D": { points: 32, scale: 1.75, volatility: 0.9 },
   "180D": { points: 36, scale: 3.2, volatility: 1.1 },
   "365D": { points: 40, scale: 4.4, volatility: 1.25 },
+  "730D": { points: 42, scale: 5.1, volatility: 1.35 },
   MAX: { points: 44, scale: 5.8, volatility: 1.45 }
 };
 

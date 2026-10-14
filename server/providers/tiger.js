@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { finiteNumber as num, timestampIso } from '../quoteQuality.js';
-import { optionDelta } from '../../shared/optionMath.js';
+import { optionDelta, impliedVolatility } from '../../shared/optionMath.js';
 
 export const tigerEnabled = () => process.env.MARKET_DATA_PROVIDER === 'tiger';
 const pending = new Map();
@@ -7,12 +8,31 @@ const cache = new Map();
 export const tigerDiagnostics = {};
 let queue = Promise.resolve();
 
-export async function tigerRequest(path, params = {}, ttl = 0) {
-  const query = new URLSearchParams(params);
-  const key = `${path}?${query}`;
-  const existing = cache.get(key);
-  if (existing && Date.now() - existing.at < ttl) return existing.value;
-  if (pending.has(key)) return pending.get(key);
+// The bridge allows a limited number of calls per minute per function (shared by every HedgeHub process).
+// Background jobs (scans) opt in to waiting out a 429 and retrying; request handlers fail fast with the
+// wait time instead, so an HTTP request is never held open for a minute and other Tiger calls never queue
+// behind a sleeping one.
+const rateLimit = { until: 0, waits: 0 };
+const maxRateLimitWaitMs = () => Number(process.env.TIGER_RATE_LIMIT_MAX_WAIT_MS) || 150_000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitContext = new AsyncLocalStorage();
+
+export const withRateLimitWaiting = (fn) => waitContext.run(true, fn);
+
+export function getTigerRateLimitState() {
+  return { waitingUntil: rateLimit.until > Date.now() ? rateLimit.until : null, waits: rateLimit.waits };
+}
+
+class TigerRateLimitError extends Error {
+  constructor(retryAfterSec) {
+    super(`Tiger rate limit: retry after ${Math.ceil(retryAfterSec)} seconds`);
+    this.retryAfterSec = retryAfterSec;
+    this.isRateLimit = true;
+  }
+}
+
+// One serialized call to the bridge. Never sleeps, so the queue always keeps moving.
+function bridgeAttempt(path, key) {
   const job = queue.catch(() => {}).then(async () => {
     const status = tigerDiagnostics[path] ??= {};
     status.lastAttempt = new Date().toISOString();
@@ -22,13 +42,15 @@ export async function tigerRequest(path, params = {}, ttl = 0) {
         headers: { authorization: `Bearer ${process.env.TIGER_BRIDGE_TOKEN}` },
         signal: AbortSignal.timeout(20_000)
       });
-      const body = await response.json();
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 429) {
+        const raw = Number(body.retryAfter ?? response.headers?.get?.('retry-after'));
+        throw new TigerRateLimitError(Number.isFinite(raw) && raw >= 0 ? raw : 60);
+      }
       if (!response.ok) throw new Error(body.error || `Tiger bridge HTTP ${response.status}`);
       const result = { data: body.data, fetchedAt: body.fetchedAt, source: 'tiger' };
       status.lastSuccess = body.fetchedAt;
       status.error = null;
-      cache.set(key, { at: Date.now(), value: result });
-      if (cache.size > 500) cache.delete(cache.keys().next().value);
       return result;
     } catch (error) {
       status.error = error.message;
@@ -36,8 +58,45 @@ export async function tigerRequest(path, params = {}, ttl = 0) {
     }
   });
   queue = job;
-  pending.set(key, job);
-  try { return await job; } finally { pending.delete(key); }
+  return job;
+}
+
+export async function tigerRequest(path, params = {}, ttl = 0) {
+  const query = new URLSearchParams(params);
+  const key = `${path}?${query}`;
+  const existing = cache.get(key);
+  if (existing && Date.now() - existing.at < ttl) return existing.value;
+  const mayWait = waitContext.getStore() === true;
+  const pendingKey = `${key}|${mayWait}`;
+  if (pending.has(pendingKey)) return pending.get(pendingKey);
+
+  const run = (async () => {
+    let waitedMs = 0;
+    let myWaitUntil = 0;
+    try {
+      for (;;) {
+        try {
+          const result = await bridgeAttempt(path, key);
+          cache.set(key, { at: Date.now(), value: result });
+          if (cache.size > 500) cache.delete(cache.keys().next().value);
+          return result;
+        } catch (error) {
+          if (!error.isRateLimit || !mayWait) throw error;
+          const waitMs = Math.min(error.retryAfterSec * 1000 + 300, 65_000);
+          if (waitedMs + waitMs > maxRateLimitWaitMs()) throw error;
+          myWaitUntil = Date.now() + waitMs;
+          rateLimit.until = Math.max(rateLimit.until, myWaitUntil);
+          rateLimit.waits += 1;
+          await sleep(waitMs);
+          waitedMs += waitMs;
+        }
+      }
+    } finally {
+      if (myWaitUntil && rateLimit.until === myWaitUntil) rateLimit.until = 0;
+    }
+  })();
+  pending.set(pendingKey, run);
+  try { return await run; } finally { pending.delete(pendingKey); }
 }
 
 export async function tigerQuotes(requests) {
@@ -47,7 +106,7 @@ export async function tigerQuotes(requests) {
     const r = await tigerRequest('/quotes', { symbol }, 10_000);
     const q = r.data?.[0];
     if (!q) throw new Error(`Tiger has no quote for ${symbol}`);
-    results.push({ symbol, regularMarketPrice: num(q.latest_price ?? q.close), regularMarketTime: timestampIso(q.latest_time ?? q.time),
+    results.push({ symbol, regularMarketPrice: num(q.latest_price ?? q.close), previousClose: num(q.pre_close), change: num(q.change), changeRate: num(q.change_rate), regularMarketTime: timestampIso(q.latest_time ?? q.time),
       shortName: q.name ?? symbol, source: 'tiger', fetchedAt: r.fetchedAt, quoteCoverage: 'Nasdaq Basic; not consolidated NBBO' });
   }
   return results;
@@ -73,19 +132,39 @@ export async function tigerFundamentals({ symbol }) {
 
 export function normalizeTigerContract(c, { symbol, expiry, currentSpot, fetchedAt }) {
   const type = String(c.put_call).toLowerCase();
-  const bid = num(c.bid_price), ask = num(c.ask_price), iv = num(c.implied_vol);
+  const bid = num(c.bid_price), ask = num(c.ask_price);
   const strike = num(c.strike);
   const expiration = expiry || timestampIso(c.expiry)?.slice(0, 10);
   const timeYears = (Date.parse(`${expiration}T20:00:00Z`) - Date.now()) / (365 * 86400_000);
+  // Tiger often returns implied_vol = 0 for US options; derive it from the bid/ask mid instead.
+  let iv = num(c.implied_vol), ivSource = 'tiger';
+  if (!(iv > 0)) {
+    iv = bid > 0 && ask >= bid ? impliedVolatility({ type, spot: currentSpot, strike, timeYears, price: (bid + ask) / 2 }) ?? 0 : 0;
+    ivSource = iv > 0 ? 'derived-from-mid' : 'unavailable';
+  }
   return { contractSymbol: c.identifier, symbol, expiration, optionType: type, strike, bid, ask,
     bidSize: num(c.bid_size), askSize: num(c.ask_size), mark: bid > 0 && ask >= bid ? (bid + ask) / 2 : null,
-    lastPrice: num(c.latest_price), volume: num(c.volume), openInterest: num(c.open_interest), impliedVolatility: iv,
+    lastPrice: num(c.latest_price), volume: num(c.volume), openInterest: num(c.open_interest), impliedVolatility: iv, impliedVolatilitySource: ivSource,
     multiplier: num(c.multiplier, 100), exerciseStyle: 'american', source: 'tiger', sourceLabel: 'Tiger OpenAPI',
     hasRealBidAsk: bid > 0 && ask >= bid, isLive: bid > 0 && ask >= bid,
     // A trade timestamp is NOT a quote timestamp. Filled from depth below.
     quoteTimestamp: null, tradeTimestamp: timestampIso(c.last_timestamp), fetchedAt,
     delta: optionDelta({ type, spot: currentSpot, strike, timeYears, volatility: iv }),
     greeksSource: 'European reference model; excludes early exercise and discrete dividends' };
+}
+
+let depthDeniedUntil = 0;
+// Option depth is optional: Tiger sells no US option depth product, so it is off unless TIGER_OPTION_DEPTH=true.
+const depthEnabled = () => process.env.TIGER_OPTION_DEPTH === 'true';
+
+// Tiger US Option L1 carries live best bid/ask but no quote-event timestamp, and depth
+// (which has one) is not sold for US options. During the regular session only, a chain
+// fetched just now is as old as its fetch time, so that stands in for the quote time.
+async function usMarketTrading() {
+  try {
+    const r = await tigerRequest('/session', {}, 30_000);
+    return (r.data ?? []).some(m => m.market === 'US' && m.trading_status === 'TRADING');
+  } catch { return false; }
 }
 
 export async function tigerOptionChain({ symbol, expiration, expirationFrom, expirationTo, optionType = 'call', currentSpot = 0, limit = 60, strikeMin, strikeMax }) {
@@ -97,6 +176,7 @@ export async function tigerOptionChain({ symbol, expiration, expirationFrom, exp
   }
   const contracts = [];
   const warnings = [];
+  let depthWarned = false;
   for (const expiry of expiries.slice(0, 8)) {
     const r = await tigerRequest('/options/chain', { symbol, expiry }, 30_000);
     let rows = (r.data ?? []).filter(c => String(c.put_call).toLowerCase() === optionType)
@@ -107,7 +187,12 @@ export async function tigerOptionChain({ symbol, expiration, expirationFrom, exp
     try {
       const params = new URLSearchParams({ symbol });
       rows.forEach(c => params.append('contract', c.contractSymbol));
-      if (rows.length) {
+      if (!depthEnabled()) {
+        // Depth disabled: no request, no warning; fetch-time stamping below covers market hours.
+      } else if (rows.length && Date.now() < depthDeniedUntil) {
+        if (!depthWarned) warnings.push('Quote timestamps unavailable: Tiger option depth is not available for US options, so exchange quote times are unknown');
+        depthWarned = true;
+      } else if (rows.length) {
         const depth = (await tigerRequest('/options/depth', params, 10_000)).data;
         for (const c of rows) {
           const d = depth?.[c.contractSymbol] ?? (depth?.identifier === c.contractSymbol ? depth : null);
@@ -121,7 +206,18 @@ export async function tigerOptionChain({ symbol, expiration, expirationFrom, exp
           }
         }
       }
-    } catch (e) { warnings.push(`Quote timestamps unavailable: ${e.message}`); }
+    } catch (e) {
+      if (/permission denied/i.test(e.message)) depthDeniedUntil = Date.now() + 10 * 60_000;
+      if (!depthWarned) warnings.push(`Quote timestamps unavailable: ${e.message}`);
+      depthWarned = true;
+    }
+    if (rows.some(c => !c.quoteTimestamp && c.hasRealBidAsk) && await usMarketTrading()) {
+      for (const c of rows) if (!c.quoteTimestamp && c.hasRealBidAsk && timestampIso(r.fetchedAt)) {
+        c.quoteTimestamp = timestampIso(r.fetchedAt);
+        c.quoteTimestampSource = 'fetch-time';
+      }
+      if (!warnings.some(w => w.startsWith('Tiger L1 quotes'))) warnings.push('Tiger L1 quotes are stamped with fetch time (no exchange quote timestamp is available for US options)');
+    }
     contracts.push(...rows);
   }
   return { symbol, optionType, contracts: limit > 0 ? contracts.slice(0, limit) : contracts, source: 'tiger', warnings,

@@ -19,6 +19,19 @@ export function optionPrice({ type, spot, strike, timeYears, volatility, riskFre
   return type === 'put' ? k * normalCdf(-d2) - s * normalCdf(-d1) : s * normalCdf(d1) - k * normalCdf(d2);
 }
 
+// Bisection inversion of optionPrice; null when the price is outside no-arbitrage bounds.
+export function impliedVolatility({ type, spot, strike, timeYears, price, riskFreeRate = 0.0425, dividendYield = 0 }) {
+  if (![spot, strike, timeYears, price].every(v => Number.isFinite(v) && v > 0)) return null;
+  const at = volatility => optionPrice({ type, spot, strike, timeYears, volatility, riskFreeRate, dividendYield });
+  let lo = 0.01, hi = 5;
+  if (price < at(lo) || price > at(hi)) return null;
+  for (let i = 0; i < 60; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (at(mid) < price) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 export function optionDelta({ type, spot, strike, timeYears, volatility, riskFreeRate = 0.0425, dividendYield = 0 }) {
   if (![spot, strike, timeYears, volatility].every(v => Number.isFinite(v) && v > 0)) return null;
   const d1 = (Math.log(spot / strike) + (riskFreeRate - dividendYield + volatility ** 2 / 2) * timeYears) / (volatility * Math.sqrt(timeYears));

@@ -1,5 +1,13 @@
 import { createResearchStore } from "./researchStore.js";
 import { registerBuilderRoutes } from "./builder/service.js";
+import { scanPolymarketHedgeForSymbol } from "./polymarketScan.js";
+import { createJobStore } from "./asyncJobs.js";
+import { getTigerRateLimitState, withRateLimitWaiting } from "./providers/tiger.js";
+import {
+  describeAssetPolymarketStatus,
+  refreshPolymarketResolutions,
+  withResolvedPolymarketEvents
+} from "./polymarketResolver.js";
 import { createResearchService, registerResearchRoutes } from "./researchService.js";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -76,8 +84,29 @@ import {
   summarizeGptApiRequestLogs,
   touchUserApiKey,
   updatePaperOrder,
-  recordOptionShortlistObservations
+  recordOptionShortlistObservations,
+  listMarketTopics,
+  findMarketTopicByTitle,
+  createMarketTopic,
+  updateMarketTopic,
+  listAnalysisTaskDefinitions,
+  createAnalysisTaskDefinition,
+  updateAnalysisTaskDefinition,
+  deleteAnalysisTaskDefinition,
+  claimNextPendingTask,
+  completeAnalysisTask
 } from "./db.js";
+import { startAnalysisTaskScheduler } from "./analysisTaskScheduler.js";
+import {
+  CatalystError,
+  createCatalyst,
+  deleteCatalyst,
+  listCatalysts,
+  markCatalystsReviewed,
+  updateCatalyst
+} from "./catalystStore.js";
+import { startIvRefreshScheduler } from "./ivRefreshJob.js";
+import { tigerEnabled } from "./providers/tiger.js";
 import {
   initializeDashboardLayoutsDirectory,
   listDashboardLayouts,
@@ -85,7 +114,16 @@ import {
   saveDashboardLayout
 } from "./dashboardLayouts.js";
 import {
+  getMonitoredStocks,
+  addMonitoredStock,
+  removeMonitoredStock,
+  getUserMonitoredStockLimit
+} from "./monitoredStocksApi.js";
+import { setMaxMonitoredStocks, getMaxMonitoredStocks } from "./db.js";
+import {
+  canonicalPolymarketEventUrl,
   fetchPolymarketMarketsFromEventPage,
+  polymarketEventDay,
   isTradablePolymarketMarket,
   searchPolymarketMarkets
 } from "./providers/polymarket.js";
@@ -94,6 +132,7 @@ import {
   fetchEconomicCalendar
 } from "./providers/tradingViewCalendars.js";
 import { scanTradingViewStrategyFinder } from "./providers/tradingViewStrategyFinder.js";
+import { HEDGE_SCAN_IDS, HEDGE_SCAN_STRATEGIES, isVanillaTradingViewRow, summarizeRows } from "../shared/hedgeScan.js";
 import { fetchOptionChain, fetchQuotes } from "./providers/marketData.js";
 import {
   blackScholesCall,
@@ -631,6 +670,7 @@ async function requireApiKey(request, response, next) {
 }
 
 async function buildThresholdHedgeGptResults(query) {
+  await refreshPolymarketResolutions(getStrategyAssetContext().settingsAssets).catch(() => {});
   const { finderAssets } = getStrategyAssetContext();
   const matchingAssets = finderAssets.filter((asset) => {
     const symbolMatches =
@@ -640,7 +680,7 @@ async function buildThresholdHedgeGptResults(query) {
         .trim()
         .toUpperCase()
         .endsWith(`:${query.ticker}`);
-    return symbolMatches && String(asset?.polymarketEventUrl ?? "").trim();
+    return symbolMatches && (asset?.polymarketEventUrls?.length > 0 || String(asset?.polymarketEventUrl ?? "").trim());
   });
 
   if (!matchingAssets.length) {
@@ -866,14 +906,17 @@ app.use((request, response, next) => {
 });
 
 app.get("/api/admin/users", requireAdmin, (_request, response) => {
-  const users = listUsers().map((user) => ({
-    id: user.id,
-    username: user.username,
-    role: user.role,
-    disabled: Boolean(user.disabled),
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt
-  }));
+  const users = listUsers().map((user) => {
+    return {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      disabled: Boolean(user.disabled),
+      maxMonitoredStocks: getMaxMonitoredStocks(user.id),
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt
+    };
+  });
 
   response.json({ users });
 });
@@ -883,6 +926,7 @@ app.post("/api/admin/users", requireAdmin, (request, response) => {
   const password = String(request.body?.password ?? "");
   const roleInput = String(request.body?.role ?? "user").trim().toLowerCase();
   const role = roleInput === "admin" ? "admin" : "user";
+  const maxMonitoredStocks = Number(request.body?.maxMonitoredStocks ?? 5);
 
   if (!username) {
     response.status(400).json({ error: "username is required" });
@@ -903,6 +947,10 @@ app.post("/api/admin/users", requireAdmin, (request, response) => {
       disabled: false
     });
 
+    if (maxMonitoredStocks > 0) {
+      setMaxMonitoredStocks(created.id, Math.max(1, Math.min(20, maxMonitoredStocks)));
+    }
+
     response.status(201).json({
       ok: true,
       user: {
@@ -910,6 +958,7 @@ app.post("/api/admin/users", requireAdmin, (request, response) => {
         username: created.username,
         role: created.role,
         disabled: Boolean(created.disabled),
+        maxMonitoredStocks: Math.max(1, Math.min(20, maxMonitoredStocks)),
         createdAt: created.createdAt,
         updatedAt: created.updatedAt
       }
@@ -920,6 +969,39 @@ app.post("/api/admin/users", requireAdmin, (request, response) => {
       return;
     }
 
+    response.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/admin/users/:userId/monitored-stocks-limit", requireAdmin, (request, response) => {
+  const userId = String(request.params.userId ?? "").trim();
+  const maxMonitoredStocks = Number(request.body?.maxMonitoredStocks ?? 5);
+
+  if (!userId) {
+    response.status(400).json({ error: "userId is required" });
+    return;
+  }
+
+  if (!Number.isFinite(maxMonitoredStocks) || maxMonitoredStocks < 1 || maxMonitoredStocks > 20) {
+    response.status(400).json({ error: "maxMonitoredStocks must be between 1 and 20" });
+    return;
+  }
+
+  try {
+    const user = listUsers().find((item) => item.id === userId);
+    if (!user) {
+      response.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    setMaxMonitoredStocks(userId, maxMonitoredStocks);
+
+    response.json({
+      ok: true,
+      userId,
+      maxMonitoredStocks
+    });
+  } catch (error) {
     response.status(400).json({ error: error.message });
   }
 });
@@ -1159,6 +1241,14 @@ function shouldRunBackgroundCalendarRefresh() {
 
 function shouldRunBackgroundPaperHeartbeat() {
   return runtimeConfig.enableHttp && (shouldStartBackgroundJobs() || envFlagEnabled("HEDGEHUB_BACKGROUND_PAPER_HEARTBEAT", false));
+}
+
+function shouldRunAnalysisTaskScheduler() {
+  const dbType = String(process.env.DB_TYPE ?? "sqlite").trim().toLowerCase();
+  return (
+    dbType === "postgres" &&
+    (shouldStartBackgroundJobs() || envFlagEnabled("HEDGEHUB_BACKGROUND_ANALYSIS_TASKS", false))
+  );
 }
 
 function shouldRunBackgroundTwsSync() {
@@ -3532,8 +3622,9 @@ function getStrategyAssetContext() {
 
   return {
     settingsAssets,
-    finderAssets,
-    screenerAssets,
+    // Auto-resolved (or manually overridden) Polymarket events, read from the resolver cache.
+    finderAssets: finderAssets.map(withResolvedPolymarketEvents),
+    screenerAssets: screenerAssets.map(withResolvedPolymarketEvents),
     quoteWatchlist: buildStrategyQuoteWatchlist(settingsAssets)
   };
 }
@@ -3584,7 +3675,7 @@ function startOfMonthIso(dateIso) {
 
 function buildAssetOptionSearchWindow(assetMarkets, fallbackExpiry) {
   const expiries = assetMarkets
-    .map((market) => market.endDate?.slice(0, 10))
+    .map((market) => polymarketEventDay(market.endDate))
     .filter(Boolean);
   const referenceDates = expiries.length ? expiries : [fallbackExpiry];
 
@@ -3642,7 +3733,12 @@ function refreshLiveState(options = {}) {
 }
 async function refreshLiveStateOnce({ includeOptions = true } = {}) {
   const warnings = [];
-  const { finderAssets, screenerAssets, quoteWatchlist } = getStrategyAssetContext();
+  const polymarketIssues = [];
+  // Event discovery runs alongside the quote fetch instead of delaying it.
+  const resolutionPromise = refreshPolymarketResolutions(getStrategyAssetContext().settingsAssets).catch((error) => {
+    polymarketIssues.push(`Polymarket event discovery failed: ${error.message}`);
+  });
+  let { finderAssets, screenerAssets, quoteWatchlist } = getStrategyAssetContext();
 
   let quotes = liveState.quotes;
   try {
@@ -3677,12 +3773,11 @@ async function refreshLiveStateOnce({ includeOptions = true } = {}) {
 
   let polymarketMarkets = liveState.polymarketMarkets;
   let polymarketValuationMarkets = liveState.polymarketValuationMarkets;
+  await resolutionPromise;
+  ({ finderAssets, screenerAssets } = getStrategyAssetContext());
   try {
     const queries = deduplicateBy(
-      [
-        defaultStrategyConfig.yesLeg.query,
-        ...collectStrategyPolymarketQueries([...finderAssets, ...screenerAssets])
-      ],
+      collectStrategyPolymarketQueries([...finderAssets, ...screenerAssets]),
       (value) => value
     ).filter(Boolean);
 
@@ -3699,7 +3794,6 @@ async function refreshLiveStateOnce({ includeOptions = true } = {}) {
 
     const exactEventUrls = deduplicateBy(
       [
-        ...fallbackPolymarketMarkets.map((market) => market.url),
         ...collectStrategyPolymarketEventUrls([...finderAssets, ...screenerAssets]),
         ...(shouldRunBackgroundPaperTasks()
           ? listPaperOrders().map((order) => order.position?.polymarketUrl ?? "")
@@ -3711,6 +3805,11 @@ async function refreshLiveStateOnce({ includeOptions = true } = {}) {
     const exactEventResults = await Promise.allSettled(
       exactEventUrls.map((url) => fetchPolymarketMarketsFromEventPage(url, { tradableOnly: false }))
     );
+    exactEventResults.forEach((result, index) => {
+      if (result.status === "rejected") {
+        polymarketIssues.push(`Polymarket event ${exactEventUrls[index]}: ${result.reason?.message ?? result.reason}`);
+      }
+    });
     const exactEventMarkets = exactEventResults.flatMap((result) =>
       result.status === "fulfilled" ? result.value : []
     );
@@ -3768,6 +3867,10 @@ async function refreshLiveStateOnce({ includeOptions = true } = {}) {
       const optionResults = await Promise.allSettled(
         optionRefreshAssets.map(async (asset) => {
           const assetMarkets = getResolvedStrategyMarketsForAsset(asset, polymarketMarkets).slice(0, 8);
+          if (!assetMarkets.length) {
+            return [];
+          }
+
           const leadMarket = assetMarkets[0] ?? null;
           const optionSpot = Number(quoteMap.get(asset.optionSymbol)?.regularMarketPrice ?? 0);
           const underlyingSpot = Number(quoteMap.get(asset.underlyingSymbol)?.regularMarketPrice ?? optionSpot ?? 0);
@@ -3795,16 +3898,13 @@ async function refreshLiveStateOnce({ includeOptions = true } = {}) {
               return Number.isFinite(strikeHint) && strikeHint > 0 ? Math.max(Math.round(strikeHint), 1) : null;
             })
             .filter((value) => Number.isFinite(value) && value > 0);
-          const targetStrike =
-            asset.optionSymbol === defaultStrategyConfig.optionLeg.symbol
-              ? defaultStrategyConfig.optionLeg.strike
-              : Math.max(
-                  Math.round((targetStrikes[0] ?? leadStrikeHint ?? underlyingSpot * ratio ?? optionSpot ?? 1) || 1),
-                  1
-                );
+          const targetStrike = Math.max(
+            Math.round((targetStrikes[0] ?? leadStrikeHint ?? underlyingSpot * ratio ?? optionSpot ?? 1) || 1),
+            1
+          );
           const strikeFloor = Math.max(Math.min(...targetStrikes, targetStrike) * 0.85, 1);
           const strikeCeiling = Math.max(...targetStrikes, targetStrike) * 1.15;
-          const desiredExpiry = leadMarket?.endDate?.slice(0, 10) || defaultStrategyConfig.optionLeg.expiry;
+          const desiredExpiry = polymarketEventDay(leadMarket?.endDate) || addDaysIso(new Date().toISOString().slice(0, 10), 30);
           const searchWindow = buildAssetOptionSearchWindow(assetMarkets, desiredExpiry);
 
           const [callsPayload, putsPayload] = await Promise.all([
@@ -3877,6 +3977,8 @@ async function refreshLiveStateOnce({ includeOptions = true } = {}) {
   liveState.lastAttempt = new Date().toISOString();
   if (!warnings.length) liveState.lastUpdated = liveState.lastAttempt;
   liveState.warnings = warnings;
+  // Event problems are shown per asset in Strategy settings; they must not freeze lastUpdated for everything else.
+  liveState.polymarketIssues = polymarketIssues;
   syncPaperOptionStreamSubscriptions();
 
   if (shouldRunBackgroundPaperTasks()) {
@@ -3923,12 +4025,16 @@ async function buildStrategiesBaseResponse() {
     const response = {
       lastUpdated: liveState.lastUpdated,
       warnings: liveState.warnings,
+      polymarketIssues: liveState.polymarketIssues ?? [],
       strategies: getStrategies(),
       primaryStrategy: buildSlimPrimaryStrategy(strategySummary),
       v2Screener,
       strategySettings: {
         compareModes: STRATEGY_COMPARE_MODES,
-        assets: settingsAssets
+        assets: settingsAssets.map((asset) => ({
+          ...asset,
+          polymarketStatus: describeAssetPolymarketStatus(asset)
+        }))
       }
     };
 
@@ -4036,6 +4142,13 @@ app.get("/api/dashboard", async (request, response) => {
   });
 });
 
+app.get("/api/macro-dashboard", async (_request, response) => {
+  await ensureInitialLiveStateReady();
+  response.json({
+    macroDashboard: liveState.macroDashboard ?? refreshMacroDashboard()
+  });
+});
+
 app.get("/api/dashboards", (_request, response) => {
   response.json({
     dashboards: listDashboardLayouts()
@@ -4080,12 +4193,16 @@ app.post("/api/dashboards", (request, response) => {
   }
 });
 
-app.get("/api/strategy-assets", (_request, response) => {
+app.get("/api/strategy-assets", async (_request, response) => {
   const { settingsAssets } = getStrategyAssetContext();
+  await refreshPolymarketResolutions(settingsAssets).catch(() => {});
   response.json({
     generatedAt: new Date().toISOString(),
     compareModes: STRATEGY_COMPARE_MODES,
-    assets: settingsAssets
+    assets: settingsAssets.map((asset) => ({
+      ...asset,
+      polymarketStatus: describeAssetPolymarketStatus(asset)
+    }))
   });
 });
 
@@ -4101,6 +4218,13 @@ app.put("/api/strategy-assets/:assetId", async (request, response) => {
   try {
     const { settingsAssets } = getStrategyAssetContext();
     const currentAsset = settingsAssets.find((asset) => asset.id === assetId) ?? null;
+    const submittedUrl = String(request.body?.polymarketEventUrl ?? "").trim();
+    if (submittedUrl && !canonicalPolymarketEventUrl(submittedUrl)) {
+      response.status(400).json({
+        error: "Event URL must look like https://polymarket.com/event/<slug>. Leave it empty to resolve the current event automatically."
+      });
+      return;
+    }
     const normalizedAsset = normalizeStrategyAssetMapping(
       {
         ...(request.body ?? {}),
@@ -4676,6 +4800,81 @@ app.delete("/api/setup-watchlist/:id", (request, response) => {
     deleted: true,
     watchlist: listSetupWatchlist(userId)
   });
+});
+
+// Monitored stocks endpoints
+app.get("/api/monitored-stocks", async (request, response) => {
+  try {
+    const data = await getMonitoredStocks(request.user.id);
+    response.json(data);
+  } catch (error) {
+    console.error("Error fetching monitored stocks:", error);
+    response.status(500).json({
+      error: error.message || "Failed to fetch monitored stocks"
+    });
+  }
+});
+
+app.post("/api/monitored-stocks/:symbol", async (request, response) => {
+  const symbol = String(request.params.symbol ?? "").trim().toUpperCase();
+  if (!symbol) {
+    response.status(400).json({
+      error: "symbol is required"
+    });
+    return;
+  }
+
+  try {
+    const result = await addMonitoredStock(request.user.id, symbol);
+    const data = await getMonitoredStocks(request.user.id);
+    response.status(201).json({
+      ok: true,
+      added: result,
+      ...data
+    });
+  } catch (error) {
+    console.error("Error adding monitored stock:", error);
+    response.status(400).json({
+      error: error.message || "Failed to add monitored stock"
+    });
+  }
+});
+
+app.delete("/api/monitored-stocks/:symbol", async (request, response) => {
+  const symbol = String(request.params.symbol ?? "").trim().toUpperCase();
+  if (!symbol) {
+    response.status(400).json({
+      error: "symbol is required"
+    });
+    return;
+  }
+
+  try {
+    const result = await removeMonitoredStock(request.user.id, symbol);
+    const data = await getMonitoredStocks(request.user.id);
+    response.json({
+      ok: true,
+      removed: result,
+      ...data
+    });
+  } catch (error) {
+    console.error("Error removing monitored stock:", error);
+    response.status(400).json({
+      error: error.message || "Failed to remove monitored stock"
+    });
+  }
+});
+
+app.get("/api/monitored-stocks/limit/info", async (request, response) => {
+  try {
+    const data = await getUserMonitoredStockLimit(request.user.id);
+    response.json(data);
+  } catch (error) {
+    console.error("Error fetching monitored stock limit:", error);
+    response.status(500).json({
+      error: error.message || "Failed to fetch monitored stock limit"
+    });
+  }
 });
 
 app.get("/api/scanners/:scannerType/context", (request, response) => {
@@ -5263,6 +5462,156 @@ app.delete("/api/strategies/strategy-4/tickers/:symbol", (request, response) => 
   });
 });
 
+const hedgeScanJobs = createJobStore();
+
+// Starts the scan in the background; the UI polls /api/hedge-scan/jobs/:id. A scan that has to wait out the
+// Tiger rate limit keeps running (and says so) instead of failing, so nobody has to click Scan again.
+app.post("/api/hedge-scan/jobs", (request, response) => {
+  try {
+    const body = request.body ?? {};
+    const job = hedgeScanJobs.start(request.user.id, () => withRateLimitWaiting(() => runHedgeScan(body)));
+    response.status(202).json({ id: job.id, status: job.status });
+  } catch (error) {
+    response.status(error.status ?? 500).json({ error: error.message });
+  }
+});
+
+app.get("/api/hedge-scan/jobs/:id", (request, response) => {
+  const job = hedgeScanJobs.get(request.user.id, request.params.id);
+  if (!job) {
+    response.status(404).json({ error: "Scan not found" });
+    return;
+  }
+
+  response.json({
+    id: job.id,
+    status: job.status,
+    error: job.error,
+    result: job.status === "completed" ? job.result : null,
+    waitingUntil: job.status === "running" ? getTigerRateLimitState().waitingUntil : null
+  });
+});
+
+app.post("/api/hedge-scan", async (request, response) => {
+  response.json(await runHedgeScan(request.body ?? {}));
+});
+
+async function runHedgeScan(body) {
+  const requested = [...new Set(Array.isArray(body?.strategies) ? body.strategies : [])].filter((id) =>
+    HEDGE_SCAN_IDS.includes(id)
+  );
+  const symbols = (Array.isArray(body?.symbols) ? body.symbols : [])
+    .map((value) => String(value ?? "").trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, 20);
+  const primarySymbol = symbols[0] ?? "SPY";
+  const force = body?.force === true;
+  const planned = new Set(HEDGE_SCAN_STRATEGIES.filter((s) => s.status === "planned").map((s) => s.id));
+  const results = {};
+  const finish = (id, rows, extra = {}) => {
+    results[id] = { status: "ok", generatedAt: new Date().toISOString(), ...summarizeRows(rows), ...extra };
+  };
+  const fail = (id, error) => {
+    results[id] = { status: "error", generatedAt: new Date().toISOString(), count: 0, top: [], error: error.message };
+  };
+
+  for (const id of requested) {
+    if (planned.has(id)) {
+      results[id] = { status: "planned", count: 0, top: [] };
+    }
+  }
+  const active = requested.filter((id) => !planned.has(id));
+  let strategiesBase = null;
+  const getBase = async () => {
+    strategiesBase ??= await buildStrategiesBaseResponse();
+    return strategiesBase;
+  };
+  let tradingViewRows = null;
+  const getTradingViewRows = async () => {
+    tradingViewRows ??= (await scanTradingViewStrategyFinder({ symbol: primarySymbol })).rows ?? [];
+    return tradingViewRows;
+  };
+  const runners = {
+    vanilla: async () =>
+      finish("vanilla", (await getTradingViewRows()).filter(isVanillaTradingViewRow), { symbol: primarySymbol }),
+    polymarket_hedge: async () => {
+      // With tickers: scan each one on demand (current monthly Polymarket event + listed options).
+      if (!symbols.length) {
+        finish("polymarket_hedge", (await getBase()).primaryStrategy?.finder?.rows);
+        return;
+      }
+
+      const scans = [];
+      for (const symbol of symbols.slice(0, 5)) {
+        scans.push(await scanPolymarketHedgeForSymbol(symbol, { force }));
+      }
+      // Earnings and IV rank, so these rows fill the same columns as the options table.
+      const today = new Date().toISOString().slice(0, 10);
+      for (const scan of scans) {
+        let nextEarnings = null;
+        try {
+          const coverage = (await researchService.earningsCoverage([scan.symbol]))?.[scan.symbol];
+          nextEarnings = coverage?.events?.find((event) => event.date >= today)?.date ?? null;
+        } catch {}
+        let ivRank = null;
+        try {
+          const value = Number(getLatestIvRankDaily(scan.symbol, today)?.ivRank52w);
+          ivRank = Number.isFinite(value) ? value : null;
+        } catch {}
+        for (const row of scan.rows) {
+          row.ivRank = ivRank;
+          row.earnings = nextEarnings ? (nextEarnings <= row.optionExpiry ? "Before expiry" : "Clear") : "Unknown";
+        }
+      }
+      const rows = scans.flatMap((scan) => scan.rows);
+      finish(
+        "polymarket_hedge",
+        rows.map((row) => ({ id: row.id, assetLabel: `${row.symbol} · ${row.question}`, strategyType: row.strategyType })),
+        {
+          symbols: scans.map((scan) => scan.symbol),
+          rows,
+          notes: scans.flatMap((scan) => scan.notes ?? []),
+          total: scans.reduce((sum, scan) => sum + (scan.total ?? scan.rows.length), 0)
+        }
+      );
+    },
+    probability_mismatch: async () => finish("probability_mismatch", (await getBase()).v2Screener?.rows),
+    volume_crash: async () => {
+      await refreshCalendarState(force);
+      const payload = await buildVolCrushEarningsScan({
+        companyEvents: liveState.companyEvents?.events ?? [],
+        fetchQuotes,
+        fetchOptionChain,
+        limit: 12
+      });
+      finish("volume_crash", payload.rows);
+    },
+    delta_hedge: async () => {
+      const payload = await buildStockDeltaHedgeScan({
+        fetchQuotes,
+        fetchOptionChain,
+        stockUniverse: getDeltaHedgeScannerUniverse(),
+        limit: 25
+      });
+      finish("delta_hedge", payload.rows);
+    },
+    cash_covered_put: async () => {
+      await refreshCalendarState(force);
+      const payload = await buildCoveredIncomeScan({
+        input: { symbols: symbols.length ? symbols : [primarySymbol], strategyModes: ["cash_secured_put"] },
+        fetchQuotes,
+        fetchOptionChain,
+        companyEvents: liveState.companyEvents?.events ?? [],
+        earningsCoverageBySymbol: await researchService.earningsCoverage(symbols.length ? symbols : [primarySymbol])
+      });
+      finish("cash_covered_put", payload.rows);
+    }
+  };
+
+  await Promise.all(active.map((id) => runners[id]().catch((error) => fail(id, error))));
+  return { generatedAt: new Date().toISOString(), results };
+}
+
 app.post("/api/strategies/strategy-5/scan", async (request, response) => {
   const force = request.body?.force === true;
 
@@ -5433,6 +5782,301 @@ app.post("/api/gpt/strategy-query", requireApiKey, async (request, response) => 
     });
     throw error;
   }
+});
+
+function buildGptUsageEntry(request) {
+  return {
+    id: crypto.randomUUID(),
+    method: request.method,
+    path: request.originalUrl || request.url,
+    ipAddress: request.ip,
+    userId: request.user?.id ?? null,
+    username: request.user?.username ?? null,
+    apiKeyId: request.apiKey?.id ?? null,
+    apiKeyLabel: request.apiKey?.label ?? null,
+    apiKeyPrefix: request.apiKey?.tokenPrefix ?? null,
+    authStatus: "authorized",
+    requestBody: createSafeGptRequestBody(request.body)
+  };
+}
+
+function sanitizeMarketTopicInput(body = {}) {
+  const title = String(body.title ?? "").trim();
+  const weight = Number(body.weight);
+  const bullishScore = Number(body.bullishScore);
+  const bearishScore = Number(body.bearishScore);
+  const summary = String(body.summary ?? "").trim();
+
+  if (!title) throw new Error("title is required");
+  if (!Number.isFinite(weight) || weight < 1 || weight > 100) throw new Error("weight must be between 1 and 100");
+  if (!Number.isFinite(bullishScore) || bullishScore < 0 || bullishScore > 100) {
+    throw new Error("bullishScore must be between 0 and 100");
+  }
+  if (!Number.isFinite(bearishScore) || bearishScore < 0 || bearishScore > 100) {
+    throw new Error("bearishScore must be between 0 and 100");
+  }
+  if (!summary) throw new Error("summary is required");
+
+  return { title, weight, bullishScore, bearishScore, summary };
+}
+
+app.get("/api/gpt/market-topics", requireApiKey, (request, response) => {
+  const usageEntry = buildGptUsageEntry(request);
+  try {
+    const topics = listMarketTopics();
+    recordGptApiUsage({ ...usageEntry, statusCode: 200, responseTimeMs: getRequestDurationMs(request) });
+    response.json({
+      requestId: crypto.randomUUID(),
+      generatedAt: new Date().toISOString(),
+      meta: { authenticatedUserId: request.user.id, authenticatedUsername: request.user.username },
+      results: { topics }
+    });
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/gpt/market-topics", requireApiKey, (request, response) => {
+  const usageEntry = buildGptUsageEntry(request);
+  let input;
+  try {
+    input = sanitizeMarketTopicInput(request.body ?? {});
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 400,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(400).json({ error: error.message });
+    return;
+  }
+
+  try {
+    const existing = findMarketTopicByTitle(input.title);
+    const topic = existing ? updateMarketTopic(existing.id, input) : createMarketTopic(input);
+    recordGptApiUsage({ ...usageEntry, statusCode: existing ? 200 : 201, responseTimeMs: getRequestDurationMs(request) });
+    response.status(existing ? 200 : 201).json({
+      requestId: crypto.randomUUID(),
+      generatedAt: new Date().toISOString(),
+      meta: { authenticatedUserId: request.user.id, authenticatedUsername: request.user.username, created: !existing },
+      results: { topic }
+    });
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/gpt/analysis-tasks/next", requireApiKey, (request, response) => {
+  const usageEntry = buildGptUsageEntry(request);
+  try {
+    const task = claimNextPendingTask();
+    recordGptApiUsage({ ...usageEntry, statusCode: 200, responseTimeMs: getRequestDurationMs(request) });
+    response.json({
+      requestId: crypto.randomUUID(),
+      generatedAt: new Date().toISOString(),
+      meta: { authenticatedUserId: request.user.id, authenticatedUsername: request.user.username },
+      results: { task: task ?? null }
+    });
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/gpt/analysis-tasks/:id/complete", requireApiKey, (request, response) => {
+  const usageEntry = buildGptUsageEntry(request);
+  const id = Number(request.params.id);
+  const result = String(request.body?.result ?? "").trim();
+
+  if (!Number.isFinite(id)) {
+    response.status(400).json({ error: "id must be a number" });
+    return;
+  }
+  if (!result) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 400,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: "result is required"
+    });
+    response.status(400).json({ error: "result is required" });
+    return;
+  }
+
+  try {
+    const task = completeAnalysisTask(id, result);
+    if (!task) {
+      recordGptApiUsage({
+        ...usageEntry,
+        statusCode: 404,
+        responseTimeMs: getRequestDurationMs(request),
+        errorMessage: "Task not found"
+      });
+      response.status(404).json({ error: "Task not found" });
+      return;
+    }
+
+    recordGptApiUsage({ ...usageEntry, statusCode: 200, responseTimeMs: getRequestDurationMs(request) });
+    response.json({
+      requestId: crypto.randomUUID(),
+      generatedAt: new Date().toISOString(),
+      meta: { authenticatedUserId: request.user.id, authenticatedUsername: request.user.username },
+      results: { task }
+    });
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/admin/analysis-task-definitions", requireAdmin, (_request, response) => {
+  response.json({ definitions: listAnalysisTaskDefinitions() });
+});
+
+app.post("/api/admin/analysis-task-definitions", requireAdmin, (request, response) => {
+  const prompt = String(request.body?.prompt ?? "").trim();
+  const topicId = request.body?.topicId != null ? Number(request.body.topicId) : null;
+  const cadence = request.body?.cadence ? String(request.body.cadence).trim().toLowerCase() : null;
+  const source = String(request.body?.source ?? "user_requested").trim();
+
+  if (!prompt) {
+    response.status(400).json({ error: "prompt is required" });
+    return;
+  }
+  if (cadence && !["hourly", "daily", "weekly", "monthly"].includes(cadence)) {
+    response.status(400).json({ error: "cadence must be one of hourly, daily, weekly, monthly" });
+    return;
+  }
+
+  try {
+    const definition = createAnalysisTaskDefinition({ topicId, prompt, source, cadence, active: true });
+    response.status(201).json({ ok: true, definition });
+  } catch (error) {
+    response.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/admin/analysis-task-definitions/:id", requireAdmin, (request, response) => {
+  const id = Number(request.params.id);
+  if (!Number.isFinite(id)) {
+    response.status(400).json({ error: "id must be a number" });
+    return;
+  }
+
+  const cadence = request.body?.cadence !== undefined
+    ? (request.body.cadence ? String(request.body.cadence).trim().toLowerCase() : null)
+    : undefined;
+  if (cadence && !["hourly", "daily", "weekly", "monthly"].includes(cadence)) {
+    response.status(400).json({ error: "cadence must be one of hourly, daily, weekly, monthly" });
+    return;
+  }
+
+  try {
+    const definition = updateAnalysisTaskDefinition(id, {
+      prompt: request.body?.prompt,
+      cadence,
+      active: request.body?.active,
+      nextRunAt: request.body?.nextRunAt
+    });
+    if (!definition) {
+      response.status(404).json({ error: "Definition not found" });
+      return;
+    }
+    response.json({ ok: true, definition });
+  } catch (error) {
+    response.status(400).json({ error: error.message });
+  }
+});
+
+app.delete("/api/admin/analysis-task-definitions/:id", requireAdmin, (request, response) => {
+  const id = Number(request.params.id);
+  if (!Number.isFinite(id)) {
+    response.status(400).json({ error: "id must be a number" });
+    return;
+  }
+
+  const deleted = deleteAnalysisTaskDefinition(id);
+  if (!deleted) {
+    response.status(404).json({ error: "Definition not found" });
+    return;
+  }
+  response.json({ ok: true });
+});
+
+// Curated catalyst calendar (product launches, regulatory dates, ...) consumed by entry research and the Builder.
+function sendCatalystError(response, error) {
+  if (error instanceof CatalystError) {
+    response.status(error.status).json({ error: error.message });
+    return;
+  }
+  response.status(500).json({ error: error.message });
+}
+
+app.get("/api/admin/catalysts", requireAdmin, async (_request, response) => {
+  try {
+    response.json(await listCatalysts());
+  } catch (error) {
+    sendCatalystError(response, error);
+  }
+});
+
+app.post("/api/admin/catalysts", requireAdmin, async (request, response) => {
+  try {
+    response.status(201).json({ ok: true, ...(await createCatalyst(request.body ?? {})) });
+  } catch (error) {
+    sendCatalystError(response, error);
+  }
+});
+
+app.post("/api/admin/catalysts/review", requireAdmin, async (_request, response) => {
+  try {
+    response.json({ ok: true, ...(await markCatalystsReviewed()) });
+  } catch (error) {
+    sendCatalystError(response, error);
+  }
+});
+
+app.put("/api/admin/catalysts/:id", requireAdmin, async (request, response) => {
+  try {
+    response.json({ ok: true, ...(await updateCatalyst(request.params.id, request.body ?? {})) });
+  } catch (error) {
+    sendCatalystError(response, error);
+  }
+});
+
+app.delete("/api/admin/catalysts/:id", requireAdmin, async (request, response) => {
+  try {
+    response.json({ ok: true, ...(await deleteCatalyst(request.params.id)) });
+  } catch (error) {
+    sendCatalystError(response, error);
+  }
+});
+
+app.get("/api/admin/market-topics", requireAdmin, (_request, response) => {
+  response.json({ topics: listMarketTopics() });
 });
 
 app.get("/api/market-data", requireApiKey, async (request, response) => {
@@ -6705,6 +7349,14 @@ export function startBackgroundJobs() {
     }
   }, EVENT_LOOP_MONITOR_INTERVAL_MS);
 
+  if (shouldRunAnalysisTaskScheduler()) {
+    startAnalysisTaskScheduler();
+  }
+
+  if (tigerEnabled() && (shouldStartBackgroundJobs() || envFlagEnabled("HEDGEHUB_BACKGROUND_IV_REFRESH", false))) {
+    startIvRefreshScheduler();
+  }
+
   if (shouldRunBackgroundMarketRefresh()) {
     initialLiveStateReadyPromise = refreshLiveState({ includeOptions: true })
       .catch((error) => {
@@ -6844,7 +7496,8 @@ function shouldBootBackgroundJobs() {
     shouldRunBackgroundCalendarRefresh() ||
     shouldRunBackgroundPaperHeartbeat() ||
     shouldRunBackgroundIbkrSync() ||
-    shouldRunBackgroundTwsSync()
+    shouldRunBackgroundTwsSync() ||
+    shouldRunAnalysisTaskScheduler()
   );
 }
 

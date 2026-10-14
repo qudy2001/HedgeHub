@@ -22,6 +22,7 @@ function buildDraft(asset = null, compareModes = ["price"]) {
     conversionFallback: asset?.conversionFallback ?? 1,
     fallbackVolatility: asset?.fallbackVolatility ?? "",
     polymarketEventUrl: asset?.polymarketEventUrl ?? "",
+    polymarketStatus: asset?.polymarketStatus ?? null,
     polymarketQueriesText: toQueryText(asset?.polymarketQueries),
     compareMode: asset?.compareMode ?? compareModes[0] ?? "price",
     optionQuoteProvider: asset?.optionQuoteProvider ?? "stooq",
@@ -101,6 +102,49 @@ function normalizeDraftForSave(draft) {
   };
 }
 
+function formatEventEnd(value) {
+  const time = Date.parse(value ?? "");
+  // Polymarket resolves on US Eastern time; show that day, not the viewer's local day.
+  return Number.isFinite(time)
+    ? new Date(time - 60_000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "America/New_York" })
+    : "—";
+}
+
+function PolymarketStatus({ status, overrideUrl }) {
+  const overriding = Boolean(String(overrideUrl ?? "").trim());
+  const events = status?.events ?? [];
+  let tone = "warn";
+  let lines;
+
+  if (overriding) {
+    tone = "info";
+    lines = [
+      status?.mode === "override" && status.reason
+        ? status.reason
+        : "Manual override: this asset is locked to the URL above. Clear the field and save to switch back to automatic."
+    ];
+  } else if (status?.mode === "auto" && events.length) {
+    tone = status.stale || status.reason ? "warn" : "ok";
+    lines = events.map(
+      (event) =>
+        `Auto: ${event.title} · ${event.tradableCount ?? "?"} tradable of ${event.marketCount ?? "?"} markets · resolves ${formatEventEnd(event.endDate)}`
+    );
+    if (status.reason) {
+      lines.push(status.reason);
+    }
+  } else {
+    lines = [status?.reason ?? "Waiting for the first Polymarket refresh (runs automatically every few minutes)."];
+  }
+
+  return (
+    <div className={`strategy-settings__wide strategy-settings__poly-status strategy-settings__poly-status--${tone}`}>
+      {lines.map((line) => (
+        <div key={line}>{line}</div>
+      ))}
+    </div>
+  );
+}
+
 function AssetCard({
   title,
   draft,
@@ -169,15 +213,16 @@ function AssetCard({
           </select>
         </label>
         <label>
-          <span>Event URL</span>
+          <span>Event URL (optional override)</span>
           <input
             value={draft.polymarketEventUrl}
             onChange={(event) => onChange("polymarketEventUrl", event.target.value)}
-            placeholder="https://polymarket.com/event/..."
+            placeholder="Leave empty to resolve the current event automatically"
           />
         </label>
+        <PolymarketStatus status={draft.polymarketStatus} overrideUrl={draft.polymarketEventUrl} />
         <label className="strategy-settings__wide">
-          <span>Search queries</span>
+          <span>Search queries (only used when no event is resolved)</span>
           <textarea
             rows="3"
             value={draft.polymarketQueriesText}

@@ -14,7 +14,9 @@ export default function StrategySettingsWorkspace({
 }) {
   const strategySettingsAssets = strategyPayload?.strategySettings?.assets ?? [];
   const strategyCompareModes = strategyPayload?.strategySettings?.compareModes ?? ["price"];
-  const exactEventCount = strategySettingsAssets.filter((asset) => String(asset?.polymarketEventUrl ?? "").trim()).length;
+  const exactEventCount = strategySettingsAssets.filter(
+    (asset) => String(asset?.polymarketEventUrl ?? "").trim() || asset?.polymarketStatus?.mode === "auto"
+  ).length;
   const customAssetCount = strategySettingsAssets.filter((asset) => asset?.isCustom === true).length;
   const finderEnabledCount = strategySettingsAssets.filter((asset) => asset?.finderEnabled !== false).length;
   const screenerEnabledCount = strategySettingsAssets.filter((asset) => asset?.screenerEnabled !== false).length;
@@ -115,7 +117,7 @@ export default function StrategySettingsWorkspace({
         <div className="status-block">
           <div className="status-block__actions">
             <span className="pill pill--live">{formatCountLabel(strategySettingsAssets.length, "tracked asset")}</span>
-            <span className="pill pill--ghost">{formatCountLabel(exactEventCount, "exact event")}</span>
+            <span className="pill pill--ghost">{formatCountLabel(exactEventCount, "linked event")}</span>
           </div>
           <span className="timestamp">
             {strategyPayload?.lastUpdated
@@ -135,7 +137,7 @@ export default function StrategySettingsWorkspace({
           <strong>{screenerEnabledCount}</strong>
         </article>
         <article className="metric-card metric-card--amber">
-          <span>Exact event links</span>
+          <span>Linked events</span>
           <strong>{exactEventCount}</strong>
         </article>
         <article className="metric-card metric-card--rose">
@@ -151,8 +153,8 @@ export default function StrategySettingsWorkspace({
             <h3>Map each asset to the right Polymarket source</h3>
           </div>
           <p className="card-copy">
-            Use exact event URLs when you want Strategy 1 to stay locked to a specific Polymarket page, or add query
-            terms and custom tickers for broader screening.
+            The current Polymarket monthly event is found automatically for each asset. Paste an event URL only to
+            lock an asset to a specific page, or add query terms and custom tickers for broader screening.
           </p>
         </div>
 

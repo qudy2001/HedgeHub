@@ -1,4 +1,8 @@
 import { useState } from "react";
+import MonitoredStocksPanel from "../components/MonitoredStocksPanel.jsx";
+import MonitoredStocksTileGrid from "../components/MonitoredStocksTileGrid.jsx";
+import "../styles/monitored-stocks.css";
+import "../styles/monitored-stocks-grid.css";
 
 const money = (n) =>
   n == null
@@ -14,6 +18,8 @@ const views = [
   ["scanner", "Scanner", "search"],
   ["backtests", "Backtests", "trend"],
   ["tracker", "Tracker", "target"],
+  ["stock-analysis", "AI Stock Analysis", "chip"],
+  ["economy", "Economy", "trend"],
 ];
 const tabs = [
   ["workspace", "Overview"],
@@ -28,6 +34,8 @@ const titles = {
   events: "Put market events in context",
   tracker: "What could move your strategy",
   backtests: "Test your strategy over time",
+  "stock-analysis": "Full TradingAgents research per stock",
+  economy: "Where value sits across markets",
 };
 
 export default function MomentumWorkspace(w) {
@@ -258,6 +266,19 @@ export default function MomentumWorkspace(w) {
         </button>
       </header>
       <nav className="m-rail" aria-label="Main navigation">
+        <div className="m-monitored-stocks-container">
+          <MonitoredStocksPanel
+            demo={w.demo}
+            selectedStock={w.selectedMonitoredStock}
+            onSelectStock={(stock) => {
+              w.setSelectedMonitoredStock?.(stock);
+              if (stock !== null) {
+                navigate("workspace");
+              }
+            }}
+          />
+        </div>
+        <div className="m-rail-divider" />
         {views.map(([id, title, icon]) => (
           <button
             key={id}
@@ -295,6 +316,7 @@ export default function MomentumWorkspace(w) {
               {titles[view] ??
                 `${w.symbol} ${row?.name ?? "strategy workspace"}`}
             </h1>
+            {view !== "economy" && (
             <div className="m-subtitle">
               <select
                 aria-label="Selected stock"
@@ -310,32 +332,41 @@ export default function MomentumWorkspace(w) {
                   <option key={s}>{s}</option>
                 ))}
               </select>
-              <strong>{money(row?.spot ?? w.dataset?.spot)}</strong>
-              <button
-                className="text-button"
-                onClick={() => setModal({ type: "strategy" })}
-              >
-                {w.strategy.name} ⌄
-              </button>
+              {view !== "economy" && (
+                <>
+                  <strong>{money(row?.spot ?? w.dataset?.spot)}</strong>
+                  <button
+                    className="text-button"
+                    onClick={() => setModal({ type: "strategy" })}
+                  >
+                    {w.strategy.name} ⌄
+                  </button>
+                </>
+              )}
             </div>
+            )}
           </div>
+          {view !== "economy" && (
           <div className="m-page-actions">
             <button onClick={save}>
               {w.dirty ? "Save changes" : "Save layout"}
             </button>
-            <button
-              className="primary"
-              disabled={w.busy}
-              onClick={() => (view === "tracker" ? w.refreshAgent() : w.run())}
-            >
-              <Icon name={view === "tracker" ? "target" : "search"} />
-              {w.busy
-                ? "Scanning…"
-                : view === "tracker"
-                  ? "Scan for ideas"
-                  : "Scan options"}
-            </button>
+            {view !== "stock-analysis" && (
+              <button
+                className="primary"
+                disabled={w.busy}
+                onClick={() => (view === "tracker" ? w.refreshAgent() : w.run())}
+              >
+                <Icon name={view === "tracker" ? "target" : "search"} />
+                {w.busy
+                  ? "Scanning…"
+                  : view === "tracker"
+                    ? "Scan for ideas"
+                    : "Scan options"}
+              </button>
+            )}
           </div>
+          )}
         </div>
         {tabs.some((t) => t[0] === view) && (
           <nav className="m-tabs" aria-label="Workspace views">
@@ -381,7 +412,9 @@ export default function MomentumWorkspace(w) {
         )}
         <div className={`m-content ${inspector ? "has-inspector" : ""}`}>
           <div className="m-primary">
-            {overview && (
+            {overview && w.selectedMonitoredStock === null ? (
+              <MonitoredStocksTileGrid demo={w.demo} onSelectStock={w.setSelectedMonitoredStock} />
+            ) : overview ? (
               <>
                 {panelGroup(["payoff", "tracking", "results"])}
                 <button
@@ -392,7 +425,7 @@ export default function MomentumWorkspace(w) {
                   <Icon name="arrow" />
                 </button>
               </>
-            )}
+            ) : null}
             {view === "scanner" && (
               <>
                 <div className="m-scan-summary">
@@ -439,6 +472,8 @@ export default function MomentumWorkspace(w) {
             )}
             {view === "tracker" && trackerView()}
             {view === "backtests" && w.backtests()}
+            {view === "stock-analysis" && w.stockAnalysis()}
+            {view === "economy" && w.economy()}
             {layout.hidden.length > 0 && (
               <button
                 className="m-explore"
@@ -481,6 +516,12 @@ export default function MomentumWorkspace(w) {
                     selected?.scoreRange?.join("–") ??
                     "—"}{" "}
                   base <span>{signed(selected?.catalystImpact)} catalysts</span>
+                  {selected?.riskAdjustment && (
+                    <>
+                      {" "}
+                      <span>{signed(selected.riskAdjustment.total)} risk</span>
+                    </>
+                  )}
                 </div>
                 <p>
                   {selected?.overall == null

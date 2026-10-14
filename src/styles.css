@@ -281,6 +281,33 @@ a {
   justify-content: flex-end;
 }
 
+.admin-users__edit-limit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-users__edit-limit input {
+  width: 60px;
+  padding: 4px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.6);
+  color: inherit;
+  font-size: 0.9rem;
+}
+
+.admin-users__edit-limit input:focus {
+  outline: none;
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.1);
+}
+
+.admin-users__edit-limit button {
+  padding: 4px 10px;
+  font-size: 0.85rem;
+}
+
 .admin-usage__header,
 .admin-usage__list-header,
 .admin-usage__row-top {
@@ -2928,10 +2955,11 @@ a {
 .macro-tile {
   position: absolute;
   overflow: hidden;
+  container-type: size;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 4px;
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -2969,43 +2997,177 @@ a {
   text-align: right;
 }
 
-.macro-tile__spark {
-  position: relative;
-  z-index: 1;
-  flex: 1;
-  min-height: 28px;
-  margin-top: 2px;
+.macro-tile[role="button"] {
+  cursor: pointer;
 }
 
-.macro-tile__spark svg {
-  display: block;
+.macro-tile[role="button"]:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.macro-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(2, 6, 23, 0.72);
+}
+
+.macro-detail {
+  width: min(960px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 14px;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  color: #e5e7eb;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.macro-detail__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.macro-detail__header h3 {
+  margin: 4px 0;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.macro-detail__header > div > span:last-child {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.macro-detail__group {
+  color: #64748b;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.macro-detail__readout {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.macro-detail__readout strong {
+  color: #f8fafc;
+  font-size: 18px;
+}
+
+.macro-detail__readout .positive,
+.macro-detail__stats .positive {
+  color: #34d399;
+}
+
+.macro-detail__readout .negative,
+.macro-detail__stats .negative {
+  color: #f87171;
+}
+
+.macro-detail__chart {
   width: 100%;
-  height: 100%;
+  height: auto;
+  display: block;
+  touch-action: none;
+}
+
+.macro-detail__axis {
+  fill: #64748b;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.macro-detail__empty {
+  padding: 48px 0;
+  text-align: center;
+  color: #64748b;
+}
+
+.macro-detail__stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.macro-detail__stats div {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #111827;
+  border: 1px solid #1f2937;
+}
+
+.macro-detail__stats dt {
+  color: #64748b;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.macro-detail__stats dd {
+  margin: 4px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: #e5e7eb;
+}
+
+:root[data-theme="light"] .macro-detail-backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+
+:root[data-theme="light"] .macro-detail {
+  background: #ffffff;
+  border-color: #e2e8f0;
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .macro-detail__header > div > span:last-child,
+:root[data-theme="light"] .macro-detail__readout {
+  color: #475569;
+}
+
+:root[data-theme="light"] .macro-detail__readout strong,
+:root[data-theme="light"] .macro-detail__stats dd {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .macro-detail__axis,
+:root[data-theme="light"] .macro-detail__group,
+:root[data-theme="light"] .macro-detail__stats dt,
+:root[data-theme="light"] .macro-detail__empty {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .macro-detail__stats div {
+  background: #f8fafc;
+  border-color: #e2e8f0;
 }
 
 .macro-tile__value {
   position: relative;
   z-index: 1;
+  white-space: nowrap;
   color: #f8fafc;
   font-weight: 700;
   line-height: 0.92;
   letter-spacing: -0.05em;
-}
-
-.macro-tile--large .macro-tile__top strong {
-  font-size: 1.08rem;
-}
-
-.macro-tile__value--large {
-  font-size: clamp(2rem, 2.6vw, 3.2rem);
-}
-
-.macro-tile--medium .macro-tile__top strong {
-  font-size: 0.9rem;
-}
-
-.macro-tile__value--medium {
-  font-size: 1.6rem;
 }
 
 .macro-tile--small {
@@ -3013,30 +3175,28 @@ a {
   gap: 5px;
 }
 
-.macro-tile--small .macro-tile__top strong {
-  max-width: none;
+.macro-tile--small .macro-tile__top,
+.macro-tile--tiny .macro-tile__top {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
 }
 
-.macro-tile__spark--small {
-  min-height: 16px;
+.macro-tile--small .macro-tile__top strong,
+.macro-tile--tiny .macro-tile__top strong {
+  max-width: none;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.macro-tile--small .macro-tile__change,
+.macro-tile--tiny .macro-tile__change {
+  text-align: left;
 }
 
 .macro-tile--tiny {
   padding: 4px 5px;
   gap: 3px;
-}
-
-.macro-tile--tiny .macro-tile__top {
-  justify-content: center;
-}
-
-.macro-tile--tiny .macro-tile__top strong {
-  max-width: none;
-  text-align: center;
-}
-
-.macro-tile__spark--tiny {
-  min-height: 10px;
 }
 
 .macro-methodology__grid {
@@ -7860,4 +8020,22 @@ a {
   .microstructure-chart-shell {
     height: 240px;
   }
+}
+
+.strategy-settings__poly-status {
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-left-width: 4px;
+}
+.strategy-settings__poly-status--ok {
+  border-left-color: #2ea064;
+}
+.strategy-settings__poly-status--warn {
+  border-left-color: #dca028;
+}
+.strategy-settings__poly-status--info {
+  border-left-color: #3c78c8;
 }

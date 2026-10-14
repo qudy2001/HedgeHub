@@ -1,0 +1,196 @@
+.monitored-stocks-grid {
+  padding: 24px;
+  min-height: 400px;
+}
+
+.monitored-stocks-grid .grid-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 20px;
+  margin-top: 16px;
+}
+
+.monitored-stocks-grid .stock-tile {
+  background: var(--bg-card, white);
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 12px;
+  padding: 20px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.monitored-stocks-grid .stock-tile:hover {
+  border-color: var(--accent-color, #0066cc);
+  box-shadow: 0 4px 12px rgba(0, 102, 204, 0.15);
+  transform: translateY(-2px);
+}
+
+.monitored-stocks-grid .tile-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.monitored-stocks-grid .tile-symbol {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary, #000);
+  letter-spacing: -0.5px;
+}
+
+.monitored-stocks-grid .tile-direction {
+  font-size: 20px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 4px;
+  min-width: 32px;
+  text-align: center;
+}
+
+.monitored-stocks-grid .tile-direction.up {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+}
+
+.monitored-stocks-grid .tile-direction.down {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.monitored-stocks-grid .tile-direction.neutral {
+  background: rgba(156, 163, 175, 0.1);
+  color: #6b7280;
+}
+
+.monitored-stocks-grid .tile-price {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary, #000);
+  letter-spacing: -0.5px;
+}
+
+.monitored-stocks-grid .tile-change {
+  font-size: 16px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 6px;
+  text-align: center;
+  width: fit-content;
+}
+
+.monitored-stocks-grid .tile-change.up {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+}
+
+.monitored-stocks-grid .tile-change.down {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.monitored-stocks-grid .tile-change.neutral {
+  background: rgba(156, 163, 175, 0.1);
+  color: #6b7280;
+}
+
+.monitored-stocks-grid .tile-loading {
+  color: var(--text-secondary, #666);
+  font-size: 13px;
+  padding: 8px 0;
+  text-align: center;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.monitored-stocks-grid .view-btn {
+  background: var(--accent-color, #0066cc);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-top: auto;
+}
+
+.monitored-stocks-grid .view-btn:hover {
+  background: var(--accent-hover, #0052a3);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 102, 204, 0.3);
+}
+
+.monitored-stocks-grid .loading {
+  text-align: center;
+  color: var(--text-secondary, #666);
+  padding: 40px 20px;
+  font-size: 14px;
+}
+
+.monitored-stocks-grid .error {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  padding: 20px;
+  border-radius: 8px;
+  border-left: 4px solid #ef4444;
+  font-size: 14px;
+}
+
+.monitored-stocks-grid .empty {
+  text-align: center;
+  color: var(--text-secondary, #666);
+  padding: 60px 20px;
+}
+
+.monitored-stocks-grid .empty p {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+}
+
+.monitored-stocks-grid .empty .hint {
+  font-size: 13px;
+  color: var(--text-tertiary, #999);
+}
+
+/* Responsive grid */
+@media (max-width: 768px) {
+  .monitored-stocks-grid .grid-container {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+  }
+
+  .monitored-stocks-grid .stock-tile {
+    padding: 16px;
+  }
+
+  .monitored-stocks-grid .tile-symbol {
+    font-size: 20px;
+  }
+
+  .monitored-stocks-grid .tile-price {
+    font-size: 24px;
+  }
+}
+
+/* Dark theme support */
+@media (prefers-color-scheme: dark) {
+  .monitored-stocks-grid {
+    --bg-card: #1e1e1e;
+    --text-primary: #e0e0e0;
+    --text-secondary: #999;
+    --text-tertiary: #666;
+    --border-color: #404040;
+    --accent-color: #4a9eff;
+    --accent-hover: #357abd;
+  }
+}

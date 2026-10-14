@@ -1,0 +1,42 @@
+.data-pending-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #f5a623;
+  color: #1a1a1a;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  flex: none;
+}
+
+.data-pending-badge .data-pending-tip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  width: 220px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #1f2430;
+  color: #f2f4f8;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+}
+
+.data-pending-badge:hover .data-pending-tip,
+.data-pending-badge:focus .data-pending-tip {
+  display: block;
+}

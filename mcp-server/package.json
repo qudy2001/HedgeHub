@@ -1,0 +1,16 @@
+{
+  "name": "hedgehub-mcp-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server exposing HedgeHub's market topics and analysis task queue to AI chat clients.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:http": "node src/http.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.1"
+  }
+}

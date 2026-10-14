@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { DAY, dateOnly } from "../../shared/builderEngine.js";
-export const agentConfigured = () =>
-  Boolean(process.env.TRADINGAGENTS_URL && process.env.TRADINGAGENTS_TOKEN);
+export const agentConfigured = () => Boolean(process.env.TRADINGAGENTS_URL);
 const ratings = {
   Buy: "Strong bullish",
   Overweight: "Bullish",
@@ -101,14 +100,16 @@ export function extractAgent(run) {
 async function request(route, body) {
   if (!agentConfigured())
     throw new Error(
-      "Configure TRADINGAGENTS_URL and TRADINGAGENTS_TOKEN on the HedgeHub server to enable AI research.",
+      "Configure TRADINGAGENTS_URL on the HedgeHub server to enable AI research.",
     );
   const response = await fetch(
     `${process.env.TRADINGAGENTS_URL.replace(/\/$/, "")}/api${route}`,
     {
       method: body ? "POST" : "GET",
       headers: {
-        authorization: `Bearer ${process.env.TRADINGAGENTS_TOKEN}`,
+        ...(process.env.TRADINGAGENTS_TOKEN
+          ? { authorization: `Bearer ${process.env.TRADINGAGENTS_TOKEN}` }
+          : {}),
         "content-type": "application/json",
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -118,6 +119,40 @@ async function request(route, body) {
   if (!response.ok)
     throw new Error(`TradingAgents returned HTTP ${response.status}`);
   return response.json();
+}
+function applyTrackedItemEvidence(store, owner, strategyId, extracted, checkedAt) {
+  // Never replace a user's tracked condition or silently convert AI completion to verification.
+  for (const tracked of store.items(owner, strategyId)) {
+    const match = extracted.suggestions.find(
+      (i) => i.eventKey === tracked.eventKey && i.symbol === tracked.symbol,
+    );
+    if (match && match.sourceRun !== tracked.latestAgentRun)
+      store.putItem(owner, strategyId, {
+        ...tracked,
+        latestAgentRun: match.sourceRun,
+        agentUpdate: {
+          status: match.agentStatus,
+          completed: match.agentResolved,
+          sources: match.sources,
+          checkedAt,
+        },
+        history: [
+          ...(tracked.history ?? []),
+          { at: checkedAt, note: "New agent evidence available for review" },
+        ].slice(-100),
+      });
+  }
+}
+// Merge a run's extracted results into aggregate state, replacing only the
+// entries for the symbols that run covered and leaving every other symbol's
+// previously saved research untouched.
+function mergeExtracted(state, extracted, symbols) {
+  const keep = (arr) => (arr ?? []).filter((x) => !symbols.includes(x.symbol));
+  return {
+    ...state,
+    valuations: [...keep(state.valuations), ...extracted.valuations],
+    suggestions: [...keep(state.suggestions), ...extracted.suggestions],
+  };
 }
 export function createAgentService(store) {
   const locks = new Set();
@@ -145,31 +180,13 @@ export function createAgentService(store) {
           lastChecked: new Date().toISOString(),
           error: null,
         };
-        // Never replace a user's tracked condition or silently convert AI completion to verification.
-        for (const tracked of store.items(owner, strategy.id)) {
-          const match = extracted.suggestions.find(
-            (i) =>
-              i.eventKey === tracked.eventKey && i.symbol === tracked.symbol,
-          );
-          if (match && match.sourceRun !== tracked.latestAgentRun)
-            store.putItem(owner, strategy.id, {
-              ...tracked,
-              latestAgentRun: match.sourceRun,
-              agentUpdate: {
-                status: match.agentStatus,
-                completed: match.agentResolved,
-                sources: match.sources,
-                checkedAt: state.lastChecked,
-              },
-              history: [
-                ...(tracked.history ?? []),
-                {
-                  at: state.lastChecked,
-                  note: "New agent evidence available for review",
-                },
-              ].slice(-100),
-            });
-        }
+        applyTrackedItemEvidence(
+          store,
+          owner,
+          strategy.id,
+          extracted,
+          state.lastChecked,
+        );
       } else if (
         force ||
         !state.lastStarted ||
@@ -200,6 +217,67 @@ export function createAgentService(store) {
     }
     return store.saveAgent(owner, strategy.id, state);
   }
+  // Same lifecycle as refresh(), but scoped to a single stock: starts (or
+  // polls) its own TradingAgents run and merges the result into the shared
+  // valuations/suggestions without touching other stocks' saved research.
+  async function refreshSymbol(owner, strategy, symbol, force = false) {
+    const key = owner + ":" + strategy.id + ":" + symbol;
+    if (locks.has(key)) return store.agent(owner, strategy.id);
+    locks.add(key);
+    let state = store.agent(owner, strategy.id) || {
+      suggestions: [],
+      valuations: [],
+    };
+    const runs = { ...(state.runsBySymbol ?? {}) };
+    let symState = runs[symbol] ?? {};
+    try {
+      if (
+        symState.runId &&
+        !["completed", "completed_with_errors", "failed", "stopped"].includes(
+          symState.status,
+        )
+      ) {
+        const run = await request(
+          `/runs/${encodeURIComponent(symState.runId)}`,
+        );
+        const extracted = extractAgent(run);
+        const checkedAt = new Date().toISOString();
+        symState = {
+          ...symState,
+          status: run.status,
+          lastChecked: checkedAt,
+          error: null,
+        };
+        state = mergeExtracted(state, extracted, [symbol]);
+        applyTrackedItemEvidence(store, owner, strategy.id, extracted, checkedAt);
+      } else if (
+        force ||
+        !symState.lastStarted ||
+        Date.now() - Date.parse(symState.lastStarted) >= DAY
+      ) {
+        const run = await request("/runs", {
+          tickers: [symbol],
+          analysis_date: dateOnly(Date.now()),
+          look_back_days: 365,
+          look_forward_days: 365,
+        });
+        symState = {
+          ...symState,
+          runId: run.id,
+          status: run.status,
+          lastStarted: new Date().toISOString(),
+          error: null,
+        };
+      }
+    } catch (e) {
+      symState = { ...symState, error: e.message, lastChecked: new Date().toISOString() };
+    } finally {
+      locks.delete(key);
+    }
+    runs[symbol] = symState;
+    state = { ...state, runsBySymbol: runs };
+    return store.saveAgent(owner, strategy.id, state);
+  }
   let ticking = false;
   async function tick() {
     if (ticking || !agentConfigured()) return;
@@ -220,5 +298,5 @@ export function createAgentService(store) {
       ticking = false;
     }
   }
-  return { refresh, tick };
+  return { refresh, refreshSymbol, tick };
 }

@@ -12,6 +12,8 @@ Run the existing `npm run dev` command, then open `http://localhost:5173/builder
 
 The compact tracking strip and scanned option results sit immediately below the payoff heatmap. Hover or focus a tracking chip for a summary; click it to edit evidence, status, scope and contribution. A result selection updates the stock, option legs, heatmap, research and calendars. Result filters, pagination, CSV export, column selection and expanded table are available.
 
+The **Option chain** button in the results toolbar swaps the table for a broker-style chain of the selected stock: expiry tabs on top (weeklies marked W, with days to expiry), calls on the left, puts on the right, the strike in the middle and a divider at the scan-time spot, with in-the-money sides shaded. Each contract shows the results-table columns that make sense for a single contract (bid/ask price and size, breakeven, max profit and loss, EV/BP, IV rank, liquidity, debit, IV, open interest, earnings, data, score), evaluated as buying one contract at the ask with the strategy's per-contract fee, through the same position maths the scanner uses. Ann ret % is an income yield, so it stays blank for a bought contract. Symbol, Strategy, Hedge choices and Legs to trade describe a whole position and are not repeated; Expiry and DTE are the tabs. The chain opens on the selected result's expiry and outlines that result's legs; a contract's Score button selects the best scanned result that trades it, which updates the heatmap. Columns and Expand work as in the table, so the chain can stay inline above the other panels or fill the screen. It reads the same full-chain data as the distribution panels below, so it shares their one- or two-year horizon, ten-minute cache and Tiger loading time. When the provider returns no implied volatility, IV is implied from the bid/ask mid and marked with an asterisk.
+
 Use Customize or a panel handle to hide, restore, collapse or reorder panels. Each analytics panel offers its supported metrics under + Item. Save layout saves the strategy definition and workspace for the signed-in user. New scans use the edited definition; existing results remain snapshots of their original inputs until rescanned.
 
 Scans compare collars, protective puts, covered calls, cash-secured puts, put credit/debit spreads and stock-only positions. Backtests use the selected template. Supported underlyings are US stock/ETF symbols. Other asset classes are not implemented.
@@ -32,11 +34,11 @@ Run the included TradingAgents project separately using its own documented deplo
 
 ```text
 TRADINGAGENTS_URL=http://127.0.0.1:8000
-TRADINGAGENTS_TOKEN=<TradingAgents API token with read and write access>
+TRADINGAGENTS_TOKEN=<optional TradingAgents API token with read and write access>
 BUILDER_DB_PATH=/absolute/path/to/data/builder.db
 ```
 
-The URL is the service base URL, including a deployment prefix if applicable, **without** `/api`. The port above is an example; use the deployed service address. Tokens never enter browser code. The adapter uses the included project's `/api/runs` endpoints; model/provider configuration stays in TradingAgents. No service or model credentials are supplied by this change.
+The URL is the service base URL, including a deployment prefix if applicable, **without** `/api`. The port above is an example; use the deployed service address. `TRADINGAGENTS_TOKEN` is optional — only `TRADINGAGENTS_URL` is required to enable the connection; leave the token unset if the deployed TradingAgents instance does not require authentication. When a token is set, it never enters browser code and is sent only as a bearer header on server-to-server requests. The adapter uses the included project's `/api/runs` endpoints; model/provider configuration stays in TradingAgents. No service or model credentials are supplied by this change.
 
 When Daily discovery is enabled on a saved strategy, the running HedgeHub server starts research once per 24 hours and polls progress. At most the first ten symbols are researched. This can consume the configured service's model credits. Discovery uses TradingAgents report checkpoints, including its market/news research; it is not a separate exhaustive global news feed. Suggestions must be added to the strategy to persist. Matching subsequent checkpoints attach new evidence notices to saved items. AI completion claims never silently mark evidence verified or change saved impact. Review status and sources in the tracker. Removing an item does not disable daily discovery.
 

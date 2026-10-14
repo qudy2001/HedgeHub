@@ -1,21 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { getMacroTileColors } from "../theme.js";
 
 const DEFAULT_SECTION_HEIGHTS = {
-  "global-markets": 1200,
+  "global-markets": 1400,
   "etf-heatmap": 680,
   "money-and-reserves": 520,
   "debt-and-assets": 620
 };
-const DISPLAY_LOOKBACKS = ["1D", "1W", "1M", "6M", "1Y", "5Y", "ALL"];
+const DISPLAY_LOOKBACKS = ["1D", "1W", "1M", "6M", "1Y", "2Y", "5Y"];
+const DISPLAY_LOOKBACK_DAYS = { "1D": 1, "1W": 7, "1M": 30, "6M": 180, "1Y": 365, "2Y": 730, "5Y": 1825 };
 const DISPLAY_LOOKBACK_TO_HEATMAP = {
   "1D": "24H",
   "1W": "7D",
   "1M": "30D",
   "6M": "180D",
   "1Y": "365D",
-  "5Y": "MAX",
-  ALL: "MAX"
+  "2Y": "730D",
+  "5Y": "MAX"
 };
 const LEGACY_LOOKBACK_TO_DISPLAY = {
   "24H": "1D",
@@ -23,7 +24,9 @@ const LEGACY_LOOKBACK_TO_DISPLAY = {
   "30D": "1M",
   "180D": "6M",
   "365D": "1Y",
-  MAX: "ALL"
+  "730D": "2Y",
+  MAX: "5Y",
+  ALL: "5Y"
 };
 
 function clamp(value, min, max) {
@@ -127,6 +130,29 @@ function formatCompactUsd(value) {
   }
 
   return `$${value.toFixed(0)}`;
+}
+
+function formatShortUsd(value) {
+  if (value == null || Number.isNaN(value)) {
+    return "n/a";
+  }
+
+  const sign = value < 0 ? "-" : "";
+  const absoluteValue = Math.abs(value);
+
+  if (absoluteValue >= 1e12) {
+    return `${sign}$${(absoluteValue / 1e12).toFixed(2)}T`;
+  }
+
+  if (absoluteValue >= 1e9) {
+    return `${sign}$${Math.round(absoluteValue / 1e9)}B`;
+  }
+
+  if (absoluteValue >= 1e6) {
+    return `${sign}$${Math.round(absoluteValue / 1e6)}M`;
+  }
+
+  return `${sign}$${Math.round(absoluteValue).toLocaleString("en-GB")}`;
 }
 
 function formatFullUsd(value) {
@@ -391,164 +417,65 @@ function abbreviateLabel(label) {
     .join("");
 }
 
-function buildSparklineGeometry(values, width = 180, height = 72, padding = 4) {
-  if (!Array.isArray(values) || values.length < 2) {
-    return null;
-  }
-
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const range = maxValue - minValue;
-  const toX = (index) => padding + (index / (values.length - 1)) * (width - padding * 2);
-  const toY = (value) =>
-    range === 0 ? height / 2 : padding + (1 - (value - minValue) / range) * (height - padding * 2);
-  const points = values.map((value, index) => ({ x: toX(index), y: toY(value) }));
-  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+function getTileTypography(valueText) {
+  const valueChars = Math.max(valueText.length, 4);
 
   return {
-    linePath,
-    referenceY: toY(values[0]),
-    firstPoint: points[0],
-    lastPoint: points[points.length - 1],
-    guideTopY: padding + (height - padding * 2) * 0.22,
-    guideMidY: padding + (height - padding * 2) * 0.5,
-    guideBottomY: padding + (height - padding * 2) * 0.78
+    labelSize: "clamp(9px, min(12cqh, 13cqw), 24px)",
+    changeSize: "clamp(8px, min(9cqh, 9cqw), 16px)",
+    valueSize: `clamp(10px, min(${(88 / (0.6 * valueChars)).toFixed(1)}cqw, 36cqh), 60px)`
   };
 }
 
-function TileSparkline({ tile, lookback, colors }) {
-  const sparkline = tile.sparklines?.[lookback];
-  const geometry = buildSparklineGeometry(sparkline);
-
-  if (!geometry) {
-    return null;
-  }
-
-  return (
-    <svg viewBox="0 0 180 72" preserveAspectRatio="none" aria-hidden="true">
-      <line
-        x1="4"
-        y1={geometry.guideTopY}
-        x2="176"
-        y2={geometry.guideTopY}
-        stroke={colors.baseline}
-        strokeOpacity="0.18"
-        strokeWidth="1"
-      />
-      <line
-        x1={geometry.firstPoint.x}
-        y1={geometry.guideMidY}
-        x2={geometry.lastPoint.x}
-        y2={geometry.guideMidY}
-        stroke={colors.baseline}
-        strokeDasharray="4 4"
-        strokeWidth="1"
-      />
-      <line
-        x1="4"
-        y1={geometry.guideBottomY}
-        x2="176"
-        y2={geometry.guideBottomY}
-        stroke={colors.baseline}
-        strokeOpacity="0.12"
-        strokeWidth="1"
-      />
-      <path
-        d={geometry.linePath}
-        fill="none"
-        stroke={colors.line}
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
-  );
-}
-
-function getTileTypography(layout, density, label) {
-  const minDimension = Math.min(layout.width, layout.height);
-  const area = layout.width * layout.height;
-  const areaScale = clamp(Math.sqrt(area) / 18, 0.72, 1.32);
-  const dimensionScale = clamp(minDimension / 18, 0.76, 1.36);
-  const labelPenalty = clamp(Math.sqrt(Math.max(label.length, 8) / 12), 0.94, 1.55);
-  const combinedScale = areaScale * dimensionScale;
-
-  if (density === "large") {
-    return {
-      labelSize: clamp((18 * combinedScale) / labelPenalty, 14, 31),
-      changeSize: clamp(13 * dimensionScale, 11, 18),
-      valueSize: clamp((40 * combinedScale) / clamp(Math.sqrt(label.length / 10), 1, 1.28), 28, 56)
-    };
-  }
-
-  if (density === "medium") {
-    return {
-      labelSize: clamp((15 * combinedScale) / labelPenalty, 11, 22),
-      changeSize: clamp(11.5 * dimensionScale, 9, 15),
-      valueSize: clamp((28 * combinedScale) / clamp(Math.sqrt(label.length / 11), 1, 1.22), 18, 36)
-    };
-  }
-
-  if (density === "small") {
-    return {
-      labelSize: clamp((11.5 * combinedScale) / labelPenalty, 8, 15),
-      changeSize: clamp(9 * dimensionScale, 7, 11),
-      valueSize: clamp((16 * combinedScale) / clamp(Math.sqrt(label.length / 11), 1, 1.18), 11, 18)
-    };
-  }
-
-  return {
-    labelSize: clamp((9 * combinedScale) / labelPenalty, 7, 11),
-    changeSize: 0,
-    valueSize: 0
-  };
-}
-
-function HeatmapTile({ tile, layout, lookback, theme }) {
+function HeatmapTile({ tile, layout, lookback, theme, onSelect }) {
   const density = getTileDensity(layout);
   const colors = getTileColors(tile.changePct, theme);
   const tileLabel =
     density === "tiny" || (density === "small" && tile.label.length > 16) ? abbreviateLabel(tile.label) : tile.label;
-  const typeScale = getTileTypography(layout, density, tile.label);
-  const showValue = density !== "tiny";
+  const valueText = formatCompactUsd(tile.valueUsd);
+  const typeScale = getTileTypography(valueText);
   const showPercent = density !== "tiny";
 
   return (
     <article
       className={`macro-tile macro-tile--${density}`}
+      role="button"
+      tabIndex={0}
+      aria-label={`${tile.label} chart`}
+      onClick={() => onSelect?.(tile)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect?.(tile);
+        }
+      }}
       style={{
         ...getBoxStyle(layout, density === "tiny" ? 1 : density === "small" ? 2 : 3),
         background: colors.background,
         borderColor: colors.stroke,
         color: colors.text
       }}
-      title={`${tile.label}\n${formatFullUsd(tile.valueUsd)}\n${formatPercent(tile.changePct)}\n${tile.detail}\nSparkline ${lookback}`}
+      title={`${tile.label}\n${formatFullUsd(tile.valueUsd)}\n${formatPercent(tile.changePct)}\n${tile.detail}\n${lookback}: ${formatPercent(getTileLookbackChange(tile, lookback).changePct)}`}
     >
       <div className="macro-tile__top">
-        <strong style={{ fontSize: `${typeScale.labelSize}px` }}>{tileLabel}</strong>
+        <strong style={{ fontSize: typeScale.labelSize }}>{tileLabel}</strong>
         {showPercent ? (
           <span
             className={`macro-tile__change ${tile.changePct >= 0 ? "positive" : "negative"}`}
-            style={{ fontSize: `${typeScale.changeSize}px` }}
+            style={{ fontSize: typeScale.changeSize }}
           >
             {formatPercent(tile.changePct)}
           </span>
         ) : null}
       </div>
-      <div className={`macro-tile__spark macro-tile__spark--${density}`}>
-        <TileSparkline tile={tile} lookback={lookback} colors={colors} />
+      <div className="macro-tile__value" style={{ fontSize: typeScale.valueSize }}>
+        {valueText}
       </div>
-      {showValue ? (
-        <div className={`macro-tile__value macro-tile__value--${density}`} style={{ fontSize: `${typeScale.valueSize}px` }}>
-          {formatCompactUsd(tile.valueUsd)}
-        </div>
-      ) : null}
     </article>
   );
 }
 
-function HeatmapGroup({ group, layout, lookback, theme }) {
+function HeatmapGroup({ group, layout, lookback, theme, onSelectTile }) {
   const tileLayouts = buildBinaryTreemap(group.tiles, "valueUsd");
 
   return (
@@ -569,20 +496,34 @@ function HeatmapGroup({ group, layout, lookback, theme }) {
 
       <div className="macro-group-block__body">
         {tileLayouts.map((tile) => (
-          <HeatmapTile key={tile.id} tile={tile} layout={tile} lookback={lookback} theme={theme} />
+          <HeatmapTile
+            key={tile.id}
+            tile={tile}
+            layout={tile}
+            lookback={lookback}
+            theme={theme}
+            onSelect={(selected) => onSelectTile(selected, group.title)}
+          />
         ))}
       </div>
     </section>
   );
 }
 
-function HeatmapSurface({ section, lookback, surfaceHeight, theme }) {
+function HeatmapSurface({ section, lookback, surfaceHeight, theme, onSelectTile }) {
   const groupLayouts = buildBinaryTreemap(section.groups, "totalValueUsd");
 
   return (
     <div className="macro-surface" style={{ height: `${surfaceHeight}px` }}>
       {groupLayouts.map((group) => (
-        <HeatmapGroup key={group.id} group={group} layout={group} lookback={lookback} theme={theme} />
+        <HeatmapGroup
+          key={group.id}
+          group={group}
+          layout={group}
+          lookback={lookback}
+          theme={theme}
+          onSelectTile={onSelectTile}
+        />
       ))}
     </div>
   );
@@ -753,7 +694,8 @@ function HeatmapSection({
   onDragEnd,
   onDragOver,
   onDrop,
-  onResizeStart
+  onResizeStart,
+  onSelectTile
 }) {
   return (
     <section
@@ -789,7 +731,13 @@ function HeatmapSection({
             </div>
           </div>
         </div>
-        <HeatmapSurface section={section} lookback={lookback} surfaceHeight={surfaceHeight} theme={theme} />
+        <HeatmapSurface
+          section={section}
+          lookback={lookback}
+          surfaceHeight={surfaceHeight}
+          theme={theme}
+          onSelectTile={onSelectTile}
+        />
       </article>
 
       {editMode ? (
@@ -807,10 +755,209 @@ function HeatmapSection({
   );
 }
 
-function LookbackSelector({ lookbacks, selectedLookback, onChange, disabled = false }) {
+function formatChartDate(date, days) {
+  if (days <= 1) {
+    return date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  if (days <= 60) {
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  }
+
+  return date.toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
+}
+
+function TileDetailChart({ tile, lookback, displayLookback, endTime, theme }) {
+  const gradientId = useId();
+  const [hoverIndex, setHoverIndex] = useState(null);
+  const values = tile.sparklines?.[lookback] ?? [];
+
+  if (!Array.isArray(values) || values.length < 2) {
+    return <div className="macro-detail__empty">No history is available for this range.</div>;
+  }
+
+  const width = 880;
+  const height = 340;
+  const margin = { top: 16, right: 16, bottom: 30, left: 76 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const count = values.length;
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const padding = (maxValue - minValue) * 0.08 || Math.abs(maxValue) * 0.01 || 1;
+  const low = minValue - padding;
+  const high = maxValue + padding;
+  const days = DISPLAY_LOOKBACK_DAYS[displayLookback] ?? 30;
+  const xAt = (index) => margin.left + (index / (count - 1)) * plotWidth;
+  const yAt = (value) => margin.top + (1 - (value - low) / (high - low)) * plotHeight;
+  const dateAt = (index) => new Date(endTime - ((count - 1 - index) / (count - 1)) * days * 86400000);
+  const linePath = values
+    .map((value, index) => `${index === 0 ? "M" : "L"}${xAt(index).toFixed(1)} ${yAt(value).toFixed(1)}`)
+    .join(" ");
+  const baseY = margin.top + plotHeight;
+  const areaPath = `${linePath} L${xAt(count - 1).toFixed(1)} ${baseY} L${margin.left} ${baseY} Z`;
+  const change = getTileLookbackChange(tile, lookback);
+  const colors = getTileColors(change.changePct, theme);
+  const activeIndex = hoverIndex ?? count - 1;
+  const activeValue = values[activeIndex];
+  const activeChangePct = values[0] ? ((activeValue - values[0]) / values[0]) * 100 : 0;
+  const yTicks = Array.from({ length: 5 }, (_, step) => low + ((high - low) * step) / 4);
+  const xTickIndexes = [0, 0.25, 0.5, 0.75, 1].map((ratio) => Math.round(ratio * (count - 1)));
+
+  function handlePointerMove(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const viewX = ((event.clientX - rect.left) / rect.width) * width;
+    const ratio = (viewX - margin.left) / plotWidth;
+    setHoverIndex(clamp(Math.round(ratio * (count - 1)), 0, count - 1));
+  }
+
+  return (
+    <div className="macro-detail__chart-wrap">
+      <div className="macro-detail__readout">
+        <span>{formatChartDate(dateAt(activeIndex), days)}</span>
+        <strong>{formatShortUsd(activeValue)}</strong>
+        <span className={activeChangePct >= 0 ? "positive" : "negative"}>
+          {formatPercent(activeChangePct)} vs start
+        </span>
+      </div>
+      <svg
+        className="macro-detail__chart"
+        viewBox={`0 0 ${width} ${height}`}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={() => setHoverIndex(null)}
+        role="img"
+        aria-label={`${tile.label} value over ${displayLookback}`}
+      >
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={colors.line} stopOpacity="0.24" />
+            <stop offset="100%" stopColor={colors.line} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {yTicks.map((tick) => (
+          <g key={tick}>
+            <line x1={margin.left} x2={width - margin.right} y1={yAt(tick)} y2={yAt(tick)} stroke="rgba(148, 163, 184, 0.14)" strokeWidth="1" />
+            <text className="macro-detail__axis" x={margin.left - 10} y={yAt(tick)} textAnchor="end" dominantBaseline="middle">
+              {formatShortUsd(tick)}
+            </text>
+          </g>
+        ))}
+        <line
+          x1={margin.left}
+          x2={width - margin.right}
+          y1={yAt(values[0])}
+          y2={yAt(values[0])}
+          stroke={colors.baseline}
+          strokeWidth="1"
+        />
+        {xTickIndexes.map((index, position) => (
+          <text
+            key={index}
+            className="macro-detail__axis"
+            x={xAt(index)}
+            y={height - 8}
+            textAnchor={position === 0 ? "start" : position === xTickIndexes.length - 1 ? "end" : "middle"}
+          >
+            {formatChartDate(dateAt(index), days)}
+          </text>
+        ))}
+        <path d={areaPath} fill={`url(#${gradientId})`} />
+        <path d={linePath} fill="none" stroke={colors.line} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {hoverIndex !== null ? (
+          <line
+            x1={xAt(hoverIndex)}
+            x2={xAt(hoverIndex)}
+            y1={margin.top}
+            y2={baseY}
+            stroke="rgba(148, 163, 184, 0.5)"
+            strokeWidth="1"
+          />
+        ) : null}
+        <circle cx={xAt(activeIndex)} cy={yAt(activeValue)} r="5" fill={colors.line} stroke="#0b1120" strokeWidth="2" />
+      </svg>
+      <dl className="macro-detail__stats">
+        <div>
+          <dt>Start</dt>
+          <dd>{formatShortUsd(values[0])}</dd>
+        </div>
+        <div>
+          <dt>End</dt>
+          <dd>{formatShortUsd(values[count - 1])}</dd>
+        </div>
+        <div>
+          <dt>Change</dt>
+          <dd className={change.changePct >= 0 ? "positive" : "negative"}>
+            {formatPercent(change.changePct)} ({change.changeUsd >= 0 ? "+" : "-"}
+            {formatShortUsd(Math.abs(change.changeUsd))})
+          </dd>
+        </div>
+        <div>
+          <dt>High</dt>
+          <dd>{formatShortUsd(maxValue)}</dd>
+        </div>
+        <div>
+          <dt>Low</dt>
+          <dd>{formatShortUsd(minValue)}</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function TileDetailModal({ tile, groupTitle, lookbacks, selectedLookback, onLookbackChange, endTime, theme, onClose }) {
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="macro-detail-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div className="macro-detail" role="dialog" aria-modal="true" aria-label={`${tile.label} chart`}>
+        <header className="macro-detail__header">
+          <div>
+            <span className="macro-detail__group">{groupTitle}</span>
+            <h3>{tile.label}</h3>
+            <span>{tile.detail}</span>
+          </div>
+          <button type="button" className="macro-layout-button" onClick={onClose} aria-label="Close chart">
+            Close
+          </button>
+        </header>
+        <LookbackSelector
+          label="Chart range"
+          lookbacks={lookbacks}
+          selectedLookback={selectedLookback}
+          onChange={onLookbackChange}
+        />
+        <TileDetailChart
+          tile={tile}
+          lookback={DISPLAY_LOOKBACK_TO_HEATMAP[selectedLookback] ?? "30D"}
+          displayLookback={selectedLookback}
+          endTime={endTime}
+          theme={theme}
+        />
+      </div>
+    </div>
+  );
+}
+
+function LookbackSelector({ lookbacks, selectedLookback, onChange, disabled = false, label = "Mini-chart range" }) {
   return (
     <div className="macro-lookback">
-      <span className="macro-lookback__label">Mini-chart range</span>
+      <span className="macro-lookback__label">{label}</span>
       <div className="macro-lookback__buttons">
         {lookbacks.map((lookback) => (
           <button
@@ -847,6 +994,7 @@ export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }
   const [dashboardActionError, setDashboardActionError] = useState("");
   const [loadedDashboard, setLoadedDashboard] = useState(null);
   const resizeStateRef = useRef(null);
+  const [selectedTile, setSelectedTile] = useState(null);
 
   useEffect(() => {
     if (!macroDashboard) {
@@ -1154,10 +1302,23 @@ export default function MacroHeatmapDashboard({ macroDashboard, theme = "dark" }
                 setDropTargetSectionId("");
               }}
               onResizeStart={handleResizeStart}
+              onSelectTile={(tile, groupTitle) => setSelectedTile({ tile, groupTitle })}
             />
           );
         })}
       </div>
+      {selectedTile ? (
+        <TileDetailModal
+          tile={selectedTile.tile}
+          groupTitle={selectedTile.groupTitle}
+          lookbacks={lookbacks}
+          selectedLookback={selectedLookback}
+          onLookbackChange={setSelectedLookback}
+          endTime={Date.parse(macroDashboardView?.refreshedAt) || Date.now()}
+          theme={theme}
+          onClose={() => setSelectedTile(null)}
+        />
+      ) : null}
     </section>
   );
 }

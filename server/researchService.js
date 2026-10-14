@@ -6,6 +6,7 @@ import { buildEntryResearch } from './entryResearch.js';
 import { fetchCompanyEventsCalendar, fetchEconomicCalendarWindow } from './providers/tradingViewCalendars.js';
 import { researchWindow, curatedCatalysts, buildCatalystChecklist } from './researchCatalysts.js';
 import { fetchResearchSocial } from './providers/researchSocial.js';
+import { fetchYahooEarningsDate } from './providers/yahooFinance.js';
 import crypto from 'node:crypto';
 
 export function validResearchSymbol(value) {
@@ -58,16 +59,26 @@ export function createResearchService(store) {
   };
 
   async function events(symbol, window = null) {
-    if (tigerEnabled()) return tigerEarnings(symbol, window);
+    // Earnings sources in priority order: Tiger -> TradingView -> Yahoo.
+    if (tigerEnabled()) {
+      try {
+        const tiger = await tigerEarnings(symbol, window);
+        if (tiger.complete) return tiger;
+      } catch {}
+    }
     const from = window ? new Date(`${window.from}T00:00:00Z`) : new Date(), to = window ? new Date(`${window.to}T23:59:59Z`) : new Date(Date.now() + 100 * 86400_000);
     // The source returns one release per symbol: query past and future separately.
     const ranges = window ? [[from, new Date(Date.now() - 1)], [new Date(), to]] : [[from, to]];
-    const rows = (await Promise.all(ranges.map(([a, b]) => fetchCompanyEventsCalendar({ from: a, to: b, minMarketCapUsd: 0, symbols: [symbol] })))).flat();
-    const selected = rows.filter(e => String(e.shortSymbol ?? e.symbol).toUpperCase() === symbol)
-      .map(e => ({ ...e, date: new Date(e.timestamp).toISOString().slice(0, 10) })).sort((a, b) => a.date.localeCompare(b.date));
-    const next = selected.find(e => e.date >= new Date().toISOString().slice(0, 10));
-    return { source: 'tradingview', from: from.toISOString().slice(0, 10), to: next?.date ?? to.toISOString().slice(0, 10),
-      complete: Boolean(next), events: selected, status: selected.length ? 'event-found' : 'unknown' };
+    try {
+      const rows = (await Promise.all(ranges.map(([a, b]) => fetchCompanyEventsCalendar({ from: a, to: b, minMarketCapUsd: 0, symbols: [symbol] })))).flat();
+      const selected = rows.filter(e => String(e.shortSymbol ?? e.symbol).toUpperCase() === symbol)
+        .map(e => ({ ...e, date: new Date(e.timestamp).toISOString().slice(0, 10) })).sort((a, b) => a.date.localeCompare(b.date));
+      const next = selected.find(e => e.date >= new Date().toISOString().slice(0, 10));
+      return { source: 'tradingview', from: from.toISOString().slice(0, 10), to: next?.date ?? to.toISOString().slice(0, 10),
+        complete: Boolean(next), events: selected, status: selected.length ? 'event-found' : 'unknown' };
+    } catch {
+      return fetchYahooEarningsDate(symbol);
+    }
   }
 
   async function earningsCoverage(symbols) {

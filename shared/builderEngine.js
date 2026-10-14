@@ -1,4 +1,4 @@
-import { optionPrice, optionDelta } from "./optionMath.js";
+import { optionPrice, optionDelta, normalCdf } from "./optionMath.js";
 
 export const ENGINE_VERSION = "studio-v1";
 export const DAY = 86400000;
@@ -123,6 +123,44 @@ export function technicals(bars) {
       : null,
   };
 }
+// Polymarket leg, priced the way the classic Threshold Hedge heatmap does it: before resolution the Yes
+// price is a digital-option probability, calibrated (in logit space, fading to zero at resolution) so
+// today's model equals today's market price; at resolution it is 1 or 0 depending on where the stock is.
+// Touch ("hit") markets use the terminal endpoint as an approximation.
+const clampProbability = (p) => clamp(p, 0.001, 0.999);
+const logit = (p) => Math.log(p / (1 - p));
+const logistic = (x) => 1 / (1 + Math.exp(-x));
+function digitalProbability({ spot, target, years, vol, rate, direction }) {
+  if (!(spot > 0 && target > 0 && vol > 0 && years > 0)) return null;
+  const d2 =
+    (Math.log(spot / target) + (rate - (vol * vol) / 2) * years) /
+    (vol * Math.sqrt(years));
+  return direction === "down" ? 1 - normalCdf(d2) : normalCdf(d2);
+}
+export function binaryYesPrice(binary, spot, date, rate = 0.0425) {
+  const down = binary.direction === "down";
+  const years = (Date.parse(binary.resolution) - Date.parse(date)) / DAY / 365;
+  if (!(years > 0)) return (down ? spot <= binary.target : spot >= binary.target) ? 1 : 0;
+  if (!(spot > 0)) return down ? 0.999 : 0.001;
+  const nowYears = Math.max(
+    (Date.parse(binary.resolution) - Date.parse(String(binary.asOf).slice(0, 10))) / DAY / 365,
+    1 / 365,
+  );
+  const T = Math.max(years, 1 / 365);
+  const args = { target: binary.target, vol: binary.iv, rate, direction: binary.direction };
+  const raw = digitalProbability({ ...args, spot, years: T });
+  const modeledNow = digitalProbability({ ...args, spot: binary.spotNow, years: nowYears });
+  if (raw == null || modeledNow == null || !(binary.yesNow > 0 && binary.yesNow < 1))
+    return clampProbability(raw ?? binary.yesNow ?? 0.5);
+  const shift = logit(clampProbability(binary.yesNow)) - logit(clampProbability(modeledNow));
+  return clampProbability(
+    logistic(logit(clampProbability(raw)) + shift * clamp(T / nowYears, 0, 1)),
+  );
+}
+export function binaryPnl(binary, spot, date, rate) {
+  const yes = binaryYesPrice(binary, spot, date, rate);
+  return binary.quantity * ((binary.outcome === "NO" ? 1 - yes : yes) - binary.entryPrice);
+}
 export function payoff(
   row,
   spot,
@@ -153,13 +191,20 @@ export function payoff(
               riskFreeRate: rate,
             });
       return p + l.quantity * 100 * (value - l.price);
-    }, 0) -
+    }, 0) +
+    (row.binary ? binaryPnl(row.binary, spot, date, rate) : 0) -
     row.fees
   );
 }
 export function summarizePosition(row) {
   const strikes = [
-    ...new Set([0, row.spot, ...row.legs.map((l) => l.strike)]),
+    ...new Set([
+      0,
+      row.spot,
+      ...row.legs.map((l) => l.strike),
+      // The Polymarket payoff jumps at its threshold; evaluate both sides of it.
+      ...(row.binary ? [row.binary.target * 0.9999, row.binary.target * 1.0001] : []),
+    ]),
   ].sort((a, b) => a - b);
   const values = strikes.map((s) => payoff(row, s));
   const slope =
@@ -193,6 +238,55 @@ export function summarizePosition(row) {
         : 0,
       1,
     ),
+  };
+}
+// Scanner-table metrics shared with the covered-income scanner columns.
+// EV uses a risk-neutral lognormal at the legs' average IV (or realized vol), so it is a model estimate.
+export function incomeMetrics(row) {
+  const dte = Math.max(
+    1,
+    Math.round((Date.parse(row.expiry) - Date.parse(row.asOf.slice(0, 10))) / DAY),
+  );
+  const optionRow = row.legs.length > 0;
+  const annRetPct =
+    optionRow && row.capital > 0
+      ? ((-row.netDebit - row.fees) / row.capital) * (365 / dte) * 100
+      : null;
+  const vol = row.iv > 0 ? row.iv : row.hv > 0 ? row.hv : null;
+  let evPerBp = null;
+  if (optionRow && vol && row.capital > 0) {
+    const T = dte / 365,
+      rate = 0.0425;
+    let sum = 0,
+      weight = 0;
+    for (let i = 0; i <= 40; i++) {
+      const z = -4 + (8 * i) / 40,
+        w = Math.exp((-z * z) / 2),
+        price =
+          row.spot * Math.exp((rate - (vol * vol) / 2) * T + vol * Math.sqrt(T) * z);
+      sum += w * payoff(row, price);
+      weight += w;
+    }
+    evPerBp = (sum / weight / row.capital) * 100;
+  }
+  const legScores = row.legs.map((l) => {
+    const spread = l.ask > 0 ? (l.ask - l.bid) / ((l.ask + l.bid) / 2) : 1;
+    return (
+      (clamp(100 - spread * 1000, 0, 100) +
+        clamp(((l.oi ?? 0) / 500) * 100, 0, 100) +
+        clamp(((l.volume ?? 0) / 100) * 100, 0, 100) +
+        (l.verifiedQuote ? 100 : 70)) /
+      4
+    );
+  });
+  return {
+    dte,
+    annRetPct,
+    evPerBp,
+    liquidity: legScores.length
+      ? Math.round(Math.min(...legScores))
+      : null,
+    downBreakeven: row.breakevens.length ? Math.min(...row.breakevens) : null,
   };
 }
 export function baseRating(row) {
@@ -233,6 +327,70 @@ export function baseRating(row) {
       Math.round(lower + (parts.liquidity == null ? 20 : 0)),
     ],
     version: ENGINE_VERSION,
+  };
+}
+// Support/resistance fit of the SHORT legs, -10..+8 points. A short put is safer at or below
+// support and a short call at or above resistance; the cushion is measured in ATR14 units.
+// Long legs and stock-only rows are not scored. `zones` comes from buildPriceZones().
+export function supportResistanceAdjustment(row, zones) {
+  const shorts = row.legs.filter((l) => l.quantity < 0);
+  if (!shorts.length) return { points: 0, status: "no-short-legs", legs: [] };
+  const atr = number(zones?.atr14);
+  const legs = shorts
+    .map((l) => {
+      const put = l.type === "put",
+        level = number(put ? zones?.supportPrice : zones?.resistancePrice),
+        confidence = number(
+          put ? zones?.supportConfidenceScore : zones?.resistanceConfidenceScore,
+        );
+      if (!(level > 0) || !(atr > 0)) return null;
+      // A level on the wrong side of spot (e.g. "resistance" below price after a breakout) is not a level.
+      if (row.spot > 0 && (put ? level > row.spot : level < row.spot)) return null;
+      const cushion = (put ? level - l.strike : l.strike - level) / atr,
+        weight = 0.5 + 0.5 * clamp((confidence ?? 0) / 100, 0, 1),
+        points =
+          cushion >= 0
+            ? 8 * Math.min(cushion, 1) * weight
+            : 10 * Math.max(cushion, -1);
+      return {
+        type: l.type,
+        strike: l.strike,
+        level,
+        confidence,
+        cushionAtr: cushion,
+        points,
+      };
+    })
+    .filter(Boolean);
+  if (!legs.length) return { points: 0, status: "levels-unavailable", legs: [] };
+  return {
+    points: legs.reduce((a, l) => a + l.points, 0) / legs.length,
+    status: "scored",
+    legs,
+  };
+}
+// Risk layer added to base + catalysts. The calendar part is a placeholder: event windows are
+// recorded for display, but they score 0 until AI event analysis fills `calendar.points`
+// (to be combined with `calendar.volSensitivity`, the HV-based macro sensitivity).
+export function riskAdjustment(row, { zones = null, calendar = {} } = {}) {
+  const supportResistance = supportResistanceAdjustment(row, zones),
+    hv = number(row.hv);
+  const cal = {
+    points: 0,
+    status: "awaiting-ai",
+    volSensitivity: hv > 0 ? clamp(hv / 0.3, 0.6, 1.4) : null,
+    ...calendar,
+  };
+  cal.points = number(cal.points) ?? 0; // an AI writer passing undefined/NaN must not erase the layer
+  return {
+    // Integer, so the displayed parts add up to the integer overall score.
+    total: clamp(
+      Math.round(supportResistance.points + cal.points),
+      -25,
+      8,
+    ),
+    supportResistance,
+    calendar: cal,
   };
 }
 export function applyCatalysts(
@@ -289,6 +447,7 @@ export function applyCatalysts(
     -15,
     15,
   );
+  const risk = number(row.riskAdjustment?.total) ?? 0;
   return {
     ...row,
     contributions,
@@ -296,8 +455,10 @@ export function applyCatalysts(
     overall:
       row.baseScore == null
         ? null
-        : clamp(row.baseScore + catalystImpact, 0, 100),
-    adjustedRange: row.scoreRange.map((n) => clamp(n + catalystImpact, 0, 100)),
+        : clamp(Math.round(row.baseScore + catalystImpact + risk), 0, 100),
+    adjustedRange: row.scoreRange.map((n) =>
+      clamp(Math.round(n + catalystImpact + risk), 0, 100),
+    ),
   };
 }
 export function buildCandidates(
@@ -399,6 +560,8 @@ export function buildCandidates(
           contract: c.contractSymbol,
           bid: number(c.bid),
           ask: number(c.ask),
+          bidSize: number(c.bidSize),
+          askSize: number(c.askSize),
           oi: number(c.openInterest),
           volume: number(c.volume),
           source: c.source,
@@ -472,6 +635,7 @@ export function buildCandidates(
           0,
         );
       Object.assign(row, summarizePosition(row), baseRating(row));
+      Object.assign(row, incomeMetrics(row));
       rows.push(row);
     }
   return rows;

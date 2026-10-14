@@ -6,6 +6,7 @@ import {
   dateOnly,
   DAY,
 } from "../../shared/builderEngine.js";
+import { optionPrice } from "../../shared/optionMath.js";
 export function demoWorkspace(settings = {}) {
   const today = dateOnly(Date.now()),
     definition = { ...DEFAULT_STRATEGY, ...settings, pricingMode: "modeled" },
@@ -49,24 +50,46 @@ export function demoWorkspace(settings = {}) {
       Array.from({ length: 37 }, (_, i) => {
         const strike = Math.round(spot * 0.55 + i * spot * 0.025),
           distance = (strike - spot) / spot;
-        return ["call", "put"].map((optionType, t) => ({
-          contractSymbol: `SAMPLE:${symbol}:${expiration}:${strike}:${optionType}`,
-          expiration,
-          strike,
-          optionType,
-          openInterest: Math.round(
-            (500 +
-              8500 *
-                Math.exp(-(((distance - (t ? -0.08 : 0.08)) / 0.15) ** 2))) *
-              (0.3 + Math.exp(-e / 7) + 0.6 * (e % 5 === 0)) *
-              (0.75 + 0.25 * Math.sin(i + e + t)),
-          ),
-          volume: Math.round(
-            (60 + 2400 * Math.exp(-((distance / 0.08) ** 2))) *
-              Math.exp(-e / 5) *
-              (0.7 + 0.3 * Math.cos(i * 2 + e + t)),
-          ),
-        }));
+        return ["call", "put"].map((optionType, t) => {
+          // Illustrative quotes so the sample option chain is populated: a volatility smile with put skew
+          // priced by the European model, with a ~2% spread. Not market data.
+          const iv = 0.28 + 0.4 * Math.abs(distance) + (t ? 0.03 : 0),
+            mid = optionPrice({
+              type: optionType,
+              spot,
+              strike,
+              timeYears: (Date.parse(expiration) - Date.parse(today)) / DAY / 365,
+              volatility: iv,
+            }),
+            half = Math.max(0.005, mid * 0.01),
+            bid = Math.max(0, Math.round((mid - half) * 100) / 100);
+          return {
+            contractSymbol: `SAMPLE:${symbol}:${expiration}:${strike}:${optionType}`,
+            symbol,
+            expiration,
+            strike,
+            optionType,
+            bid,
+            ask: Math.round((mid + half) * 100) / 100,
+            bidSize: 5 + Math.round(40 * (0.5 + 0.5 * Math.sin(i * 3 + e + t))),
+            askSize: 5 + Math.round(40 * (0.5 + 0.5 * Math.cos(i * 2 + e + t))),
+            impliedVolatility: iv,
+            hasRealBidAsk: bid > 0,
+            isLive: false,
+            openInterest: Math.round(
+              (500 +
+                8500 *
+                  Math.exp(-(((distance - (t ? -0.08 : 0.08)) / 0.15) ** 2))) *
+                (0.3 + Math.exp(-e / 7) + 0.6 * (e % 5 === 0)) *
+                (0.75 + 0.25 * Math.sin(i + e + t)),
+            ),
+            volume: Math.round(
+              (60 + 2400 * Math.exp(-((distance / 0.08) ** 2))) *
+                Math.exp(-e / 5) *
+                (0.7 + 0.3 * Math.cos(i * 2 + e + t)),
+            ),
+          };
+        });
       }).flat(),
     );
     datasets[symbol] = {

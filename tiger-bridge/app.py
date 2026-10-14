@@ -52,6 +52,14 @@ def client():
     return _client
 
 
+class RateLimited(BlockingIOError):
+    """Local per-function call budget exhausted; `retry_after` is the seconds until a slot frees up."""
+
+    def __init__(self, retry_after):
+        self.retry_after = max(retry_after, 0.0)
+        super().__init__(f'Provider rate limit: retry after {max(int(self.retry_after + 0.999), 1)} seconds')
+
+
 def call(name, *args, **kwargs):
     with _lock:
         now = time.monotonic()
@@ -61,15 +69,31 @@ def call(name, *args, **kwargs):
         # Leave headroom for another consumer; one owner is recommended.
         limit = 8 if name in ('get_quote_permission', 'get_kline_quota', 'get_market_status') else 45
         if len(q) >= limit:
-            raise BlockingIOError('Provider rate limit: retry after 60 seconds')
+            raise RateLimited(60 - (now - q[0]))
         q.append(now)
         return serializable(getattr(client(), name)(*args, **kwargs))
+
+
+_expiry_cache = {}
+
+
+def expiry_timestamp(symbol, expiry):
+    from tigeropen.common.consts import Market
+    entry = _expiry_cache.get(symbol)
+    if not entry or time.monotonic() - entry[0] > 3600:
+        rows = call('get_option_expirations', [symbol], market=Market.US)
+        entry = (time.monotonic(), {r['date']: r['timestamp'] for r in rows if r.get('date') and r.get('timestamp')})
+        _expiry_cache[symbol] = entry
+    return entry[1].get(expiry, expiry)
 
 
 def route(path, query):
     from tigeropen.common.consts import Market, BarPeriod, OptionAnalysisPeriod, CapitalPeriod, FinancialReportPeriodType
     from tigeropen.common.consts import Income, CashFlow, Balance, Valuation
     symbol = query.get('symbol', [''])[0].upper()
+    symbols = [x.strip().upper() for x in query.get('symbols', [''])[0].split(',') if x.strip()]
+    if path == '/options/analysis' and symbols and not symbol:
+        symbol = symbols[0]
     if path not in ('/health', '/permissions', '/session') and (not symbol or len(symbol) > 16 or any(c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-' for c in symbol)):
         raise ValueError('Invalid symbol')
     today = dt.datetime.now(dt.timezone.utc).date()
@@ -112,14 +136,25 @@ def route(path, query):
     if path == '/options/chain':
         expiry = query.get('expiry', [''])[0]
         dt.date.fromisoformat(expiry)
-        return call('get_option_chain', symbol, expiry, market=Market.US)
+        # A date string returns an empty chain for single-stock options; Tiger's own
+        # expiry timestamp from get_option_expirations returns the real chain.
+        # Without return_greek_value Tiger returns implied_vol and all Greeks as 0.
+        return call('get_option_chain', symbol, expiry_timestamp(symbol, expiry), market=Market.US, return_greek_value=True)
     if path == '/options/depth':
         identifiers = query.get('contract', [])[:30]
         if not identifiers:
             raise ValueError('contract required')
         return call('get_option_depth', identifiers, market=Market.US)
     if path == '/options/analysis':
-        return call('get_option_analysis', [symbol], period=OptionAnalysisPeriod.FIFTY_TWO_WEEK,
+        periods = {'13week': OptionAnalysisPeriod.THIRTEEN_WEEK, '26week': OptionAnalysisPeriod.TWENTY_SIX_WEEK,
+                   '52week': OptionAnalysisPeriod.FIFTY_TWO_WEEK, '3year': OptionAnalysisPeriod.THREE_YEAR}
+        period = query.get('period', ['52week'])[0]
+        if period not in periods:
+            raise ValueError('Unsupported analysis period')
+        batch = (symbols or [symbol])[:20]
+        if any(not s or len(s) > 16 or any(c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-' for c in s) for s in batch):
+            raise ValueError('Invalid symbol')
+        return call('get_option_analysis', batch, period=periods[period],
                     market=Market.US, require_volatility_list=True)
     if path == '/flow':
         return {'history': call('get_capital_flow', symbol, market=Market.US, period=CapitalPeriod.DAY, limit=260),
@@ -161,10 +196,13 @@ class Handler(BaseHTTPRequestHandler):
             data = route(url.path, parse_qs(url.query))
             self.respond(200, {'data': data, 'fetchedAt': dt.datetime.now(dt.timezone.utc).isoformat()})
         except BlockingIOError as exc:
-            self.respond(429, {'error': str(exc)})
+            self.respond(429, {'error': str(exc), 'retryAfter': round(getattr(exc, 'retry_after', 60.0), 2)})
         except ValueError:
             self.respond(400, {'error': 'Invalid request or Tiger configuration missing'})
         except Exception as exc:
+            if '4000' in str(exc) and 'permission denied' in str(exc):
+                self.respond(403, {'error': 'Tiger permission denied (4000): option depth is not available to this account (Tiger sells no US option depth/Level 2 product)', 'type': type(exc).__name__})
+                return
             # SDK error text can contain signed request details. Never return/log it.
             self.respond(502, {'error': 'Tiger request failed: check entitlement, device ownership and configuration', 'type': type(exc).__name__})
 
@@ -173,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         if code == 429:
-            self.send_header('Retry-After', '60')
+            self.send_header('Retry-After', str(max(int(body.get('retryAfter', 60) + 0.999), 1)))
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
