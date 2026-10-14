@@ -2,6 +2,8 @@
 
 Tools: `list_market_topics`, `upsert_market_topic`, `get_next_analysis_task`, `complete_analysis_task`.
 
+`upsert_market_topic` takes an optional `category` (`general`, `commodity`, `forex`, `ticker`, `social`) and `symbols` (tickers, required for `ticker`). They decide where the topic appears in the Builder's AI suggestions: **General** (general, commodity, forex), **Ticker** (topics mentioning the selected stock), **Social**, or **Other tickers**. Omitted fields keep an existing topic's values; new topics default to `general`. After upgrading, refresh the connector's tools in ChatGPT (or reconnect in Claude) so the client sees the new parameters.
+
 ## Local (stdio)
 `npm start` with `HEDGEHUB_API_URL` and `HEDGEHUB_API_KEY` set.
 

@@ -2131,19 +2131,30 @@ export function claimLegacyUserData(userId) {
   ]);
 }
 
+// Columns returned for a market topic wherever it is read or written.
+const MARKET_TOPIC_COLUMNS = `
+  id,
+  title,
+  weight,
+  bullish_score AS "bullishScore",
+  bearish_score AS "bearishScore",
+  summary,
+  category,
+  symbols,
+  status,
+  created_by AS "createdBy",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt"`;
+
+// text[] literal; an empty list becomes an empty array rather than NULL.
+function textArrayLiteral(values) {
+  const items = (values ?? []).map((value) => quoteLiteral(String(value)));
+  return items.length ? `ARRAY[${items.join(", ")}]::text[]` : "'{}'::text[]";
+}
+
 export function listMarketTopics() {
   return queryJson(`
-    SELECT
-      id,
-      title,
-      weight,
-      bullish_score AS "bullishScore",
-      bearish_score AS "bearishScore",
-      summary,
-      status,
-      created_by AS "createdBy",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
+    SELECT ${MARKET_TOPIC_COLUMNS}
     FROM market_topics
     ORDER BY weight DESC, updated_at DESC
   `);
@@ -2152,17 +2163,7 @@ export function listMarketTopics() {
 export function findMarketTopicByTitle(title) {
   return queryJson(
     `
-      SELECT
-        id,
-        title,
-        weight,
-        bullish_score AS "bullishScore",
-        bearish_score AS "bearishScore",
-        summary,
-        status,
-        created_by AS "createdBy",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
+      SELECT ${MARKET_TOPIC_COLUMNS}
       FROM market_topics
       WHERE lower(title) = lower(${quoteLiteral(String(title ?? "").trim())})
       LIMIT 1
@@ -2175,32 +2176,25 @@ export function createMarketTopic(data) {
   return mutateJson(
     `
       INSERT INTO market_topics (
-        title, weight, bullish_score, bearish_score, summary, status, created_by
+        title, weight, bullish_score, bearish_score, summary, category, symbols, status, created_by
       ) VALUES (
         ${quoteLiteral(data.title)},
         ${Number(data.weight)},
         ${Number(data.bullishScore)},
         ${Number(data.bearishScore)},
         ${quoteLiteral(data.summary)},
+        ${quoteLiteral(data.category ?? "general")},
+        ${textArrayLiteral(data.symbols)},
         ${quoteLiteral(data.status ?? "active")},
         ${quoteLiteral(data.createdBy ?? "agent")}
       )
-      RETURNING
-        id,
-        title,
-        weight,
-        bullish_score AS "bullishScore",
-        bearish_score AS "bearishScore",
-        summary,
-        status,
-        created_by AS "createdBy",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
+      RETURNING ${MARKET_TOPIC_COLUMNS}
     `,
     false
   );
 }
 
+// category / symbols are only written when provided, so callers that predate them cannot reset them.
 export function updateMarketTopic(id, data) {
   return mutateJson(
     `
@@ -2209,20 +2203,12 @@ export function updateMarketTopic(id, data) {
         bullish_score = ${Number(data.bullishScore)},
         bearish_score = ${Number(data.bearishScore)},
         summary = ${quoteLiteral(data.summary)},
+        ${data.category ? `category = ${quoteLiteral(data.category)},` : ""}
+        ${data.symbols ? `symbols = ${textArrayLiteral(data.symbols)},` : ""}
         status = ${quoteLiteral(data.status ?? "active")},
         updated_at = NOW()
       WHERE id = ${Number(id)}
-      RETURNING
-        id,
-        title,
-        weight,
-        bullish_score AS "bullishScore",
-        bearish_score AS "bearishScore",
-        summary,
-        status,
-        created_by AS "createdBy",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
+      RETURNING ${MARKET_TOPIC_COLUMNS}
     `,
     false
   );

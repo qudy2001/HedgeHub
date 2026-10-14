@@ -414,12 +414,11 @@ export function applyCatalysts(
       const fresh =
         i.checkedAt &&
         Date.parse(asOf) - Date.parse(i.checkedAt) >= -5000 &&
-        Date.parse(asOf) - Date.parse(i.checkedAt) < 7 * DAY;
+        Date.parse(asOf) - Date.parse(i.checkedAt) < 30 * DAY;
       const eligible =
         enabled &&
         !duplicate &&
         i.verified &&
-        i.sources?.length &&
         fresh &&
         (!i.impactUntil || i.impactUntil >= asOf.slice(0, 10));
       return {
@@ -433,13 +432,11 @@ export function applyCatalysts(
             ? "Related event already counted"
             : !i.verified
               ? "Unverified"
-              : !i.sources?.length
-                ? "Source required"
-                : !fresh
-                  ? "Evidence needs refresh"
-                  : i.impactUntil && i.impactUntil < asOf.slice(0, 10)
-                    ? "Impact horizon ended"
-                    : i.rationale,
+              : !fresh
+                ? "Evidence needs refresh"
+                : i.impactUntil && i.impactUntil < asOf.slice(0, 10)
+                  ? "Impact horizon ended"
+                  : i.rationale,
       };
     });
   const catalystImpact = clamp(

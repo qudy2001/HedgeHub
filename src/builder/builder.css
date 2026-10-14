@@ -1603,6 +1603,59 @@ body.studio-body:before {
   color: var(--s-muted);
   font-weight: 400;
 }
+/* "AI suggestions" dialog: tabs and AI market topic cards */
+.studio-dialog .suggest-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 14px 0 8px;
+  border-bottom: 1px solid var(--s-line, #e2e9ed);
+}
+.studio-dialog .suggest-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 12px;
+  margin-bottom: -1px;
+  color: var(--s-muted, #788791);
+}
+.studio-dialog .suggest-tabs button[aria-selected="true"] {
+  color: var(--s-text, #172a33);
+  border-bottom-color: var(--s-green, #087655);
+  font-weight: 600;
+}
+.suggest-tabs .count {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--s-muted, #788791);
+}
+.topic-card .topic-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.topic-card .topic-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  font-size: 11px;
+}
+.topic-card .topic-summary {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.topic-card small {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--s-muted, #788791);
+}
 .test-form {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0 16px;

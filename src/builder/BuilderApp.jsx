@@ -23,6 +23,12 @@ import {
   validateStrategy,
 } from "../../shared/builderEngine.js";
 import { HEDGE_SCAN_STRATEGIES, HEDGE_TEMPLATES, hedgeChoicesForRow, templatesForHedgeChoices } from "../../shared/hedgeScan.js";
+import {
+  MARKET_TOPIC_CATEGORY_LABELS,
+  SUGGESTION_TABS,
+  suggestionTab,
+  topicToItem,
+} from "../../shared/marketTopics.js";
 import { demoWorkspace } from "./demo.js";
 import "./builder.css";
 import "../styles/monitored-stocks.css";
@@ -286,6 +292,124 @@ function writeTrackerFolders(state) {
     localStorage.setItem(TRACKER_FOLDERS_KEY, JSON.stringify(state));
   } catch {}
 }
+
+// "AI suggestions" dialog: AI market topics (written through the MCP connector) sorted into tabs, plus the
+// TradingAgents suggestions, which all stay in the ticker tab.
+const SUGGESTION_TAB_EMPTY = {
+  general: "No general topics yet. Ask your AI connector to add some with category general, commodity or forex.",
+  ticker: "Nothing for this stock yet.",
+  social: "No social topics yet. Ask your AI connector to add some with category social.",
+  other: "No topics about other tickers yet.",
+};
+function TopicCard({ topic, onAdd }) {
+  return (
+    <article className="detail-box topic-card">
+      <div className="topic-head">
+        <strong>{topic.title}</strong>
+        <span className="badge neutral">
+          {MARKET_TOPIC_CATEGORY_LABELS[topic.category] ?? topic.category}
+        </span>
+      </div>
+      <div className="topic-meta">
+        <span>Weight {topic.weight}</span>
+        <span className="positive">Bullish {topic.bullishScore}</span>
+        <span className="negative">Bearish {topic.bearishScore}</span>
+        {(topic.symbols ?? []).map((s) => (
+          <span className="badge neutral" key={s}>
+            {s}
+          </span>
+        ))}
+      </div>
+      <p className="topic-summary">{topic.summary}</p>
+      <small>AI market topic · updated {sourceDate(topic.updatedAt)}</small>
+      <div>
+        <button onClick={() => onAdd(topic)}>Add to strategy</button>
+      </div>
+    </article>
+  );
+}
+function SuggestionsPanel({
+  topics,
+  suggestions,
+  symbol,
+  agentAvailable,
+  onRefreshAgent,
+  onAddTopic,
+  onAddSuggestion,
+}) {
+  const [chosen, setChosen] = useState(null);
+  const grouped = useMemo(() => {
+    const groups = { general: [], ticker: [], social: [], other: [] };
+    for (const topic of [...topics].sort((a, b) => b.weight - a.weight)) {
+      const tab = suggestionTab(
+        { kind: "topic", category: topic.category, symbols: topic.symbols },
+        symbol,
+      );
+      groups[tab].push({ kind: "topic", topic });
+    }
+    for (const suggestion of suggestions) {
+      groups[suggestionTab({ kind: "agent" }, symbol)].push({ kind: "agent", suggestion });
+    }
+    return groups;
+  }, [topics, suggestions, symbol]);
+  const active =
+    chosen ??
+    (grouped.ticker.length
+      ? "ticker"
+      : (SUGGESTION_TABS.find((tab) => grouped[tab].length) ?? "general"));
+  const tabLabel = {
+    general: "General",
+    ticker: symbol,
+    social: "Social",
+    other: "Other tickers",
+  };
+  const tabHint = {
+    general: "Market-wide topics: macro, rates, indices, commodities and forex.",
+    ticker: `Topics about ${symbol} and TradingAgents suggestions.`,
+    social: "Social-media and retail-sentiment themes.",
+    other: "Topics about other tickers.",
+  };
+  return (
+    <>
+      <p>
+        {agentAvailable
+          ? "Suggested checkpoints from the latest agent reports and AI market topics. Review each one before enabling its rating contribution."
+          : "TradingAgents is not configured. Manual tracking and AI market topics are still available."}
+      </p>
+      <button onClick={onRefreshAgent}>Refresh AI suggestions</button>
+      <div className="suggest-tabs" role="tablist">
+        {SUGGESTION_TABS.map((tab) => (
+          <button
+            key={tab}
+            role="tab"
+            aria-selected={active === tab}
+            onClick={() => setChosen(tab)}
+          >
+            {tabLabel[tab]} <span className="count">{grouped[tab].length}</span>
+          </button>
+        ))}
+      </div>
+      <p className="subtle">{tabHint[active]}</p>
+      {grouped[active].length ? (
+        grouped[active].map((entry) =>
+          entry.kind === "topic" ? (
+            <TopicCard key={`topic-${entry.topic.id}`} topic={entry.topic} onAdd={onAddTopic} />
+          ) : (
+            <article className="detail-box" key={entry.suggestion.id}>
+              <strong>{entry.suggestion.title}</strong>
+              <p>
+                {entry.suggestion.symbol} · {entry.suggestion.sentiment}
+              </p>
+              <button onClick={() => onAddSuggestion(entry.suggestion)}>Add to strategy</button>
+            </article>
+          ),
+        )
+      ) : (
+        <Empty>{SUGGESTION_TAB_EMPTY[active]}</Empty>
+      )}
+    </>
+  );
+}
 function Field({ label, children }) {
   return (
     <label className="studio-field">
@@ -503,6 +627,7 @@ function Workspace({ demo, user, logout, presentation }) {
   const [agentFilter, setAgentFilter] = useState("All"),
     [showResolved, setShowResolved] = useState(true),
     [trackerFolders, setTrackerFolders] = useState(readTrackerFolders),
+    [marketTopics, setMarketTopics] = useState([]),
     [volDays, setVolDays] = useState(60),
     [past, setPast] = useState(30),
     [future, setFuture] = useState(30),
@@ -761,6 +886,18 @@ function Workspace({ demo, user, logout, presentation }) {
   useEffect(() => {
     document.documentElement.dataset.theme = layout.theme;
   }, [layout.theme]);
+  // AI market topics for the suggestions dialog; refetched each time the dialog opens.
+  const suggestionsOpen = modal?.type === "suggestions";
+  useEffect(() => {
+    if (demo) return;
+    let live = true;
+    api("/builder/market-topics")
+      .then((data) => live && setMarketTopics(data.topics ?? []))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [demo, suggestionsOpen]);
   useEffect(() => {
     if (demo) {
       try {
@@ -1308,7 +1445,7 @@ function Workspace({ demo, user, logout, presentation }) {
             className="badge neutral"
             onClick={() => setModal({ type: "suggestions" })}
           >
-            {agent?.suggestions?.length ?? 0} suggestions
+            {(agent?.suggestions?.length ?? 0) + marketTopics.length} suggestions
           </button>
           <button className="text-button" onClick={() => navigate("tracker")}>
             Open tracker ↗
@@ -3257,36 +3394,32 @@ function Workspace({ demo, user, logout, presentation }) {
             </>
           )}
           {modal.type === "suggestions" && (
-            <>
-              <p>
-                {agentAvailable
-                  ? "Suggested checkpoints from the latest agent reports. Review sources before enabling rating contributions."
-                  : "TradingAgents is not configured. Manual tracking is available."}
-              </p>
-              <button onClick={refreshAgent}>Refresh AI suggestions</button>
-              {agent?.suggestions?.map((s) => (
-                <article className="detail-box" key={s.id}>
-                  <strong>{s.title}</strong>
-                  <p>
-                    {s.symbol} · {s.sentiment}
-                  </p>
-                  <button
-                    onClick={() =>
-                      setModal({
-                        type: "item",
-                        item: {
-                          ...s,
-                          id: undefined,
-                          impactUntil: addDays(dateOnly(Date.now()), 30),
-                        },
-                      })
-                    }
-                  >
-                    Add to strategy
-                  </button>
-                </article>
-              ))}
-            </>
+            <SuggestionsPanel
+              topics={marketTopics}
+              suggestions={agent?.suggestions ?? []}
+              symbol={symbol}
+              agentAvailable={agentAvailable}
+              onRefreshAgent={refreshAgent}
+              onAddTopic={(topic) =>
+                setModal({
+                  type: "item",
+                  item: {
+                    ...topicToItem(topic, symbol),
+                    impactUntil: addDays(dateOnly(Date.now()), 30),
+                  },
+                })
+              }
+              onAddSuggestion={(s) =>
+                setModal({
+                  type: "item",
+                  item: {
+                    ...s,
+                    id: undefined,
+                    impactUntil: addDays(dateOnly(Date.now()), 30),
+                  },
+                })
+              }
+            />
           )}
           {modal.type === "addCalendarItem" && (
             <div className="extra-picker">
@@ -3643,7 +3776,7 @@ function ItemForm({ item, onSave, onRemove }) {
           />
         </Field>
       </div>
-      <Field label="Source URLs (one per line)">
+      <Field label="Source URLs (optional, one per line)">
         <textarea
           value={(form.sources ?? []).join("\n")}
           onChange={(e) =>
@@ -3678,7 +3811,7 @@ function ItemForm({ item, onSave, onRemove }) {
       </label>
       <p className="subtle">
         Unverified or stale evidence contributes zero. Reviewed contributions
-        expire after 7 days unless refreshed, and never accumulate on repeated
+        expire after 30 days unless refreshed, and never accumulate on repeated
         scans. Resolved is a status, not automatically bullish.
       </p>
       {item.agentUpdate && (

@@ -61,6 +61,12 @@ export function createBuilderStore(
         .all(owner, id)
         .map(parse);
     },
+    allItems() {
+      return db
+        .prepare("SELECT owner, strategy_id, payload FROM studio_items")
+        .all()
+        .map((r) => ({ owner: r.owner, strategy: r.strategy_id, item: JSON.parse(r.payload) }));
+    },
     item(owner, strategy, id) {
       return parse(
         db

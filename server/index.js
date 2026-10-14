@@ -133,6 +133,7 @@ import {
 } from "./providers/tradingViewCalendars.js";
 import { scanTradingViewStrategyFinder } from "./providers/tradingViewStrategyFinder.js";
 import { HEDGE_SCAN_IDS, HEDGE_SCAN_STRATEGIES, isVanillaTradingViewRow, summarizeRows } from "../shared/hedgeScan.js";
+import { sanitizeMarketTopicInput } from "../shared/marketTopics.js";
 import { fetchOptionChain, fetchQuotes } from "./providers/marketData.js";
 import {
   blackScholesCall,
@@ -1131,7 +1132,7 @@ app.get("/api/health", (_request, response) => {
 const researchStore = createResearchStore();
 const researchService = createResearchService(researchStore);
 registerResearchRoutes(app, researchStore, researchService);
-registerBuilderRoutes(app, { researchService });
+const builderService = registerBuilderRoutes(app, { researchService });
 const researchTimer = setInterval(() => { researchService.tick().catch(() => {}); }, 15 * 60_000);
 researchTimer.unref();
 
@@ -5800,26 +5801,6 @@ function buildGptUsageEntry(request) {
   };
 }
 
-function sanitizeMarketTopicInput(body = {}) {
-  const title = String(body.title ?? "").trim();
-  const weight = Number(body.weight);
-  const bullishScore = Number(body.bullishScore);
-  const bearishScore = Number(body.bearishScore);
-  const summary = String(body.summary ?? "").trim();
-
-  if (!title) throw new Error("title is required");
-  if (!Number.isFinite(weight) || weight < 1 || weight > 100) throw new Error("weight must be between 1 and 100");
-  if (!Number.isFinite(bullishScore) || bullishScore < 0 || bullishScore > 100) {
-    throw new Error("bullishScore must be between 0 and 100");
-  }
-  if (!Number.isFinite(bearishScore) || bearishScore < 0 || bearishScore > 100) {
-    throw new Error("bearishScore must be between 0 and 100");
-  }
-  if (!summary) throw new Error("summary is required");
-
-  return { title, weight, bullishScore, bearishScore, summary };
-}
-
 app.get("/api/gpt/market-topics", requireApiKey, (request, response) => {
   const usageEntry = buildGptUsageEntry(request);
   try {
@@ -5844,9 +5825,24 @@ app.get("/api/gpt/market-topics", requireApiKey, (request, response) => {
 
 app.post("/api/gpt/market-topics", requireApiKey, (request, response) => {
   const usageEntry = buildGptUsageEntry(request);
+  let existing = null;
+  try {
+    existing = findMarketTopicByTitle(String(request.body?.title ?? "").trim());
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 500,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(500).json({ error: error.message });
+    return;
+  }
+
   let input;
   try {
-    input = sanitizeMarketTopicInput(request.body ?? {});
+    // An existing topic supplies the category and symbols the caller left out.
+    input = sanitizeMarketTopicInput(request.body ?? {}, existing);
   } catch (error) {
     recordGptApiUsage({
       ...usageEntry,
@@ -5859,8 +5855,12 @@ app.post("/api/gpt/market-topics", requireApiKey, (request, response) => {
   }
 
   try {
-    const existing = findMarketTopicByTitle(input.title);
     const topic = existing ? updateMarketTopic(existing.id, input) : createMarketTopic(input);
+    try {
+      builderService.syncMarketTopics([topic]); // linked tracking items follow the topic
+    } catch (error) {
+      logWarn("Could not refresh tracking items from topic", { subsystem: "market-topics", error });
+    }
     recordGptApiUsage({ ...usageEntry, statusCode: existing ? 200 : 201, responseTimeMs: getRequestDurationMs(request) });
     response.status(existing ? 200 : 201).json({
       requestId: crypto.randomUUID(),

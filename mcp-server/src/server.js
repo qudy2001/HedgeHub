@@ -12,7 +12,8 @@ server.registerTool(
   "list_market_topics",
   {
     title: "List market hot topics",
-    description: "List the market hot topics HedgeHub currently tracks, with weight, bullish/bearish rating, and summary.",
+    description:
+      "List the market hot topics HedgeHub currently tracks, with weight, bullish/bearish rating, category, tickers and summary.",
     inputSchema: {}
   },
   async () => {
@@ -26,22 +27,41 @@ server.registerTool(
   {
     title: "Add or update a market hot topic",
     description:
-      "Create a new market hot topic, or update an existing one if the title already matches (case-insensitive).",
+      "Create a new market hot topic, or update an existing one if the title already matches (case-insensitive). " +
+      "Set category (and symbols for ticker topics) so the topic shows up in the right tab of HedgeHub's AI suggestions.",
     inputSchema: {
       title: z.string().min(1).describe("Short topic title, used to match an existing topic"),
       weight: z.number().int().min(1).max(100).describe("How much this topic currently matters, 1-100"),
       bullishScore: z.number().int().min(0).max(100).describe("Bullish rating, 0-100"),
       bearishScore: z.number().int().min(0).max(100).describe("Bearish rating, 0-100"),
-      summary: z.string().min(1).describe("Short analysis summary of why this topic matters")
+      summary: z.string().min(1).describe("Short analysis summary of why this topic matters"),
+      category: z
+        .enum(["general", "commodity", "forex", "ticker", "social"])
+        .optional()
+        .describe(
+          "Tab in HedgeHub's AI suggestions: general (market-wide macro, rates, indices), commodity, forex, " +
+            "ticker (about specific stocks, requires symbols) or social (social-media / retail-sentiment themes). " +
+            "Omit to keep an existing topic's category; new topics default to general."
+        ),
+      symbols: z
+        .array(z.string())
+        .max(20)
+        .optional()
+        .describe(
+          'Tickers the topic is about, e.g. ["TSLA","NVDA"]. Required when category is ticker, optional otherwise. ' +
+            "Omit to keep an existing topic's tickers."
+        )
     }
   },
-  async ({ title, weight, bullishScore, bearishScore, summary }) => {
+  async ({ title, weight, bullishScore, bearishScore, summary, category, symbols }) => {
     const payload = await callHedgeHub("POST", "/api/gpt/market-topics", {
       title,
       weight,
       bullishScore,
       bearishScore,
-      summary
+      summary,
+      ...(category !== undefined ? { category } : {}),
+      ...(symbols !== undefined ? { symbols } : {})
     });
     return { content: [{ type: "text", text: JSON.stringify(payload.results.topic, null, 2) }] };
   }

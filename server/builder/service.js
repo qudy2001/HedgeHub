@@ -26,7 +26,8 @@ import {
   fetchEconomicCalendarWindow,
 } from "../providers/tradingViewCalendars.js";
 import { curatedCatalysts } from "../researchCatalysts.js";
-import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily } from "../db.js";
+import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily, listMarketTopics } from "../db.js";
+import { TOPIC_ITEM_KEY, refreshItemFromTopic } from "../../shared/marketTopics.js";
 const defaultData = async (symbol, s, { needsChain = true } = {}) => {
   const from = addDays(dateOnly(Date.now()), Math.max(1, s.dte - 21)),
     to = addDays(dateOnly(Date.now()), s.dte + 21);
@@ -138,8 +139,6 @@ export function validateItem(input, old = {}) {
       return u.href;
     })
     .slice(0, 10);
-  if (p.verified && !sources.length)
-    throw new Error("Add supporting sources before verifying an item");
   if (p.template && !TEMPLATES[p.template])
     throw new Error("Invalid strategy scope");
   if (p.symbol && !/^[A-Z][A-Z0-9.-]{0,14}$/.test(p.symbol))
@@ -251,6 +250,18 @@ export function registerBuilderRoutes(
         agentConfigured: agentConfigured(),
       }),
     ),
+  );
+  // AI market topics (written through the MCP connector) for the "AI suggestions" view. Postgres only.
+  app.get(
+    "/api/builder/market-topics",
+    route((req, res) => {
+      try {
+        res.json({ available: true, topics: listMarketTopics().filter((topic) => topic.status === "active") });
+      } catch (error) {
+        if (!/DB_TYPE=postgres/.test(String(error.message))) throw error;
+        res.json({ available: false, topics: [] });
+      }
+    }),
   );
   app.put(
     "/api/builder/strategies/:id",
@@ -757,9 +768,30 @@ export function registerBuilderRoutes(
   );
   const timer = setInterval(() => agents.tick().catch(() => {}), 60000);
   timer.unref();
+  // Keeps tracking items that were created from AI market topics in step with those topics.
+  const syncMarketTopics = (topics) => {
+    const byId = new Map(topics.map((topic) => [String(topic.id), topic]));
+    let updated = 0;
+    for (const { owner, strategy, item } of store.allItems()) {
+      const topic = byId.get(TOPIC_ITEM_KEY.exec(item.eventKey ?? "")?.[1]);
+      if (!topic) continue;
+      store.putItem(owner, strategy, refreshItemFromTopic(item, topic));
+      updated += 1;
+    }
+    return updated;
+  };
+  // Catch up on topics that changed while the server was down (Postgres only; ignored otherwise).
+  setTimeout(() => {
+    try {
+      syncMarketTopics(listMarketTopics());
+    } catch {
+      /* no topics available */
+    }
+  }, 15000).unref();
   return {
     store,
     agents,
+    syncMarketTopics,
     close: () => {
       clearInterval(timer);
       stockVolume?.close();

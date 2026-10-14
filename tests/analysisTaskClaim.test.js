@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 
 // Integration test: db-postgres.js shells out to psql and bootstraps db/init on import, so this needs a
 // throwaway Postgres database. It is skipped unless HEDGEHUB_TEST_DATABASE_URL is set and psql is installed.
+// On a brand-new database run integration files one at a time (--test-concurrency=1): each bootstraps the schema.
 // Example: HEDGEHUB_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/hedgehub_test npm test
 const testUrl = process.env.HEDGEHUB_TEST_DATABASE_URL;
 const hasPsql = spawnSync("psql", ["--version"]).status === 0;

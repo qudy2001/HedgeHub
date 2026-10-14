@@ -68,15 +68,14 @@ test("builder API persists layouts/items, isolates users, excludes unverified ev
       await fetch(root + "/strategies/default/items", send("POST", item))
     ).json();
     assert.ok(added.id);
-    assert.equal(
-      (
-        await fetch(
-          root + "/strategies/default/items",
-          send("POST", { ...item, verified: true }),
-        )
-      ).status,
-      400,
+    // Reviewed items need no source URL: the AI analysis itself is accepted as the evidence.
+    const reviewed = await fetch(
+      root + "/strategies/default/items",
+      send("POST", { ...item, title: "Rates (reviewed)", verified: true }),
     );
+    assert.equal(reviewed.status, 201);
+    const reviewedItem = await reviewed.json();
+    assert.equal(reviewedItem.verified, true);
     assert.equal(
       (
         await fetch(
@@ -87,7 +86,7 @@ test("builder API persists layouts/items, isolates users, excludes unverified ev
       400,
     );
     const read = await (await fetch(root + "/strategies/default")).json();
-    assert.equal(read.items.length, 1);
+    assert.equal(read.items.length, 2);
     assert.deepEqual(read.layout.hidden, ["past"]);
     const created = await fetch(
       root + "/scan",
@@ -107,11 +106,13 @@ test("builder API persists layouts/items, isolates users, excludes unverified ev
     }
     assert.equal(done.status, "completed");
     assert.ok(done.result.rows.length >= 6);
-    assert.ok(done.result.rows.every((r) => r.catalystImpact === 0));
+    // only the reviewed item counts; the unreviewed one is excluded from scoring
+    assert.ok(done.result.rows.every((r) => r.catalystImpact === -3));
     assert.ok(done.result.rows.every((r) => r.riskAdjustment?.calendar.points === 0));
     assert.ok(done.result.rows.every((r) => r.riskAdjustment.calendar.status === "awaiting-ai"));
     assert.ok(done.result.rows.some((r) => r.riskAdjustment.calendar.macro?.length === 1));
     await fetch(root + "/strategies/default/items/" + added.id, send("DELETE"));
+    await fetch(root + "/strategies/default/items/" + reviewedItem.id, send("DELETE"));
     assert.equal(
       (await (await fetch(root + "/strategies/default")).json()).items.length,
       0,
