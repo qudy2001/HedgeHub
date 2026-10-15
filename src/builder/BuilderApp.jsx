@@ -803,6 +803,11 @@ function Workspace({ demo, user, logout, presentation }) {
     symbol = selectedMonitoredStock ?? row?.symbol ?? strategy.symbols[0],
     dataset = datasets[symbol],
     tech = useMemo(() => technicals(dataset?.bars ?? []), [dataset]);
+  // Polymarket rows are scored separately, so the tracking strip scores the items against the symbol on its own.
+  const trackingRow = useMemo(
+    () => selected ?? applyCatalysts({ symbol, template: row?.template, baseScore: null, scoreRange: [0, 0] }, items, includeCatalysts),
+    [selected, symbol, row?.template, items, includeCatalysts],
+  );
   const tableRows = useMemo(() => [...ratedRows, ...pmRows], [ratedRows, pmRows]);
   const quoteSizeAvailable = tableRows.some((r) => minLegValue(r, quoteSize) != null);
   const chainScanRows = useMemo(
@@ -1461,8 +1466,8 @@ function Workspace({ demo, user, logout, presentation }) {
           <span>
             {visibleItems.length} relevant · {items.length} saved
           </span>
-          <span className={tone(selected?.catalystImpact)}>
-            Net {delta(selected?.catalystImpact ?? 0)}
+          <span className={tone(trackingRow.catalystImpact)}>
+            Net {delta(trackingRow.catalystImpact ?? 0)}
           </span>
           <span className="spacer" />
           <button onClick={newItem}>+ Add</button>
@@ -1479,7 +1484,7 @@ function Workspace({ demo, user, logout, presentation }) {
         <div className="catalyst-chips">
           {visibleItems.length ? (
             visibleItems.map((item) => {
-              const c = selected?.contributions.find((c) => c.id === item.id);
+              const c = trackingRow.contributions.find((c) => c.id === item.id);
               return (
                 <span className="chip-wrap" key={item.id}>
                   <button
