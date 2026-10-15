@@ -2443,3 +2443,19 @@ body.studio-body:before {
   background: #fdecee;
   border-color: #bd414a;
 }
+
+.topic-history details {
+  border-top: 1px solid var(--s-line, #e2e9ed);
+  padding: 6px 0;
+}
+.topic-history summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+.topic-history .topic-summary {
+  margin: 6px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

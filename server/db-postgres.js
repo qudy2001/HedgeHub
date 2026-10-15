@@ -2194,6 +2194,60 @@ export function createMarketTopic(data) {
   );
 }
 
+// Appends the topic's current analysis to its history unless it is identical to the latest entry.
+export function recordMarketTopicHistory(topic) {
+  return mutateJson(
+    `
+      INSERT INTO market_topic_history (topic_id, weight, bullish_score, bearish_score, summary, category, symbols)
+      SELECT t.id, t.weight, t.bullish_score, t.bearish_score, t.summary, t.category, t.symbols
+      FROM market_topics t
+      WHERE t.id = ${Number(topic.id)}
+        AND NOT EXISTS (
+          SELECT 1 FROM (
+            SELECT * FROM market_topic_history WHERE topic_id = t.id ORDER BY recorded_at DESC, id DESC LIMIT 1
+          ) h
+          WHERE h.summary = t.summary AND h.weight = t.weight
+            AND h.bullish_score = t.bullish_score AND h.bearish_score = t.bearish_score
+        )
+      RETURNING id
+    `,
+    false
+  );
+}
+
+export function listMarketTopicHistory(topicId, limit = 60) {
+  return queryJson(`
+    SELECT
+      id,
+      recorded_at AS "recordedAt",
+      weight,
+      bullish_score AS "bullishScore",
+      bearish_score AS "bearishScore",
+      summary,
+      category,
+      symbols
+    FROM market_topic_history
+    WHERE topic_id = ${Number(topicId)}
+    ORDER BY recorded_at DESC, id DESC
+    LIMIT ${Math.min(Math.max(Number(limit) || 60, 1), 500)}
+  `);
+}
+
+// Lifecycle: 30 days without an update -> archived (hidden from suggestions); 180 days archived -> deleted.
+export function maintainMarketTopics() {
+  const archived = mutateJson(
+    `UPDATE market_topics SET status = 'archived', archived_at = NOW()
+     WHERE status = 'active' AND updated_at < NOW() - INTERVAL '30 days' RETURNING id`,
+    true
+  );
+  const removed = mutateJson(
+    `DELETE FROM market_topics
+     WHERE status = 'archived' AND archived_at < NOW() - INTERVAL '180 days' RETURNING id`,
+    true
+  );
+  return { archived: archived.length, removed: removed.length };
+}
+
 // category / symbols are only written when provided, so callers that predate them cannot reset them.
 export function updateMarketTopic(id, data) {
   return mutateJson(
@@ -2206,6 +2260,7 @@ export function updateMarketTopic(id, data) {
         ${data.category ? `category = ${quoteLiteral(data.category)},` : ""}
         ${data.symbols ? `symbols = ${textArrayLiteral(data.symbols)},` : ""}
         status = ${quoteLiteral(data.status ?? "active")},
+        archived_at = NULL,
         updated_at = NOW()
       WHERE id = ${Number(id)}
       RETURNING ${MARKET_TOPIC_COLUMNS}

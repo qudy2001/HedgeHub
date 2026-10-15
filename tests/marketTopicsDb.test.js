@@ -64,8 +64,32 @@ test("market topics store category and symbols, and updates only change them whe
     assert.equal(social.category, "social");
     assert.deepEqual(social.symbols, []);
 
+    // History records the stored analysis: identical re-writes are skipped, changes are appended newest first.
+    db.recordMarketTopicHistory(social);
+    db.recordMarketTopicHistory(social);
+    assert.equal(db.listMarketTopicHistory(ticker.id).length, 1);
+    const revised = db.updateMarketTopic(ticker.id, { ...fields, weight: 90 });
+    db.recordMarketTopicHistory(revised);
+    db.recordMarketTopicHistory(revised);
+    const history = db.listMarketTopicHistory(ticker.id);
+    assert.equal(history.length, 2);
+    assert.equal(history[0].weight, 90);
+    assert.equal(history[1].category, "social");
+
+    // Lifecycle: stale active topics are archived, long-archived ones are deleted with their history.
+    psql(`UPDATE market_topics SET updated_at = NOW() - INTERVAL '31 days' WHERE id = ${legacy.id}`);
+    assert.equal(db.maintainMarketTopics().archived >= 1, true);
+    assert.equal(db.findMarketTopicByTitle("DB test legacy").status, "archived");
+    psql(`UPDATE market_topics SET archived_at = NOW() - INTERVAL '181 days' WHERE id = ${legacy.id}`);
+    assert.equal(db.maintainMarketTopics().removed >= 1, true);
+    assert.equal(db.findMarketTopicByTitle("DB test legacy"), null);
+    ids.splice(ids.indexOf(legacy.id), 1);
+    // A new update reactivates an archived topic.
+    psql(`UPDATE market_topics SET status = 'archived', archived_at = NOW() WHERE id = ${ticker.id}`);
+    assert.equal(db.updateMarketTopic(ticker.id, { ...fields }).status, "active");
+
     // The database rejects unknown categories even if validation is bypassed.
-    assert.notEqual(psql(`UPDATE market_topics SET category = 'crypto' WHERE id = ${legacy.id}`).status, 0);
+    assert.notEqual(psql(`UPDATE market_topics SET category = 'crypto' WHERE id = ${ticker.id}`).status, 0);
   } finally {
     if (ids.length) psql(`DELETE FROM market_topics WHERE id IN (${ids.join(",")})`);
   }

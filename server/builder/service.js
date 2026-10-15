@@ -26,7 +26,7 @@ import {
   fetchEconomicCalendarWindow,
 } from "../providers/tradingViewCalendars.js";
 import { curatedCatalysts } from "../researchCatalysts.js";
-import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily, listMarketTopics } from "../db.js";
+import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily, listMarketTopics, listMarketTopicHistory } from "../db.js";
 import { TOPIC_ITEM_KEY, refreshItemFromTopic } from "../../shared/marketTopics.js";
 const defaultData = async (symbol, s, { needsChain = true } = {}) => {
   const from = addDays(dateOnly(Date.now()), Math.max(1, s.dte - 21)),
@@ -260,6 +260,17 @@ export function registerBuilderRoutes(
       } catch (error) {
         if (!/DB_TYPE=postgres/.test(String(error.message))) throw error;
         res.json({ available: false, topics: [] });
+      }
+    }),
+  );
+  app.get(
+    "/api/builder/market-topics/:id/history",
+    route((req, res) => {
+      try {
+        res.json({ history: listMarketTopicHistory(Number(req.params.id)) });
+      } catch (error) {
+        if (!/DB_TYPE=postgres/.test(String(error.message))) throw error;
+        res.json({ history: [] });
       }
     }),
   );

@@ -1,4 +1,5 @@
 import { logError, logInfo } from "./logger.js";
+import { maintainMarketTopics } from "./db.js";
 import {
   advanceAnalysisTaskDefinitionNextRun,
   createAnalysisTask,
@@ -52,9 +53,18 @@ export function runAnalysisTaskSchedulerTick() {
   }
 }
 
+let lastTopicMaintenance = 0;
+function maybeMaintainTopics() {
+  if (Date.now() - lastTopicMaintenance < 60 * 60 * 1000) return;
+  lastTopicMaintenance = Date.now();
+  const result = maintainMarketTopics();
+  if (result.archived || result.removed) logInfo("Market topic lifecycle", { subsystem: "market-topics", ...result });
+}
+
 export function startAnalysisTaskScheduler() {
   setInterval(() => {
     try {
+      maybeMaintainTopics();
       runAnalysisTaskSchedulerTick();
     } catch (error) {
       logError("Analysis task scheduler tick failed", {

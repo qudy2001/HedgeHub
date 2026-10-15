@@ -3713,6 +3713,41 @@ function StrategyForm({ value: s, onChange }) {
     </>
   );
 }
+// Analysis history of the AI topic an item is linked to (kept while the topic is active, 30 days of silence archives it).
+function TopicHistory({ eventKey }) {
+  const topicId = /^market topic (\d+)$/.exec(eventKey ?? "")?.[1];
+  const [history, setHistory] = useState(null);
+  useEffect(() => {
+    if (!topicId) return;
+    let live = true;
+    api(`/builder/market-topics/${topicId}/history`)
+      .then((d) => live && setHistory(d.history ?? []))
+      .catch(() => live && setHistory([]));
+    return () => {
+      live = false;
+    };
+  }, [topicId]);
+  if (!topicId) return null;
+  return (
+    <div className="topic-history">
+      <h3>Analysis history</h3>
+      {history === null ? (
+        <p className="subtle">Loading…</p>
+      ) : history.length ? (
+        history.map((h, i) => (
+          <details key={h.id} open={i === 0}>
+            <summary>
+              {sourceDate(h.recordedAt)} · weight {h.weight} · bullish {h.bullishScore} · bearish {h.bearishScore}
+            </summary>
+            <p className="topic-summary">{h.summary}</p>
+          </details>
+        ))
+      ) : (
+        <p className="subtle">No history recorded for this topic yet, or it has been removed.</p>
+      )}
+    </div>
+  );
+}
 function ItemForm({ item, onSave, onRemove }) {
   const [form, setForm] = useState(item);
   useEffect(() => setForm(item), [item]);
@@ -3841,6 +3876,7 @@ function ItemForm({ item, onSave, onRemove }) {
         expire after 30 days unless refreshed, and never accumulate on repeated
         scans. Resolved is a status, not automatically bullish.
       </p>
+      <TopicHistory eventKey={item.eventKey} />
       {item.agentUpdate && (
         <div className="notice">
           New agent evidence: {item.agentUpdate.status} ·{" "}

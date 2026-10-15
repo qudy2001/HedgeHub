@@ -87,6 +87,7 @@ import {
   recordOptionShortlistObservations,
   listMarketTopics,
   findMarketTopicByTitle,
+  recordMarketTopicHistory,
   createMarketTopic,
   updateMarketTopic,
   listAnalysisTaskDefinitions,
@@ -5856,6 +5857,11 @@ app.post("/api/gpt/market-topics", requireApiKey, (request, response) => {
 
   try {
     const topic = existing ? updateMarketTopic(existing.id, input) : createMarketTopic(input);
+    try {
+      recordMarketTopicHistory(topic);
+    } catch (error) {
+      logWarn("Could not record topic history", { subsystem: "market-topics", error });
+    }
     try {
       builderService.syncMarketTopics([topic]); // linked tracking items follow the topic
     } catch (error) {
