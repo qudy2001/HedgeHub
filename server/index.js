@@ -32,7 +32,8 @@ import {
   fallbackPolymarketMarkets,
   marketSections
 } from "./marketCatalog.js";
-import { buildMacroDashboardPayload, buildMacroHeroStats } from "./macroDashboard.js";
+import { buildMacroDashboardPayload, buildMacroHeroStats, setLiveM2 } from "./macroDashboard.js";
+import { fetchLiveM2 } from "./macroM2.js";
 import {
   addStrategyToWatchlist,
   getAppSetting,
@@ -206,7 +207,7 @@ const port = Number(process.env.PORT || 8787);
 const host = (process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
 const MACRO_DASHBOARD_REFRESH_MS = 24 * 60 * 60 * 1000;
 const MACRO_DASHBOARD_CHECK_MS = 60 * 60 * 1000;
-const MACRO_DASHBOARD_SCHEMA_VERSION = 3;
+const MACRO_DASHBOARD_SCHEMA_VERSION = 4;
 const CALENDAR_REFRESH_MS = 60 * 60 * 1000;
 const CALENDAR_WINDOW_DAYS = 30;
 const REFERENCE_REFRESH_MS = 5 * 60 * 1000;
@@ -3501,6 +3502,36 @@ function refreshMacroDashboard(force = false) {
 }
 
 function getCalendarRange(daysForward = CALENDAR_WINDOW_DAYS) {
+let lastLiveM2AttemptAt = 0;
+
+async function refreshLiveMacroM2() {
+  lastLiveM2AttemptAt = Date.now();
+  const live = await fetchLiveM2();
+
+  if (Object.keys(live.errors).length > 0) {
+    logWarn("Some live M2 sources failed", {
+      subsystem: "background-macro-refresh",
+      errors: live.errors
+    });
+  }
+
+  if (Object.keys(live.tiles).length === 0) {
+    return;
+  }
+
+  setLiveM2(live);
+  refreshMacroDashboard(true);
+}
+
+function refreshLiveMacroM2InBackground() {
+  refreshLiveMacroM2().catch((error) => {
+    logError("Live M2 refresh failed", {
+      subsystem: "background-macro-refresh",
+      error
+    });
+  });
+}
+
   const now = new Date();
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const to = new Date(from.getTime() + (daysForward * 24 * 60 * 60 * 1000) - 1000);
@@ -7419,6 +7450,12 @@ export function startBackgroundJobs() {
       });
       liveState.calendarWarnings = [`Calendar refresh failed: ${error.message}`];
     });
+    refreshLiveMacroM2InBackground();
+
+
+      if (Date.now() - lastLiveM2AttemptAt >= MACRO_DASHBOARD_REFRESH_MS) {
+        refreshLiveMacroM2InBackground();
+      }
 
     setInterval(() => {
       refreshCalendarState().catch((error) => {

@@ -207,6 +207,11 @@ function round(value) {
 function getTileLookbackChange(tile, lookback) {
   const sparkline = tile?.sparklines?.[lookback];
 
+  // Tiles with a data-quality flag (live or estimate) have real gaps: report n/a, not another range's change.
+  if ((!Array.isArray(sparkline) || sparkline.length < 2) && tile?.quality) {
+    return { changeUsd: null, changePct: null };
+  }
+
   if (!Array.isArray(sparkline) || sparkline.length < 2) {
     return {
       changeUsd: tile?.changeUsd ?? 0,
@@ -235,9 +240,11 @@ function getTileLookbackChange(tile, lookback) {
 
 function summarizeTiles(tiles) {
   const totalValueUsd = tiles.reduce((sum, tile) => sum + (tile?.valueUsd ?? 0), 0);
+  const measured = tiles.filter((tile) => tile?.changePct != null);
+  const measuredValueUsd = measured.reduce((sum, tile) => sum + (tile?.valueUsd ?? 0), 0);
   const weightedChangePct =
-    totalValueUsd > 0
-      ? tiles.reduce((sum, tile) => sum + (tile?.valueUsd ?? 0) * (tile?.changePct ?? 0), 0) / totalValueUsd
+    measuredValueUsd > 0
+      ? measured.reduce((sum, tile) => sum + (tile?.valueUsd ?? 0) * tile.changePct, 0) / measuredValueUsd
       : 0;
 
   return {
@@ -294,7 +301,7 @@ function buildMacroDashboardLookbackView(macroDashboard, lookback) {
         changePct: tile.changePct
       }))
     )
-  );
+  ).filter((tile) => tile.changePct != null);
 
   const positiveChangeUsd = flowTiles.reduce((sum, tile) => sum + Math.max(tile.changeUsd ?? 0, 0), 0);
   const negativeChangeUsd = flowTiles.reduce((sum, tile) => sum + Math.min(tile.changeUsd ?? 0, 0), 0);
@@ -427,6 +434,18 @@ function getTileTypography(valueText) {
   };
 }
 
+function getTileSourceNote(tile) {
+  if (tile.quality === "estimate") {
+    return `\n${tile.source}`;
+  }
+
+  if (tile.quality === "live") {
+    return `\n${tile.source}, as of ${tile.dataAsOf}`;
+  }
+
+  return "";
+}
+
 function HeatmapTile({ tile, layout, lookback, theme, onSelect }) {
   const density = getTileDensity(layout);
   const colors = getTileColors(tile.changePct, theme);
@@ -455,13 +474,13 @@ function HeatmapTile({ tile, layout, lookback, theme, onSelect }) {
         borderColor: colors.stroke,
         color: colors.text
       }}
-      title={`${tile.label}\n${formatFullUsd(tile.valueUsd)}\n${formatPercent(tile.changePct)}\n${tile.detail}\n${lookback}: ${formatPercent(getTileLookbackChange(tile, lookback).changePct)}`}
+      title={`${tile.label}\n${formatFullUsd(tile.valueUsd)}\n${formatPercent(tile.changePct)}\n${tile.detail}\n${lookback}: ${formatPercent(getTileLookbackChange(tile, lookback).changePct)}${getTileSourceNote(tile)}`}
     >
       <div className="macro-tile__top">
         <strong style={{ fontSize: typeScale.labelSize }}>{tileLabel}</strong>
         {showPercent ? (
           <span
-            className={`macro-tile__change ${tile.changePct >= 0 ? "positive" : "negative"}`}
+            className={`macro-tile__change ${tile.changePct == null ? "" : tile.changePct >= 0 ? "positive" : "negative"}`}
             style={{ fontSize: typeScale.changeSize }}
           >
             {formatPercent(tile.changePct)}

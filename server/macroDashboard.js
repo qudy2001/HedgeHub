@@ -1,3 +1,5 @@
+import { buildLiveSparklines } from "./macroM2.js";
+
 const macroHeatmapCatalog = [
   {
     id: "global-markets",
@@ -171,14 +173,14 @@ const macroHeatmapCatalog = [
         title: "M2 / Broad Money",
         description: "Country-level broad money pools in USD terms.",
         tiles: [
-          { id: "m2-china", label: "China M2", valueUsd: 42.1e12, changePct: 8.2, detail: "Broad money aggregate in USD." },
-          { id: "m2-us", label: "US M2", valueUsd: 21.2e12, changePct: 3.3, detail: "Broad money aggregate in USD." },
-          { id: "m2-euro", label: "Euro Area M2", valueUsd: 16.3e12, changePct: 2.0, detail: "Broad money aggregate in USD." },
-          { id: "m2-japan", label: "Japan M2", valueUsd: 10.2e12, changePct: 1.5, detail: "Broad money aggregate in USD." },
-          { id: "m2-uk", label: "UK M2", valueUsd: 4.1e12, changePct: 1.7, detail: "Broad money aggregate in USD." },
-          { id: "m2-india", label: "India M2", valueUsd: 3.9e12, changePct: 9.1, detail: "Broad money aggregate in USD." },
-          { id: "m2-other-asia", label: "Other Asia M2", valueUsd: 12.4e12, changePct: 6.2, detail: "Broad money across major Asian economies combined." },
-          { id: "m2-rest", label: "Rest of World M2", valueUsd: 18.8e12, changePct: 4.7, detail: "Other national broad money pools combined." }
+          { id: "m2-china", label: "China M2", valueUsd: 42.1e12, changePct: null, detail: "Broad money aggregate in USD." },
+          { id: "m2-us", label: "US M2", valueUsd: 21.2e12, changePct: null, detail: "Broad money aggregate in USD." },
+          { id: "m2-euro", label: "Euro Area M2", valueUsd: 16.3e12, changePct: null, detail: "Broad money aggregate in USD." },
+          { id: "m2-japan", label: "Japan M2", valueUsd: 10.2e12, changePct: null, detail: "Broad money aggregate in USD." },
+          { id: "m2-uk", label: "UK M2", valueUsd: 4.1e12, changePct: null, detail: "Broad money aggregate in USD." },
+          { id: "m2-india", label: "India M2", valueUsd: 3.9e12, changePct: null, detail: "Broad money aggregate in USD." },
+          { id: "m2-other-asia", label: "Other Asia M2", valueUsd: 12.4e12, changePct: null, detail: "Broad money across major Asian economies combined." },
+          { id: "m2-rest", label: "Rest of World M2", valueUsd: 18.8e12, changePct: null, detail: "Other national broad money pools combined." }
         ]
       },
       {
@@ -390,11 +392,15 @@ function buildTileSparklines(tile) {
   );
 }
 
+// Tiles without a measured change (static estimates) count toward size but not
+// toward the weighted change, so they cannot dilute it.
 function summarizeTiles(tiles) {
   const totalValueUsd = tiles.reduce((sum, tile) => sum + tile.valueUsd, 0);
+  const measured = tiles.filter((tile) => tile.changePct != null);
+  const measuredValueUsd = measured.reduce((sum, tile) => sum + tile.valueUsd, 0);
   const weightedChangePct =
-    totalValueUsd > 0
-      ? tiles.reduce((sum, tile) => sum + tile.valueUsd * tile.changePct, 0) / totalValueUsd
+    measuredValueUsd > 0
+      ? measured.reduce((sum, tile) => sum + tile.valueUsd * tile.changePct, 0) / measuredValueUsd
       : 0;
 
   return {
@@ -403,13 +409,58 @@ function summarizeTiles(tiles) {
   };
 }
 
+let liveM2 = null;
+
+// Called by the server after fetchLiveM2(); null reverts every M2 tile to its static estimate.
+export function setLiveM2(data) {
+  liveM2 = data;
+}
+
+function buildM2Tile(tile) {
+  const live = liveM2?.tiles?.[tile.id];
+
+  if (!live) {
+    return {
+      ...tile,
+      changePct: null,
+      changeUsd: 0,
+      quality: "estimate",
+      source: "Static estimate, no live source",
+      sparklines: {}
+    };
+  }
+
+  const sparklines = buildLiveSparklines(live.monthly);
+  const monthSeries = sparklines["30D"];
+  const changeUsd = monthSeries ? monthSeries.at(-1) - monthSeries[0] : 0;
+
+  return {
+    ...tile,
+    valueUsd: Math.round(live.valueUsd),
+    changePct: monthSeries ? round((changeUsd / monthSeries[0]) * 100) : null,
+    changeUsd: round(changeUsd),
+    quality: "live",
+    source: live.source,
+    dataAsOf: live.asOf,
+    sparklines
+  };
+}
+
+function buildTile(group, tile) {
+  if (group.id === "m2") {
+    return buildM2Tile(tile);
+  }
+
+  return {
+    ...tile,
+    changeUsd: round((tile.valueUsd * tile.changePct) / 100),
+    sparklines: buildTileSparklines(tile)
+  };
+}
+
 function buildSection(section) {
   const groups = section.groups.map((group) => {
-    const tiles = group.tiles.map((tile) => ({
-      ...tile,
-      changeUsd: round((tile.valueUsd * tile.changePct) / 100),
-      sparklines: buildTileSparklines(tile)
-    }));
+    const tiles = group.tiles.map((tile) => buildTile(group, tile));
     const summary = summarizeTiles(tiles);
 
     return {
@@ -486,7 +537,8 @@ export function buildMacroDashboardPayload() {
       "Color shows estimated value expansion or contraction for each pool.",
       "Tile sparklines are normalized lookback proxies anchored to the current USD value for each pool.",
       "Stocks and crypto use market-cap style estimates; ETFs use AUM; bonds, FX, commodities, money, and balance sheets use outstanding-value or reserve proxies.",
-      "The current release uses curated baseline estimates inside the app, with the live watchlist and strategy data acting as the real-time overlay.",
+      "Most tiles use curated baseline estimates inside the app, with the live watchlist and strategy data acting as the real-time overlay.",
+      "M2 tiles for the US, Euro Area, Japan and China use official central-bank series converted to USD at each month's FX; UK, India, Other Asia and Rest of World M2 are static estimates with no measured change.",
       "The gross total intentionally includes overlap across money, debt, and asset pools so you can compare scale, not calculate net wealth."
     ]
   };
