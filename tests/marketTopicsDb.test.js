@@ -14,7 +14,7 @@ test("market topics store category and symbols, and updates only change them whe
   assert.match(new URL(testUrl).pathname, /test/i, "refusing to run against a database whose name does not contain 'test'");
   process.env.DATABASE_URL = testUrl; // read by db-postgres.js at import time
   const db = await import("../server/db-postgres.js");
-  const { sanitizeMarketTopicInput } = await import("../shared/marketTopics.js");
+  const { filterMarketTopics, parseMarketTopicFilters, sanitizeMarketTopicInput } = await import("../shared/marketTopics.js");
 
   const psql = (sql) => spawnSync("psql", ["-X", "-v", "ON_ERROR_STOP=1", testUrl, "-c", sql], { encoding: "utf8" });
   const fields = { weight: 60, bullishScore: 40, bearishScore: 55, summary: "As of today." };
@@ -38,6 +38,15 @@ test("market topics store category and symbols, and updates only change them whe
     const listed = db.listMarketTopics().filter((topic) => ids.includes(topic.id));
     assert.equal(listed.length, 2);
     assert.ok(listed.every((topic) => Array.isArray(topic.symbols) && typeof topic.category === "string"));
+
+    // The list filters (status, category, symbol) work on the stored rows.
+    const filtered = (filters) => filterMarketTopics(db.listMarketTopics(), parseMarketTopicFilters(filters)).map((topic) => topic.id).filter((id) => ids.includes(id));
+    assert.deepEqual(filtered({}).sort(), [...ids].sort());
+    assert.deepEqual(filtered({ status: "active" }).sort(), [...ids].sort());
+    assert.deepEqual(filtered({ status: "archived" }), []);
+    assert.deepEqual(filtered({ category: "ticker" }), [ticker.id]);
+    assert.deepEqual(filtered({ symbol: "nvda" }), [ticker.id]);
+    assert.deepEqual(filtered({ symbol: "AAPL" }), []);
 
     // The upsert path: title match is case-insensitive and omitted fields keep the stored category and symbols.
     const existing = db.findMarketTopicByTitle("db TEST ticker");
@@ -80,6 +89,8 @@ test("market topics store category and symbols, and updates only change them whe
     psql(`UPDATE market_topics SET updated_at = NOW() - INTERVAL '31 days' WHERE id = ${legacy.id}`);
     assert.equal(db.maintainMarketTopics().archived >= 1, true);
     assert.equal(db.findMarketTopicByTitle("DB test legacy").status, "archived");
+    assert.deepEqual(filtered({ status: "archived" }), [legacy.id]);
+    assert.deepEqual(filtered({ status: "active" }), [ticker.id]);
     psql(`UPDATE market_topics SET archived_at = NOW() - INTERVAL '181 days' WHERE id = ${legacy.id}`);
     assert.equal(db.maintainMarketTopics().removed >= 1, true);
     assert.equal(db.findMarketTopicByTitle("DB test legacy"), null);

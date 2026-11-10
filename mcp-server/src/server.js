@@ -13,11 +13,32 @@ server.registerTool(
   {
     title: "List market hot topics",
     description:
-      "List the market hot topics HedgeHub currently tracks, with weight, bullish/bearish rating, category, tickers and summary.",
-    inputSchema: {}
+      "List the market hot topics HedgeHub tracks, with weight, bullish/bearish rating, category, tickers, status and summary. " +
+      "Every filter is optional; with none, all topics are returned, archived ones included. " +
+      'Topics that go 30 days without an update are archived and drop out of HedgeHub\'s suggestions, so pass status "active" to see only the current ones.',
+    inputSchema: {
+      status: z
+        .enum(["active", "archived", "all"])
+        .optional()
+        .describe('Which topics to return: "active", "archived" or "all". Default "all".'),
+      category: z
+        .enum(["general", "commodity", "forex", "ticker", "social"])
+        .optional()
+        .describe("Only topics in this category."),
+      symbol: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('Only topics tagged with this ticker, e.g. "TSLA" (one ticker, not case-sensitive).')
+    }
   },
-  async () => {
-    const payload = await callHedgeHub("GET", "/api/gpt/market-topics");
+  async ({ status, category, symbol }) => {
+    const query = new URLSearchParams();
+    if (status !== undefined) query.set("status", status);
+    if (category !== undefined) query.set("category", category);
+    if (symbol !== undefined) query.set("symbol", symbol);
+    const suffix = query.toString();
+    const payload = await callHedgeHub("GET", `/api/gpt/market-topics${suffix ? `?${suffix}` : ""}`);
     return { content: [{ type: "text", text: JSON.stringify(payload.results.topics, null, 2) }] };
   }
 );

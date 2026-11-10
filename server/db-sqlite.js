@@ -2524,6 +2524,11 @@ export const completeAnalysisTask = postgresOnlyFeature;
 export const listDueAnalysisTaskDefinitions = postgresOnlyFeature;
 export const advanceAnalysisTaskDefinitionNextRun = postgresOnlyFeature;
 
+// Admin "Recent runs": SQLite has no analysis tasks, so the list is simply empty.
+export function listAnalysisTasks() {
+  return [];
+}
+
 // ── Monitored stocks ────────────────────────────────────────────────────────
 
 db.exec(`

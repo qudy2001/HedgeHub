@@ -1,6 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AiScheduleTemplates from "./AiScheduleTemplates.jsx";
+import "../styles/admin-analysis-tasks.css";
 
 const CADENCE_OPTIONS = ["", "hourly", "daily", "weekly", "monthly"];
+const RUN_STATUS_PILLS = { done: "pill--live", claimed: "pill--warning", pending: "pill--ghost" };
+
+// Template prompts and AI results run to several lines; the lists show the first line and expand on click.
+function firstLine(text) {
+  const first = String(text ?? "").split("\n").find((line) => line.trim()) ?? "";
+  return first.length > 140 ? `${first.slice(0, 137)}...` : first;
+}
 
 function formatTimestamp(value) {
   if (!value) {
@@ -15,6 +24,46 @@ function formatTimestamp(value) {
   return date.toLocaleString("en-GB");
 }
 
+function RunRow({ run }) {
+  const longPrompt = run.prompt.length > 140 || run.prompt.includes("\n");
+  return (
+    <div className="admin-users__row admin-tasks__run">
+      <div className="admin-users__identity">
+        <strong className="admin-tasks__run-title">{firstLine(run.prompt)}</strong>
+        <span className="timestamp">
+          {run.topicTitle || "No topic"} · scheduled {formatTimestamp(run.scheduledFor)}
+          {run.claimedAt ? ` · claimed ${formatTimestamp(run.claimedAt)}` : ""}
+          {run.completedAt ? ` · completed ${formatTimestamp(run.completedAt)}` : ""}
+        </span>
+        {run.result ? (
+          <details className="admin-tasks__prompt admin-tasks__result">
+            <summary>
+              <span className="admin-tasks__label">Result</span>{" "}
+              <span className="admin-tasks__teaser">{firstLine(run.result)}</span>
+            </summary>
+            <pre>{run.result}</pre>
+          </details>
+        ) : (
+          <span className="timestamp">
+            {run.status === "pending" ? "Waiting for the AI to pick it up." : "Picked up, no result submitted yet."}
+          </span>
+        )}
+        {longPrompt ? (
+          <details className="admin-tasks__prompt">
+            <summary>
+              <span className="admin-tasks__label">Prompt</span>
+            </summary>
+            <pre>{run.prompt}</pre>
+          </details>
+        ) : null}
+      </div>
+      <div className="admin-users__badges">
+        <span className={`pill ${RUN_STATUS_PILLS[run.status] ?? "pill--ghost"}`}>{run.status}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = {}) {
   const [definitions, setDefinitions] = useState([]);
   const [topics, setTopics] = useState([]);
@@ -22,15 +71,20 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
   const [error, setError] = useState("");
+  const [runs, setRuns] = useState([]);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [runsError, setRunsError] = useState("");
 
   const [prompt, setPrompt] = useState("");
   const [topicId, setTopicId] = useState("");
   const [cadence, setCadence] = useState("daily");
+  const formSectionRef = useRef(null);
 
   const definitionCountLabel = useMemo(() => {
     const count = definitions.length;
     return `${count} ${count === 1 ? "definition" : "definitions"}`;
   }, [definitions.length]);
+  const runCountLabel = `${runs.length} ${runs.length === 1 ? "run" : "runs"}`;
 
   const handleAuthError = useCallback(
     (response) => {
@@ -86,6 +140,39 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
     void loadWorkspace();
   }, [loadWorkspace]);
 
+  // Loaded on its own so a failure here never hides the definitions.
+  const loadRuns = useCallback(async () => {
+    setRunsLoading(true);
+
+    try {
+      const response = await fetch("/api/admin/analysis-tasks");
+      handleAuthError(response);
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(payload?.error || `Failed to load recent runs (${response.status})`);
+      }
+
+      setRuns(Array.isArray(payload?.tasks) ? payload.tasks : []);
+      setRunsError("");
+    } catch (loadError) {
+      if (String(loadError?.code ?? "") !== "AUTH_REQUIRED") {
+        setRunsError(loadError.message);
+      }
+    } finally {
+      setRunsLoading(false);
+    }
+  }, [handleAuthError]);
+
+  useEffect(() => {
+    void loadRuns();
+  }, [loadRuns]);
+
+  const handleRefresh = useCallback(() => {
+    void loadWorkspace();
+    void loadRuns();
+  }, [loadRuns, loadWorkspace]);
+
   const handleCreateDefinition = useCallback(
     async (event) => {
       event.preventDefault();
@@ -131,6 +218,15 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
     },
     [cadence, handleAuthError, prompt, topicId]
   );
+
+  // "Queue in HedgeHub" on a schedule template: fill the form so it can be reviewed before it is created.
+  const handleUseAsTask = useCallback(({ prompt: templatePrompt, cadence: templateCadence }) => {
+    setPrompt(templatePrompt);
+    setCadence(templateCadence ?? "");
+    setError("");
+    setNotice({ tone: "info", message: "Template added to the form. Review it, pick a topic if you like, then press Create." });
+    formSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   const handleToggleActive = useCallback(
     async (definition) => {
@@ -212,12 +308,13 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
 
       <article className="insight-card admin-users__panel">
         <div className="admin-users__layout">
-          <section className="admin-users__section">
+          <section className="admin-users__section" ref={formSectionRef}>
             <h3>Add task definition</h3>
             <form className="admin-users__form" onSubmit={handleCreateDefinition}>
               <label>
                 <span>Prompt</span>
-                <input
+                <textarea
+                  rows={5}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   placeholder="Analyze the impact of..."
@@ -254,7 +351,7 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
                 >
                   {busy ? "Working…" : "Create"}
                 </button>
-                <button type="button" className="macro-layout-button" onClick={loadWorkspace} disabled={busy || loading}>
+                <button type="button" className="macro-layout-button" onClick={handleRefresh} disabled={busy || loading}>
                   Refresh
                 </button>
               </div>
@@ -275,7 +372,14 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
                 {definitions.map((definition) => (
                   <div key={definition.id} className="admin-users__row">
                     <div className="admin-users__identity">
-                      <strong>{definition.prompt}</strong>
+                      {definition.prompt.length > 140 || definition.prompt.includes("\n") ? (
+                        <details className="admin-tasks__prompt">
+                          <summary>{firstLine(definition.prompt)}</summary>
+                          <pre>{definition.prompt}</pre>
+                        </details>
+                      ) : (
+                        <strong>{definition.prompt}</strong>
+                      )}
                       <span className="timestamp">
                         {definition.topicTitle || "No topic"} · {definition.cadence || "one-off"} · next run{" "}
                         {formatTimestamp(definition.nextRunAt)}
@@ -311,6 +415,41 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
           </section>
         </div>
       </article>
+
+      <article className="insight-card admin-users__panel">
+        <section className="admin-users__section admin-tasks__runs">
+          <div className="admin-tasks__runs-header">
+            <div>
+              <h3>Recent runs</h3>
+              <p className="admin-tasks__note">
+                What the AI wrote back through complete_analysis_task. Newest first, the last 50 tasks.
+              </p>
+            </div>
+            <div className="admin-tasks__runs-actions">
+              <span className="pill pill--ghost">{runCountLabel}</span>
+              <button type="button" className="macro-layout-button" onClick={() => void loadRuns()} disabled={runsLoading}>
+                {runsLoading ? "Loading…" : "Refresh"}
+              </button>
+            </div>
+          </div>
+          {runsError ? <div className="refresh-feedback refresh-feedback--error">{runsError}</div> : null}
+          {runs.length ? (
+            <div className="admin-users__list">
+              {runs.map((run) => (
+                <RunRow key={run.id} run={run} />
+              ))}
+            </div>
+          ) : runsLoading ? (
+            <div className="app-state app-state--inline">Loading recent runs…</div>
+          ) : runsError ? null : (
+            <div className="app-state app-state--inline">
+              No runs yet. A task shows up here when a definition fires, and its result once the AI completes it.
+            </div>
+          )}
+        </section>
+      </article>
+
+      <AiScheduleTemplates onUseAsTask={handleUseAsTask} />
     </main>
   );
 }

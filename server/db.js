@@ -85,6 +85,7 @@ export const deleteAnalysisTaskDefinition = (...args) => backend.deleteAnalysisT
 export const createAnalysisTask = (...args) => backend.createAnalysisTask(...args);
 export const claimNextPendingTask = (...args) => backend.claimNextPendingTask(...args);
 export const completeAnalysisTask = (...args) => backend.completeAnalysisTask(...args);
+export const listAnalysisTasks = (...args) => backend.listAnalysisTasks(...args);
 export const listDueAnalysisTaskDefinitions = (...args) => backend.listDueAnalysisTaskDefinitions(...args);
 export const advanceAnalysisTaskDefinitionNextRun = (...args) =>
   backend.advanceAnalysisTaskDefinitionNextRun(...args);

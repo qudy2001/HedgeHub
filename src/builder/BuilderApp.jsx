@@ -1,4 +1,5 @@
 import OptionDistribution from "./OptionDistribution.jsx";
+import AgentReport from "./AgentReport.jsx";
 import OptionChainView from "./OptionChainView.jsx";
 import { money, num, pct, pillTone } from "./format.js";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -350,6 +351,7 @@ function SuggestionsPanel({
   onAddTopic,
   onAddSuggestion,
   onRemoveItem,
+  scheduleHref = null,
 }) {
   const [chosen, setChosen] = useState(null);
   const addedItem = (key) => items.find((i) => i.eventKey === key);
@@ -392,6 +394,17 @@ function SuggestionsPanel({
           : "TradingAgents is not configured. Manual tracking and AI market topics are still available."}
       </p>
       <button onClick={onRefreshAgent}>Refresh AI suggestions</button>
+      {scheduleHref ? (
+        <a
+          className="suggest-schedule-link"
+          href={scheduleHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Opens Admin, Analysis tasks in a new tab"
+        >
+          AI schedule templates ↗
+        </a>
+      ) : null}
       <div className="suggest-tabs" role="tablist">
         {SUGGESTION_TABS.map((tab) => (
           <button
@@ -442,6 +455,45 @@ function Field({ label, children }) {
       {children}
     </label>
   );
+}
+const AGENT_TERMINAL = ["completed", "completed_with_errors", "failed", "stopped"];
+// Saved research for a stock. Older saves also hold entries for runs that failed or never finished; those are not results.
+const agentResult = (agent, s) =>
+  agent?.valuations?.find(
+    (v) => v.symbol === s && (!v.status || v.status === "completed"),
+  );
+// TradingAgents passes the model provider's raw error through; show its message only.
+const agentErrorText = (e) => {
+  const text = String(e ?? "");
+  const message = /'message': '([^']+)'/.exec(text)?.[1] ?? text;
+  return message.replace(/\s*\(request_id:[^)]*\)/, "").slice(0, 200);
+};
+// The latest run that covered a stock, from its own run or the strategy-wide one, whichever started last.
+function agentRunFor(agent, s, polling) {
+  const own = agent?.runsBySymbol?.[s];
+  const wide = agent?.jobs?.[s] && agent.runId ? agent : null;
+  const useOwn =
+    own && (!wide || String(own.lastStarted ?? "") >= String(wide.lastStarted ?? ""));
+  const run = useOwn
+    ? { status: own.status, job: own.job, started: own.lastStarted, error: own.error }
+    : wide
+      ? { status: wide.status, job: wide.jobs[s], started: wide.lastStarted, error: wide.error }
+      : null;
+  if (!run) return polling ? { running: true } : null;
+  const jobOpen = run.job
+    ? !AGENT_TERMINAL.includes(run.job.status)
+    : true;
+  const running =
+    polling || (!AGENT_TERMINAL.includes(run.status) && jobOpen);
+  const failure =
+    !running && (run.error || (run.job?.status === "failed" && (run.job.error || "The run failed.")));
+  return {
+    running,
+    started: run.started,
+    progress: run.job?.progress,
+    failure: failure ? agentErrorText(failure) : "",
+    failedAt: run.job?.at ?? run.started,
+  };
 }
 function sourceDate(v) {
   return v
@@ -596,7 +648,7 @@ function Workspace({ demo, user, logout, presentation }) {
           "backtests",
           "economy",
         ]
-      : ["tracker", "backtests", "economy"]
+      : ["tracker", "backtests", "economy", "stock-analysis"]
     ).includes(tail)
       ? tail
       : "workspace";
@@ -841,7 +893,8 @@ function Workspace({ demo, user, logout, presentation }) {
         .sort((a, b) => compareRows(a, b, sort)),
     [tableRows, selectedMonitoredStock, templateFilter, expiryFilter, minRating, minAnnRet, minLiquidity, maxIvRank, minDte, maxDte, earningsFilter, quoteSizeFilter, spreadFilter, optVolFilter, maxLossFilter, sort],
   );
-  const valuation = agent?.valuations?.find((v) => v.symbol === symbol),
+  const valuation = agentResult(agent, symbol),
+    valuationRun = agentRunFor(agent, symbol, researchingSymbols.has(symbol)),
     visibleItems = items.filter(
       (i) =>
         (!i.symbol || i.symbol === symbol) &&
@@ -970,6 +1023,19 @@ function Workspace({ demo, user, logout, presentation }) {
     );
     return () => clearTimeout(timer);
   }, [agent, demo, strategyId]);
+  // A per-stock run that is still going server-side (e.g. after a page reload) resumes its status checks.
+  const ownRunStatus = agent?.runsBySymbol?.[symbol]?.status;
+  useEffect(() => {
+    if (
+      demo ||
+      !symbol ||
+      !ownRunStatus ||
+      AGENT_TERMINAL.includes(ownRunStatus) ||
+      researchingSymbols.has(symbol)
+    )
+      return;
+    checkAgentSymbol(symbol);
+  }, [symbol, ownRunStatus, demo]);
   async function loadStrategy(id) {
     if (busy) {
       setError("Finish or cancel the current run before switching strategies.");
@@ -1269,7 +1335,7 @@ function Workspace({ demo, user, logout, presentation }) {
   async function pollAgentSymbol(sym, start) {
     clearTimeout(symbolPolls.current[sym]);
     setResearchingSymbols((s) => new Set(s).add(sym));
-    const terminal = ["completed", "completed_with_errors", "failed", "stopped"];
+    const terminal = AGENT_TERMINAL;
     const stop = () =>
       setResearchingSymbols((s) => {
         const next = new Set(s);
@@ -1278,7 +1344,8 @@ function Workspace({ demo, user, logout, presentation }) {
       });
     const tick = async (isStart) => {
       try {
-        const id = await save();
+        // Only starting a run saves the strategy first; a status check reads what is already there.
+        const id = isStart ? await save() : strategyId;
         const path = `/builder/strategies/${id}/research/${encodeURIComponent(sym)}`;
         const data = await api(path, isStart ? {} : undefined);
         setAgent(data);
@@ -1408,7 +1475,10 @@ function Workspace({ demo, user, logout, presentation }) {
         {data?.events?.length ? (
           <table className="mini-table">
             <tbody>
-              {data.events.slice(0, 10).map((e, i) => (
+              {(direction === "past"
+                ? [...data.events].sort((a, b) => String(b.date).localeCompare(String(a.date)))
+                : data.events
+              ).slice(0, 10).map((e, i) => (
                 <tr key={i}>
                   <td>
                     <button
@@ -2344,18 +2414,38 @@ function Workspace({ demo, user, logout, presentation }) {
                 <h3>Research with TradingAgents</h3>
                 <p className="subtle">
                   {agentAvailable
-                    ? "Request research for your stock list."
+                    ? `Request research for ${symbol ?? "the selected stock"}.`
                     : "Connect the optional TradingAgents service to see price targets and evidence."}
                 </p>
               </>
             )}
-            <button onClick={refreshAgent}>
-              {" "}
-              {agent?.status && !["completed", "failed"].includes(agent.status)
-                ? "Check research"
-                : "Run AI research"}
+            {valuationRun?.running && (
+              <p className="subtle" role="status">
+                Researching {symbol}
+                {valuationRun.started
+                  ? ` · started ${sourceDate(valuationRun.started)}`
+                  : ""}
+                {valuationRun.progress?.total
+                  ? ` · ${valuationRun.progress.done} of ${valuationRun.progress.total} reports done`
+                  : ""}
+              </p>
+            )}
+            {valuationRun?.failure && (
+              <p className="negative">
+                Last {symbol} run failed · {sourceDate(valuationRun.failedAt)}:{" "}
+                {valuationRun.failure}
+              </p>
+            )}
+            <button
+              disabled={!symbol || valuationRun?.running}
+              onClick={() => refreshAgentSymbol(symbol)}
+            >
+              {valuationRun?.running
+                ? "Researching…"
+                : valuation
+                  ? `Re-run AI research for ${symbol}`
+                  : `Run AI research for ${symbol ?? "stock"}`}
             </button>
-            {agent?.error && <p className="negative">{agent.error}</p>}
             {researchError && (
               <p className="subtle">Additional research: {researchError}</p>
             )}
@@ -2594,7 +2684,7 @@ function Workspace({ demo, user, logout, presentation }) {
         {agent?.error && <p className="negative">{agent.error}</p>}
         <div className="stock-analysis-grid">
           {symbols.map((s) => {
-            const v = agent?.valuations?.find((v) => v.symbol === s);
+            const v = agentResult(agent, s);
             const evidence = (agent?.suggestions ?? []).filter(
               (i) => i.symbol === s,
             );
@@ -2640,9 +2730,7 @@ function Workspace({ demo, user, logout, presentation }) {
                         Price target · {sourceDate(v.asOf)}
                       </span>
                     </div>
-                    <pre className="report-text">
-                      {v.report || "No report available."}
-                    </pre>
+                    <AgentReport text={v.report} className="report-text" />
                   </>
                 ) : (
                   <p className="subtle">
@@ -2653,16 +2741,30 @@ function Workspace({ demo, user, logout, presentation }) {
                 {evidence.length > 0 && (
                   <div className="stock-analysis-evidence">
                     <h3>Supporting evidence</h3>
-                    {evidence.map((i) => (
-                      <article
-                        key={i.id}
-                        className={`detail-box ${tone(i.sentiment)}`}
-                      >
-                        <strong>{i.title}</strong>
-                        <small>{i.sentiment}</small>
-                        {i.rationale && <p>{i.rationale}</p>}
-                      </article>
-                    ))}
+                    <div className="tracker-columns">
+                      {["Bullish", "Neutral", "Bearish"].map((group) => {
+                        const groupItems = evidence.filter((i) =>
+                          i.sentiment.toLowerCase().includes(group.toLowerCase()),
+                        );
+                        return (
+                          <section key={group} className={`panel ${tone(group)}`}>
+                            <h2>
+                              {group} <small>({groupItems.length})</small>
+                            </h2>
+                            {groupItems.map((i) => (
+                              <details key={i.id} className="evidence-item">
+                                <summary>{i.title}</summary>
+                                {i.rationale ? (
+                                  <p>{i.rationale}</p>
+                                ) : (
+                                  <p className="subtle">No detail provided.</p>
+                                )}
+                              </details>
+                            ))}
+                          </section>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </section>
@@ -2890,6 +2992,9 @@ function Workspace({ demo, user, logout, presentation }) {
               {demo ? "Interactive demo · Sample data" : "Strategy Studio"}
             </span>
             <a href="/">Classic UI ↗</a>
+            {!demo && user?.role === "admin" ? (
+              <a href="/admin/users">Admin ↗</a>
+            ) : null}
             <button
               aria-label="Toggle theme"
               onClick={() =>
@@ -2964,6 +3069,10 @@ function Workspace({ demo, user, logout, presentation }) {
                     onClick={() => {
                       if (id === "tracking") {
                         navigate("tracker");
+                        return;
+                      }
+                      if (id === "ai-stock-analysis") {
+                        navigate("stock-analysis");
                         return;
                       }
                       navigate("workspace");
@@ -3418,9 +3527,7 @@ function Workspace({ demo, user, logout, presentation }) {
             <>
               <Badge>{valuation?.rating ?? "Unrated"}</Badge>
               <p>AI research · {sourceDate(valuation?.asOf)}</p>
-              <pre className="report-text">
-                {valuation?.report || "No report available."}
-              </pre>
+              <AgentReport text={valuation?.report} />
             </>
           )}
           {modal.type === "suggestions" && (
@@ -3432,6 +3539,7 @@ function Workspace({ demo, user, logout, presentation }) {
               symbol={symbol}
               agentAvailable={agentAvailable}
               onRefreshAgent={refreshAgent}
+              scheduleHref={!demo && user?.role === "admin" ? "/admin/analysis-tasks" : null}
               onAddTopic={(topic) =>
                 setModal({
                   type: "item",
@@ -3575,8 +3683,10 @@ function Workspace({ demo, user, logout, presentation }) {
                 </p>
               ))}
               {(() => {
-                const events = modal.data?.events ?? [];
                 const isPast = modal.direction === "past";
+                const events = isPast
+                  ? [...(modal.data?.events ?? [])].sort((a, b) => String(b.date).localeCompare(String(a.date)))
+                  : modal.data?.events ?? [];
                 const groups = [
                   { label: "Company Earnings", items: events.filter(e => e.type === "earnings" || e.category === "earnings") },
                   { label: "Economic Releases", items: events.filter(e => e.type === "economic" || e.category === "economic" || (e.country != null && e.type !== "earnings" && e.category !== "earnings")) },

@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  MARKET_TOPIC_STATUS_FILTERS,
+  filterMarketTopics,
   normalizeTopicSymbols,
+  parseMarketTopicFilters,
   sanitizeMarketTopicInput,
   suggestionTab,
   topicPoints,
@@ -50,6 +53,58 @@ test("symbols are normalised, de-duplicated and validated", () => {
   assert.throws(() => normalizeTopicSymbols(["TSLA$"]), /invalid symbol: TSLA\$/);
   assert.throws(() => normalizeTopicSymbols(["1ABC"]), /invalid symbol/);
   assert.throws(() => normalizeTopicSymbols(Array.from({ length: 21 }, (_, i) => `S${i}`)), /at most 20/);
+});
+
+test("list filters: none returns every topic; status, category and symbol narrow the list", () => {
+  const topics = [
+    { id: 1, title: "Fed policy", status: "active", category: "general", symbols: [] },
+    { id: 2, title: "Oil", status: "archived", category: "commodity", symbols: [] },
+    { id: 3, title: "TSLA: robotaxi", status: "active", category: "ticker", symbols: ["TSLA", "NVDA"] },
+    { id: 4, title: "NVDA: export rules", status: "archived", category: "ticker", symbols: ["NVDA"] },
+    { id: 5, title: "Meme rally", status: "active", category: "social", symbols: ["GME"] }
+  ];
+  const ids = (query) => filterMarketTopics(topics, parseMarketTopicFilters(query)).map((topic) => topic.id);
+
+  // A caller that predates the filters (or passes blanks) gets every topic, archived included, in the same order.
+  assert.deepEqual(parseMarketTopicFilters(), { status: "all", category: null, symbol: null });
+  assert.deepEqual(parseMarketTopicFilters({}), { status: "all", category: null, symbol: null });
+  assert.deepEqual(ids({}), [1, 2, 3, 4, 5]);
+  assert.deepEqual(ids({ status: "all", category: "", symbol: "  " }), [1, 2, 3, 4, 5]);
+  assert.deepEqual(filterMarketTopics(topics), topics);
+
+  assert.deepEqual(ids({ status: "active" }), [1, 3, 5]);
+  assert.deepEqual(ids({ status: "archived" }), [2, 4]);
+  assert.deepEqual(ids({ category: "ticker" }), [3, 4]);
+  assert.deepEqual(ids({ symbol: "NVDA" }), [3, 4]);
+  assert.deepEqual(ids({ symbol: "AAPL" }), []);
+  assert.deepEqual(ids({ status: "active", category: "ticker", symbol: "NVDA" }), [3]); // all three together
+
+  // Values are normalised: case, spaces, a repeated parameter that arrives as a one-item array.
+  assert.deepEqual(parseMarketTopicFilters({ status: " Active ", category: "SOCIAL", symbol: " gme " }), {
+    status: "active",
+    category: "social",
+    symbol: "GME"
+  });
+  assert.equal(parseMarketTopicFilters({ symbol: ["tsla"] }).symbol, "TSLA");
+
+  // Older rows without a symbols list never match a symbol filter, and filtering leaves the input alone.
+  assert.deepEqual(filterMarketTopics([{ id: 9, status: "active" }], { symbol: "TSLA" }), []);
+  assert.equal(topics.length, 5);
+
+  assert.deepEqual(MARKET_TOPIC_STATUS_FILTERS, ["active", "archived", "all"]);
+});
+
+test("list filters: an unknown status or category, or more than one ticker, is rejected rather than ignored", () => {
+  assert.throws(() => parseMarketTopicFilters({ status: "deleted" }), /status must be one of active, archived, all/);
+  assert.throws(() => parseMarketTopicFilters({ status: ["active", "archived"] }), /status must be one of/);
+  assert.throws(
+    () => parseMarketTopicFilters({ category: "crypto" }),
+    /category must be one of general, commodity, forex, ticker, social/
+  );
+  assert.throws(() => parseMarketTopicFilters({ symbol: "TSLA, NVDA" }), /symbol must be a single ticker/);
+  assert.throws(() => parseMarketTopicFilters({ symbol: ["TSLA", "NVDA"] }), /symbol must be a single ticker/);
+  assert.throws(() => parseMarketTopicFilters({ symbol: "$BAD" }), /invalid symbol: \$BAD/);
+  assert.throws(() => parseMarketTopicFilters({ status: { $ne: "x" } }), /status must be one of/);
 });
 
 test("tabs: market topics are sorted by category, and every TradingAgents suggestion stays in the ticker tab", () => {

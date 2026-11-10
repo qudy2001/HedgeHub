@@ -24,6 +24,20 @@ export default function MonitoredStocksPanel({ selectedStock, onSelectStock, dem
     loadMonitoredStocks();
   }, [demo]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Keep quotes fresh: re-poll every 15s while the tab is visible
+  useEffect(() => {
+    if (demo) return undefined;
+    const tick = () => {
+      if (document.visibilityState === 'visible') loadMonitoredStocks();
+    };
+    const timer = setInterval(tick, 15000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, [demo]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Restore UI state once on mount
   useEffect(() => {
     const savedExpanded = localStorage.getItem('monitoredStocksExpanded');

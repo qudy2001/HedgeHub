@@ -2431,6 +2431,29 @@ export function completeAnalysisTask(id, result) {
   );
 }
 
+// Newest first, for the Admin "Recent runs" list. `prompt` is the copy the task was created with, so it stays
+// accurate after its definition is edited or deleted; `result` is the write-up the AI submitted.
+export function listAnalysisTasks(limit = 50) {
+  return queryJson(`
+    SELECT
+      k.id,
+      k.definition_id AS "definitionId",
+      k.topic_id AS "topicId",
+      t.title AS "topicTitle",
+      k.prompt,
+      k.status,
+      k.scheduled_for AS "scheduledFor",
+      k.claimed_at AS "claimedAt",
+      k.completed_at AS "completedAt",
+      k.result,
+      k.created_at AS "createdAt"
+    FROM analysis_tasks k
+    LEFT JOIN market_topics t ON t.id = k.topic_id
+    ORDER BY k.scheduled_for DESC, k.id DESC
+    LIMIT ${Math.min(Math.max(Math.trunc(Number(limit)) || 50, 1), 200)}
+  `);
+}
+
 export function listDueAnalysisTaskDefinitions() {
   return queryJson(`
     SELECT

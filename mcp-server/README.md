@@ -4,6 +4,16 @@ Tools: `list_market_topics`, `upsert_market_topic`, `get_next_analysis_task`, `c
 
 `upsert_market_topic` takes an optional `category` (`general`, `commodity`, `forex`, `ticker`, `social`) and `symbols` (tickers, required for `ticker`). They decide where the topic appears in the Builder's AI suggestions: **General** (general, commodity, forex), **Ticker** (topics mentioning the selected stock), **Social**, or **Other tickers**. Omitted fields keep an existing topic's values; new topics default to `general`. After upgrading, refresh the connector's tools in ChatGPT (or reconnect in Claude) so the client sees the new parameters.
 
+`list_market_topics` takes optional filters: `status` (`active`, `archived` or `all`; default `all`, so existing prompts keep working), `category` and `symbol` (one ticker). A topic that goes 30 days without an update is archived and drops out of the suggestions, so the scheduled-task templates below ask for `status: "active"`. A client that has not refreshed the connector's tools still gets every topic.
+
+`complete_analysis_task` saves the write-up on the task. Admin -> Analysis tasks -> "Recent runs" lists the latest 50 tasks (pending, claimed and done) with their prompt, topic and an expandable result; admins can also read them from `GET /api/admin/analysis-tasks` (optional `limit`, up to 200). The list needs `DB_TYPE=postgres`; on SQLite it is empty.
+
+## Scheduled-task templates
+
+Admin -> Analysis tasks -> "AI schedule templates" holds ready-made prompts for Claude and ChatGPT scheduled tasks (task queue runner, weekly sweep, daily market pulse, per-stock tracking, earnings, position risk and more). Fill in the fields, copy, and paste into the platform's scheduler, or use "Queue in HedgeHub" so HedgeHub keeps the schedule and one runner task works through the queue.
+
+The templates live in `shared/aiScheduleTemplates.js`. `tests/aiScheduleTemplates.test.js` checks that every tool they mention is still registered in `src/server.js`, so renaming a tool tells you which prompts to update.
+
 ## Local (stdio)
 `npm start` with `HEDGEHUB_API_URL` and `HEDGEHUB_API_KEY` set.
 

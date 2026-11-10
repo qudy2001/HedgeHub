@@ -31,7 +31,7 @@ export const DEFAULT_STRATEGY = {
   minVolume: 0,
   trend: "any",
   pricingMode: "market",
-  dailyResearch: true,
+  dailyResearch: false,
 };
 export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 export const dateOnly = (d) => new Date(d).toISOString().slice(0, 10);

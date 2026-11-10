@@ -1304,6 +1304,128 @@ body.studio-body:before {
   overflow-wrap: anywhere;
   font: 12px/1.8 inherit;
 }
+.agent-report {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--s-text);
+}
+.agent-report > * + * {
+  margin-top: 14px;
+}
+.agent-report p,
+.agent-report ul,
+.agent-report dl,
+.agent-report h3,
+.agent-report h4 {
+  margin-bottom: 0;
+}
+.agent-report p {
+  max-width: 72ch;
+}
+.agent-report h3 {
+  font-size: 15px;
+  padding-top: 6px;
+  border-top: 1px solid var(--s-line);
+}
+.agent-report h4 {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-muted);
+  margin-bottom: 4px;
+}
+.agent-report section p {
+  margin-top: 0;
+}
+.agent-report code {
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--s-tint);
+}
+.agent-report ul {
+  padding-left: 18px;
+}
+.agent-report li + li {
+  margin-top: 6px;
+}
+.agent-report-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  margin-top: 14px;
+  border: 1px solid var(--s-line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.agent-report-facts > div {
+  padding: 8px 10px;
+  /* Cell rules overlap the frame, so a part-filled last row leaves no stray lines or grey blocks. */
+  margin: 0 -1px -1px 0;
+  border-right: 1px solid var(--s-line);
+  border-bottom: 1px solid var(--s-line);
+}
+.agent-report-facts dt {
+  font-size: 11px;
+  color: var(--s-muted);
+}
+.agent-report-facts dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.agent-report-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 !important;
+  list-style: none;
+}
+.agent-report-tags li {
+  margin: 0 !important;
+  padding: 2px 8px;
+  border: 1px solid var(--s-line);
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--s-tint);
+}
+.agent-report-steps {
+  list-style: none;
+  padding: 0 !important;
+}
+.agent-report-step {
+  padding: 12px;
+  border: 1px solid var(--s-line);
+  border-radius: 6px;
+}
+.agent-report-step + .agent-report-step {
+  margin-top: 10px !important;
+}
+.agent-report-step .agent-report-facts {
+  margin-top: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+}
+.agent-report-step p {
+  margin-top: 8px;
+}
+.agent-report-label {
+  color: var(--s-muted);
+}
+.agent-report-table {
+  overflow-x: auto;
+}
+.agent-report-table table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.agent-report-table th,
+.agent-report-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--s-line);
+  text-align: left;
+  vertical-align: top;
+}
 .event-row {
   display: flex !important;
   flex-direction: column;
@@ -1463,6 +1585,21 @@ body.studio-body:before {
   letter-spacing: 0.4px;
   color: var(--s-muted);
   margin-bottom: 6px;
+}
+.evidence-item {
+  border-top: 1px solid var(--s-line);
+  padding: 8px 0;
+}
+.evidence-item summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+.evidence-item p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--s-muted);
+  white-space: pre-wrap;
 }
 .stock-analysis-evidence .detail-box.positive {
   border-color: var(--s-green);
@@ -1629,6 +1766,14 @@ body.studio-body:before {
   font-size: 10px;
   font-weight: 400;
   color: var(--s-muted, #788791);
+}
+.studio-dialog .suggest-schedule-link {
+  margin-left: 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.studio-dialog .suggest-schedule-link:hover {
+  text-decoration: underline;
 }
 .topic-card .topic-head {
   display: flex;

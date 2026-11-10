@@ -117,7 +117,7 @@ test("builder API persists layouts/items, isolates users, excludes unverified ev
       (await (await fetch(root + "/strategies/default")).json()).items.length,
       0,
     );
-    assert.equal(store.strategy("a", "default").definition.dailyResearch, true);
+    assert.equal(store.strategy("a", "default").definition.dailyResearch, false);
   } finally {
     await new Promise((r) => server.close(r));
     service.close();

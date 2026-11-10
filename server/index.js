@@ -96,7 +96,8 @@ import {
   updateAnalysisTaskDefinition,
   deleteAnalysisTaskDefinition,
   claimNextPendingTask,
-  completeAnalysisTask
+  completeAnalysisTask,
+  listAnalysisTasks
 } from "./db.js";
 import { startAnalysisTaskScheduler } from "./analysisTaskScheduler.js";
 import {
@@ -135,7 +136,7 @@ import {
 } from "./providers/tradingViewCalendars.js";
 import { scanTradingViewStrategyFinder } from "./providers/tradingViewStrategyFinder.js";
 import { HEDGE_SCAN_IDS, HEDGE_SCAN_STRATEGIES, isVanillaTradingViewRow, summarizeRows } from "../shared/hedgeScan.js";
-import { sanitizeMarketTopicInput } from "../shared/marketTopics.js";
+import { filterMarketTopics, parseMarketTopicFilters, sanitizeMarketTopicInput } from "../shared/marketTopics.js";
 import { fetchOptionChain, fetchQuotes } from "./providers/marketData.js";
 import {
   blackScholesCall,
@@ -3501,7 +3502,6 @@ function refreshMacroDashboard(force = false) {
   return snapshot;
 }
 
-function getCalendarRange(daysForward = CALENDAR_WINDOW_DAYS) {
 let lastLiveM2AttemptAt = 0;
 
 async function refreshLiveMacroM2() {
@@ -3532,6 +3532,7 @@ function refreshLiveMacroM2InBackground() {
   });
 }
 
+function getCalendarRange(daysForward = CALENDAR_WINDOW_DAYS) {
   const now = new Date();
   const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const to = new Date(from.getTime() + (daysForward * 24 * 60 * 60 * 1000) - 1000);
@@ -5835,13 +5836,28 @@ function buildGptUsageEntry(request) {
 
 app.get("/api/gpt/market-topics", requireApiKey, (request, response) => {
   const usageEntry = buildGptUsageEntry(request);
+  let filters;
   try {
-    const topics = listMarketTopics();
+    // Optional ?status=active|archived|all (default all), ?category= and ?symbol=.
+    filters = parseMarketTopicFilters(request.query);
+  } catch (error) {
+    recordGptApiUsage({
+      ...usageEntry,
+      statusCode: 400,
+      responseTimeMs: getRequestDurationMs(request),
+      errorMessage: error.message
+    });
+    response.status(400).json({ error: error.message });
+    return;
+  }
+
+  try {
+    const topics = filterMarketTopics(listMarketTopics(), filters);
     recordGptApiUsage({ ...usageEntry, statusCode: 200, responseTimeMs: getRequestDurationMs(request) });
     response.json({
       requestId: crypto.randomUUID(),
       generatedAt: new Date().toISOString(),
-      meta: { authenticatedUserId: request.user.id, authenticatedUsername: request.user.username },
+      meta: { authenticatedUserId: request.user.id, authenticatedUsername: request.user.username, filters },
       results: { topics }
     });
   } catch (error) {
@@ -5991,6 +6007,11 @@ app.post("/api/gpt/analysis-tasks/:id/complete", requireApiKey, (request, respon
 
 app.get("/api/admin/analysis-task-definitions", requireAdmin, (_request, response) => {
   response.json({ definitions: listAnalysisTaskDefinitions() });
+});
+
+// Recent task runs with the text the AI wrote back through complete_analysis_task (newest first, 50 by default).
+app.get("/api/admin/analysis-tasks", requireAdmin, (request, response) => {
+  response.json({ tasks: listAnalysisTasks(Number(request.query?.limit)) });
 });
 
 app.post("/api/admin/analysis-task-definitions", requireAdmin, (request, response) => {
@@ -7429,7 +7450,13 @@ export function startBackgroundJobs() {
       liveState.warnings = [...liveState.warnings, `Macro dashboard refresh failed: ${error.message}`];
     }
 
+    refreshLiveMacroM2InBackground();
+
     setInterval(() => {
+      if (Date.now() - lastLiveM2AttemptAt >= MACRO_DASHBOARD_REFRESH_MS) {
+        refreshLiveMacroM2InBackground();
+      }
+
       try {
         refreshMacroDashboard();
       } catch (error) {
@@ -7450,12 +7477,6 @@ export function startBackgroundJobs() {
       });
       liveState.calendarWarnings = [`Calendar refresh failed: ${error.message}`];
     });
-    refreshLiveMacroM2InBackground();
-
-
-      if (Date.now() - lastLiveM2AttemptAt >= MACRO_DASHBOARD_REFRESH_MS) {
-        refreshLiveMacroM2InBackground();
-      }
 
     setInterval(() => {
       refreshCalendarState().catch((error) => {

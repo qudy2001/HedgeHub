@@ -119,11 +119,15 @@ export function createBuilderStore(
         .map(parse);
     },
     agent(owner, id) {
-      return parse(
+      const state = parse(
         db
           .prepare("SELECT * FROM studio_agent WHERE owner=? AND strategy_id=?")
           .get(owner, id),
       );
+      // Technical-analysis suggestions (market_report) are not tracked; hide any saved before that change.
+      if (Array.isArray(state?.suggestions))
+        state.suggestions = state.suggestions.filter((x) => x.sourceSection !== "market_report");
+      return state;
     },
     saveAgent(owner, id, p) {
       db.prepare("INSERT OR REPLACE INTO studio_agent VALUES (?,?,?)").run(

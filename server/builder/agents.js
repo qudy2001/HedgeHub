@@ -20,6 +20,23 @@ const safeUrl = (v) => {
     return null;
   }
 };
+// Technical-analysis findings (the Market Analyst's indicator/price-level report) are not tracked as topics.
+const EXCLUDED_SUGGESTION_SECTIONS = new Set(["market_report"]);
+// How many of a job's report sections TradingAgents has written so far.
+const sectionProgress = (job) => {
+  const sections = Object.values(job.report_sections ?? {});
+  return { done: sections.filter(Boolean).length, total: sections.length };
+};
+// Per-stock state of a run (status, failure reason, progress), kept apart from
+// the saved research so an unfinished or failed run can be shown without
+// replacing the last good result.
+export const jobStates = (extracted) =>
+  Object.fromEntries(
+    extracted.valuations.map((v) => [
+      v.symbol,
+      { status: v.status, error: v.error, progress: v.progress, at: v.asOf },
+    ]),
+  );
 export function extractAgent(run) {
   const suggestions = [],
     valuations = [];
@@ -38,10 +55,13 @@ export function extractAgent(run) {
       asOf: job.finished_at ?? run.requested_at,
       sourceRun: run.id,
       status: job.status,
+      error: job.error ? String(job.error) : null,
+      progress: sectionProgress(job),
     });
     for (const [section, summary] of Object.entries(
       job.section_summaries ?? {},
     ))
+      if (!EXCLUDED_SUGGESTION_SECTIONS.has(section))
       for (const [category, group] of Object.entries(summary.categories ?? {}))
         for (const item of group.items ?? []) {
           const text = job.report_sections?.[section] ?? "";
@@ -143,15 +163,24 @@ function applyTrackedItemEvidence(store, owner, strategyId, extracted, checkedAt
       });
   }
 }
-// Merge a run's extracted results into aggregate state, replacing only the
-// entries for the symbols that run covered and leaving every other symbol's
-// previously saved research untouched.
-function mergeExtracted(state, extracted, symbols) {
-  const keep = (arr) => (arr ?? []).filter((x) => !symbols.includes(x.symbol));
+// Merge a run's extracted results into aggregate state. Only stocks whose job
+// completed replace their saved research; a running or failed job leaves the
+// previous result in place, as does every stock the run did not cover.
+export function mergeExtracted(state, extracted) {
+  const done = new Set(
+    extracted.valuations
+      .filter((v) => v.status === "completed")
+      .map((v) => v.symbol),
+  );
+  const keep = (arr) => (arr ?? []).filter((x) => !done.has(x.symbol));
+  const fresh = (arr) => arr.filter((x) => done.has(x.symbol));
   return {
     ...state,
-    valuations: [...keep(state.valuations), ...extracted.valuations],
-    suggestions: [...keep(state.suggestions), ...extracted.suggestions],
+    valuations: [...keep(state.valuations), ...fresh(extracted.valuations)],
+    suggestions: [
+      ...keep(state.suggestions),
+      ...fresh(extracted.suggestions),
+    ].filter((x) => !EXCLUDED_SUGGESTION_SECTIONS.has(x.sourceSection)),
   };
 }
 export function createAgentService(store) {
@@ -174,8 +203,8 @@ export function createAgentService(store) {
         const run = await request(`/runs/${encodeURIComponent(state.runId)}`);
         const extracted = extractAgent(run);
         state = {
-          ...state,
-          ...extracted,
+          ...mergeExtracted(state, extracted),
+          jobs: jobStates(extracted),
           status: run.status,
           lastChecked: new Date().toISOString(),
           error: null,
@@ -202,6 +231,7 @@ export function createAgentService(store) {
           ...state,
           runId: run.id,
           status: run.status,
+          jobs: {},
           lastStarted: new Date().toISOString(),
           error: null,
         };
@@ -245,10 +275,11 @@ export function createAgentService(store) {
         symState = {
           ...symState,
           status: run.status,
+          job: jobStates(extracted)[symbol] ?? null,
           lastChecked: checkedAt,
           error: null,
         };
-        state = mergeExtracted(state, extracted, [symbol]);
+        state = mergeExtracted(state, extracted);
         applyTrackedItemEvidence(store, owner, strategy.id, extracted, checkedAt);
       } else if (
         force ||
@@ -265,6 +296,7 @@ export function createAgentService(store) {
           ...symState,
           runId: run.id,
           status: run.status,
+          job: null,
           lastStarted: new Date().toISOString(),
           error: null,
         };

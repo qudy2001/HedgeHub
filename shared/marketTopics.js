@@ -61,6 +61,40 @@ export function sanitizeMarketTopicInput(body = {}, existing = null) {
   return { title, weight, bullishScore, bearishScore, summary, category, symbols };
 }
 
+// ---- Listing filters (GET /api/gpt/market-topics and the MCP tool list_market_topics) ------------------------------
+export const MARKET_TOPIC_STATUSES = ["active", "archived"];
+export const MARKET_TOPIC_STATUS_FILTERS = [...MARKET_TOPIC_STATUSES, "all"];
+
+const filterText = (value) => (Array.isArray(value) ? value.join(",") : String(value ?? "")).trim();
+
+// Reads the optional ?status=, ?category= and ?symbol=. Omitted or blank values mean "no filter" (status "all"), so
+// callers that predate the filters still get every topic; values that are not recognised are rejected, not ignored.
+export function parseMarketTopicFilters(query = {}) {
+  const status = filterText(query.status).toLowerCase() || "all";
+  if (!MARKET_TOPIC_STATUS_FILTERS.includes(status)) {
+    throw new Error(`status must be one of ${MARKET_TOPIC_STATUS_FILTERS.join(", ")}`);
+  }
+  const category = filterText(query.category).toLowerCase() || null;
+  if (category && !MARKET_TOPIC_CATEGORIES.includes(category)) {
+    throw new Error(`category must be one of ${MARKET_TOPIC_CATEGORIES.join(", ")}`);
+  }
+  const symbols = normalizeTopicSymbols(filterText(query.symbol));
+  if (symbols.length > 1) {
+    throw new Error("symbol must be a single ticker");
+  }
+  return { status, category, symbol: symbols[0] ?? null };
+}
+
+// `symbol` keeps the topics tagged with that ticker. The order of `topics` is kept.
+export function filterMarketTopics(topics, { status = "all", category = null, symbol = null } = {}) {
+  return topics.filter(
+    (topic) =>
+      (status === "all" || topic.status === status) &&
+      (!category || topic.category === category) &&
+      (!symbol || (topic.symbols ?? []).includes(symbol))
+  );
+}
+
 // ---- Builder "AI suggestions" tabs -------------------------------------------------------------------------
 export const SUGGESTION_TABS = ["general", "ticker", "social", "other"];
 
