@@ -1,5 +1,6 @@
 import OptionDistribution from "./OptionDistribution.jsx";
-import AgentReport from "./AgentReport.jsx";
+import AgentReport, { AgentHighlights } from "./AgentReport.jsx";
+import { reportHighlights } from "../../shared/agentReport.js";
 import OptionChainView from "./OptionChainView.jsx";
 import TigerSubscriptions from "./TigerSubscriptions.jsx";
 import { money, num, pct, pillTone } from "./format.js";
@@ -2636,9 +2637,11 @@ function Workspace({ demo, user, logout, presentation }) {
           </>
         );
       }
-      case "valuation":
+      case "valuation": {
+        const highlights = reportHighlights(valuation?.report);
         return (
-          <div className="valuation">
+          <div className={`valuation ${highlights.rating || highlights.tags.length ? "has-insight" : ""}`}>
+            <div className="valuation-main">
             {valuation ? (
               <>
                 <div className="target">
@@ -2704,8 +2707,13 @@ function Workspace({ demo, user, logout, presentation }) {
             {researchError && (
               <p className="subtle">Additional research: {researchError}</p>
             )}
+            </div>
+            {(highlights.rating || highlights.tags.length > 0) && (
+              <AgentHighlights rating={highlights.rating} tags={highlights.tags} />
+            )}
           </div>
         );
+      }
       case "strategy-score":
         return (
                   <section className="score-strip">

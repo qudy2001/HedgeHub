@@ -111,3 +111,31 @@ export function parseInline(text) {
   if (at < String(text ?? "").length) runs.push({ text: String(text).slice(at) });
   return runs;
 }
+
+// Tags in an agent report carry no sentiment of their own, so this is a conservative keyword heuristic:
+// anything not clearly bullish or bearish stays neutral.
+const BULLISH_TAG = /\b(bull\w*|upside|upgrade\w*|beat\w*|strong\w*|growth|accelerat\w*|momentum|breakout|tailwind\w*|outperform\w*|expansion|accumulat\w*|rally|uptrend|recover\w*|re-?rating|surge\w*|upturn)\b/i;
+const BEARISH_TAG = /\b(bear\w*|downside|downgrade\w*|miss(es|ed)?|weak\w*|declin\w*|headwind\w*|slowdown|compression|overvalu\w*|bubble|sell-?off|downtrend|deteriorat\w*|lawsuit\w*|recession|crash|drawdown|overhang|downturn|plunge\w*|collapse\w*)\b/i;
+export function tagSentiment(tag) {
+  const bull = BULLISH_TAG.test(tag),
+    bear = BEARISH_TAG.test(tag);
+  return bull === bear ? "neutral" : bull ? "bullish" : "bearish";
+}
+// "Buy"/"Overweight" read bullish, "Underweight"/"Sell" bearish, "Hold" and anything else neutral.
+export function ratingSentiment(rating) {
+  const r = String(rating ?? "");
+  return /underweight|sell|bearish/i.test(r) ? "bearish" : /buy|overweight|bullish/i.test(r) ? "bullish" : "neutral";
+}
+// The decision rating and keyword tags pulled out of a report, for compact display.
+export function reportHighlights(source) {
+  const blocks = parseAgentReport(source ?? "");
+  let rating = null,
+    tags = [];
+  for (const block of blocks) {
+    if (block.type === "facts" && !rating)
+      rating = block.items.find((f) => /^rating$/i.test(f.label))?.value ?? null;
+    if (block.type === "section" && /^keywords?$/i.test(block.label))
+      tags = block.text.split(/\s*,\s*/).filter(Boolean);
+  }
+  return { rating, tags: tags.map((text) => ({ text, sentiment: tagSentiment(text) })) };
+}

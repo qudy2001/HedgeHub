@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseAgentReport, parseInline, parseListItem } from "../shared/agentReport.js";
+import { parseAgentReport, parseInline, parseListItem, reportHighlights, tagSentiment, ratingSentiment } from "../shared/agentReport.js";
 
 const report = `**Rating**: Overweight
 
@@ -53,4 +53,17 @@ test("agent report: inline runs and pipes that are not labelled parts", () => {
     { text: " 2*3*4" },
   ]);
   assert.deepEqual(parseListItem("Calls | Puts"), { text: "Calls | Puts" });
+});
+
+test("agent report highlights: rating plus keyword tags with a conservative sentiment", () => {
+  const h = reportHighlights(report);
+  assert.equal(h.rating, "Overweight");
+  assert.deepEqual(h.tags.map((t) => t.text), ["Staged accumulation", "Cash conversion checkpoint", "Governance probe overhang", "Gap-risk sizing"]);
+  assert.deepEqual(h.tags.map((t) => t.sentiment), ["bullish", "neutral", "bearish", "neutral"]);
+  assert.equal(tagSentiment("Core hold at cap"), "neutral");
+  assert.equal(tagSentiment("Strong demand but weak margins"), "neutral");
+  assert.equal(ratingSentiment("Hold"), "neutral");
+  assert.equal(ratingSentiment("Underweight"), "bearish");
+  assert.equal(ratingSentiment("Buy"), "bullish");
+  assert.deepEqual(reportHighlights(null), { rating: null, tags: [] });
 });

@@ -828,7 +828,7 @@ body.studio-body:before {
   font-size: 15px;
   margin: 12px 0 8px;
 }
-.valuation > button {
+.valuation-main > button {
   font-size: 10px;
   margin: 4px 8px 0 0;
 }
@@ -2748,4 +2748,59 @@ body.studio-body:before {
 .ichart-val {
   white-space: nowrap;
   user-select: none;
+}
+
+/* Agent valuation: rating + keyword chips beside the price target */
+.valuation.has-insight {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px 28px;
+  align-items: start;
+}
+.valuation-main {
+  min-width: 0;
+}
+.agent-highlights {
+  min-width: 0;
+  padding-top: 14px;
+}
+.agent-highlights h4 {
+  margin: 14px 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--s-muted);
+}
+.agent-rating {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border: 1px solid var(--s-line);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--s-muted);
+}
+.agent-rating strong {
+  font-size: 16px;
+  color: var(--s-text);
+}
+.agent-rating strong.bullish {
+  color: var(--s-green);
+}
+.agent-rating strong.bearish {
+  color: var(--s-red);
+}
+.agent-report-tags li.bullish {
+  color: var(--s-green);
+  border-color: color-mix(in srgb, var(--s-green) 35%, transparent);
+  background: color-mix(in srgb, var(--s-green) 12%, transparent);
+}
+.agent-report-tags li.bearish {
+  color: var(--s-red);
+  border-color: color-mix(in srgb, var(--s-red) 35%, transparent);
+  background: color-mix(in srgb, var(--s-red) 12%, transparent);
+}
+.agent-report-tags li.neutral {
+  background: var(--s-bg);
 }

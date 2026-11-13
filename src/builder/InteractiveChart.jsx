@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // A small TradingView-style chart: pixel-accurate SVG with price axis, date axis, crosshair,
 // candlesticks or a line, volume bars, overlay lines and horizontal levels. No chart library needed.
@@ -39,10 +39,11 @@ export default function InteractiveChart({
   height = 240,
   label = "Chart",
 }) {
-  const wrap = useRef(null);
+  // State-backed ref: the observer must (re)attach whenever the wrapper element is actually mounted.
+  const [wrap, setWrap] = useState(null);
   // SVG presentation attributes do not reliably resolve CSS variables, so read the real theme colours.
   const css = (name, fallback) =>
-    (wrap.current && getComputedStyle(wrap.current).getPropertyValue(name).trim()) || fallback;
+    (wrap && getComputedStyle(wrap).getPropertyValue(name).trim()) || fallback;
   const GREEN = css("--s-green", "#087655"),
     RED = css("--s-red", "#ce414b"),
     LINE = css("--s-line", "#e2e9ed"),
@@ -63,15 +64,26 @@ export default function InteractiveChart({
   const candleMode = hasCandles && mode === "candles";
 
   useEffect(() => {
-    const el = wrap.current;
-    if (!el) return undefined;
-    const measure = () => setWidth(Math.max(240, Math.floor(el.clientWidth)));
+    if (!wrap) return undefined;
+    const measure = () => setWidth(Math.max(240, Math.floor(wrap.clientWidth)));
     measure();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+    window.addEventListener("resize", measure);
+    // Cheap poll as well: some embedded browsers skip resize/ResizeObserver notifications.
+    const poll = window.setInterval(measure, 400);
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    ro?.observe(wrap);
+    return () => {
+      ro?.disconnect();
+      window.clearInterval(poll);
+      window.removeEventListener("resize", measure);
+    };
+  }, [wrap]);
+  // Safety net: if a resize notification was missed, the next render (hover, data refresh) corrects the width.
+  useEffect(() => {
+    if (!wrap) return;
+    const w = Math.max(240, Math.floor(wrap.clientWidth));
+    if (w !== width) setWidth(w);
+  });
 
   const model = useMemo(() => {
     const dates = [
@@ -157,7 +169,7 @@ export default function InteractiveChart({
     : true;
 
   return (
-    <div className="ichart" ref={wrap}>
+    <div className="ichart" ref={setWrap}>
       <div className="ichart-head">
         <span className="ichart-date">{shortDate(model.dates[at])} {String(model.dates[at]).slice(0, 4)}</span>
         {bar && (

@@ -162,7 +162,7 @@ export function demoWorkspace(settings = {}) {
           priceTarget: 235,
           rating: "Bullish",
           report:
-            "Illustrative research only. No current AI recommendation has been generated.",
+            "**Rating**: Overweight\n\n**Keywords**: Services growth, Staged accumulation, Tariff headwind, Valuation stretch, Event discipline\n\n**Executive Summary**: Illustrative research only. No current AI recommendation has been generated.",
           asOf: new Date().toISOString(),
         },
       ],

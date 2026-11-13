@@ -1,4 +1,4 @@
-import { parseAgentReport, parseInline } from "../../shared/agentReport.js";
+import { parseAgentReport, parseInline, ratingSentiment, tagSentiment } from "../../shared/agentReport.js";
 
 const STEP_VALUE = 24;
 
@@ -54,6 +54,32 @@ function ListItem({ item }) {
 }
 
 // Formatted view of a TradingAgents report. Builds React elements only, so report text is never injected as HTML.
+// Compact rating + keyword chips (used in the Agent valuation panel).
+export function AgentHighlights({ rating, tags }) {
+  return (
+    <div className="agent-highlights">
+      {rating && (
+        <div className="agent-rating">
+          <span>Rating</span>
+          <strong className={ratingSentiment(rating)}>{rating}</strong>
+        </div>
+      )}
+      {tags.length > 0 && (
+        <>
+          <h4>Keywords</h4>
+          <ul className="agent-report-tags">
+            {tags.map((t, i) => (
+              <li key={i} className={t.sentiment}>
+                {t.text}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function AgentReport({ text, className = "" }) {
   const blocks = parseAgentReport(text);
   if (!blocks.length)
@@ -89,7 +115,9 @@ export default function AgentReport({ text, className = "" }) {
               {/^keywords?$/i.test(block.label) ? (
                 <ul className="agent-report-tags">
                   {block.text.split(/\s*,\s*/).map((tag, j) => (
-                    <li key={j}>{tag}</li>
+                    <li key={j} className={tagSentiment(tag)}>
+                      {tag}
+                    </li>
                   ))}
                 </ul>
               ) : (
