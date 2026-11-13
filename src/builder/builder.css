@@ -2713,3 +2713,39 @@ body.studio-body:before {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* TradingView-style charts (Stock technicals, Options analytics) */
+.ichart {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 6px;
+}
+.ichart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-height: 22px;
+  padding: 2px 0 4px;
+  font-size: 11px;
+  color: var(--s-text);
+  font-variant-numeric: tabular-nums;
+}
+.ichart-date {
+  font-weight: 700;
+}
+.ichart-head i {
+  font-style: normal;
+  color: var(--s-muted);
+}
+.ichart-mode {
+  margin-left: auto;
+}
+.ichart svg text {
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.ichart-val {
+  white-space: nowrap;
+  user-select: none;
+}

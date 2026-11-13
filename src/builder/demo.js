@@ -26,11 +26,13 @@ export function demoWorkspace(settings = {}) {
           0.00025 * i +
           0.028 * Math.sin(i * 0.19) +
           0.008 * Math.cos(i * 0.47));
+      // Open at the previous close so sample candles alternate between up and down days.
+      const open = bars.length ? bars[bars.length - 1].close : close * 0.997;
       bars.push({
         date,
-        open: close * 0.997,
-        high: close * 1.009,
-        low: close * 0.989,
+        open,
+        high: Math.max(open, close) * 1.006,
+        low: Math.min(open, close) * 0.994,
         close,
         volume: 20000000 + Math.round(5000000 * Math.sin(i)),
       });

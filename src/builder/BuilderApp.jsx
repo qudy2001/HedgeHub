@@ -32,6 +32,7 @@ import {
   topicToItem,
 } from "../../shared/marketTopics.js";
 import { demoWorkspace } from "./demo.js";
+import InteractiveChart from "./InteractiveChart.jsx";
 import "./builder.css";
 import "../styles/monitored-stocks.css";
 import "../styles/monitored-stocks-grid.css";
@@ -97,9 +98,35 @@ function restoreLayout(saved = {}) {
     order: [...new Set([...order, ...DEFAULT_LAYOUT.order])],
   };
 }
+// EMA overlays for the Stock technicals chart. Computed over the full history, seeded with the SMA of the first
+// `period` closes (as TradingView does); a line is omitted when there are not enough bars to compute it.
+const EMA_LINES = [
+  [14, "#f5a623"],
+  [26, "#2f80ed"],
+  [50, "#9770db"],
+  [100, "#e056a0"],
+  [200, "#12a3a3"],
+  [250, "#8d6e63"],
+];
+function emaSeries(bars, period) {
+  if (bars.length < period) return [];
+  const k = 2 / (period + 1);
+  let ema = bars.slice(0, period).reduce((t, b) => t + b.close, 0) / period;
+  const out = [{ date: bars[period - 1].date, value: ema }];
+  for (let i = period; i < bars.length; i += 1) {
+    ema = bars[i].close * k + ema * (1 - k);
+    out.push({ date: bars[i].date, value: ema });
+  }
+  return out;
+}
+// Average of the latest value of every EMA line shown on the chart (lines without enough history are skipped).
+function emaAverage(bars) {
+  const last = EMA_LINES.map(([period]) => emaSeries(bars, period).at(-1)?.value).filter(Number.isFinite);
+  return last.length ? last.reduce((t, v) => t + v, 0) / last.length : null;
+}
 const METRICS = {
   payoff: ["Net option cost", "Max loss", "Max gain", "Breakeven"],
-  technicals: ["RSI", "50-day average", "Support", "Resistance"],
+  technicals: ["RSI", "EMA average", "Support", "Resistance"],
   options: ["IV", "HV", "IV rank", "Min OI"],
   valuation: ["Target", "Agent view"],
 };
@@ -2487,15 +2514,26 @@ function Workspace({ demo, user, logout, presentation }) {
       case "technicals":
         return (
           <>
-            <Sparkline
-              series={[(dataset?.bars ?? []).slice(-120).map((b) => b.close)]}
-              dates={[(dataset?.bars ?? []).slice(-120).map((b) => b.date)]}
+            <InteractiveChart
+              label={`${symbol ?? "Stock"} price`}
+              height={250}
               format={(v) => money(v, 2)}
-              labels={[symbol + " price"]}
+              candles={(dataset?.bars ?? []).slice(-120)}
+              series={EMA_LINES.map(([period, color]) => ({
+                key: `ema${period}`,
+                label: `EMA${period}`,
+                color,
+                noScale: true,
+                points: emaSeries(dataset?.bars ?? [], period).slice(-120),
+              }))}
+              levels={[
+                { label: "Support", value: tech.support, color: "up" },
+                { label: "Resistance", value: tech.resistance, color: "down" },
+              ]}
             />
             {metrics("technicals", [
               ["RSI", num(tech.rsi)],
-              ["50-day average", money(tech.sma50, 2)],
+              ["EMA average", money(emaAverage(dataset?.bars ?? []), 2)],
               ["Support", money(tech.support, 2)],
               ["Resistance", money(tech.resistance, 2)],
             ])}
@@ -2542,8 +2580,6 @@ function Workspace({ demo, user, logout, presentation }) {
               value: realizedVol(a.slice(0, i + 1)),
             }))
             .filter((b) => b.date >= from && b.value != null),
-          hvDates = hv.map((b) => b.date),
-          hvValues = hv.map((b) => b.value),
           volFmt = (v) => `${(v <= 3 ? v * 100 : v).toFixed(1)}%`;
         return (
           <>
@@ -2561,15 +2597,28 @@ function Workspace({ demo, user, logout, presentation }) {
                 ))}
               </div>
             </div>
-            <Sparkline
-              series={ivs.length ? [ivs.map((b) => b.iv), hvValues] : [hvValues]}
-              dates={ivs.length ? [ivs.map((b) => b.date), hvDates] : [hvDates]}
+            <InteractiveChart
+              label="Volatility history"
+              height={250}
               format={volFmt}
-              labels={
-                ivs.length
-                  ? ["IV history", "HV history"]
-                  : ["Realized volatility history"]
-              }
+              series={[
+                ...(ivs.length
+                  ? [
+                      {
+                        key: "iv",
+                        label: "IV",
+                        color: "#2f80ed",
+                        points: ivs.map((b) => ({ date: b.date, value: b.iv })),
+                      },
+                    ]
+                  : []),
+                {
+                  key: "hv",
+                  label: ivs.length ? "HV" : "Realized vol",
+                  color: "#e5484d",
+                  points: hv.map((b) => ({ date: b.date, value: b.value })),
+                },
+              ]}
             />
             {metrics("options", [
               ["IV", pct(row?.iv != null ? row.iv * 100 : null)],
