@@ -249,6 +249,40 @@ body.studio-body:before {
   margin-top: auto;
   padding-top: 24px;
 }
+.sidebar-subscriptions {
+  margin-bottom: 14px;
+  padding: 0 12px;
+}
+.sidebar-subscriptions ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.sidebar-subscriptions li {
+  display: grid;
+  gap: 1px;
+  font-size: 10px;
+  color: var(--s-muted);
+}
+.sidebar-subscriptions li strong {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--s-text);
+}
+.sidebar-subscriptions li.sub-soon span {
+  color: var(--s-earnings);
+}
+.sidebar-subscriptions li.sub-expired span {
+  color: var(--s-red);
+  font-weight: 600;
+}
+.sidebar-subscriptions .sub-note {
+  margin: 8px 0 0;
+  font-size: 10px;
+  color: var(--s-muted);
+}
 .sidebar-bottom button {
   width: 100%;
   border: 1px solid var(--s-line);
@@ -345,16 +379,26 @@ body.studio-body:before {
 }
 .panel-technicals,
 .panel-options,
-.panel-valuation {
-  grid-column: span 4;
+.panel-valuation,
+.panel-option-summary {
+  grid-column: span 6;
 }
 .panel-past,
 .panel-future {
   grid-column: span 6;
 }
 .panel-tracking,
-.panel-results {
+.panel-results,
+.panel-strategy-score {
   grid-column: 1/-1;
+}
+.panel-strategy-score {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.panel-strategy-score .score-strip {
+  margin-bottom: 0;
 }
 .panel-head {
   display: flex;
@@ -702,6 +746,46 @@ body.studio-body:before {
   display: block;
   width: 100%;
   height: 67px;
+}
+.spark-plot {
+  position: relative;
+  touch-action: pan-y;
+  cursor: crosshair;
+}
+.spark-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--s-line, #ccc);
+  pointer-events: none;
+}
+.spark-dot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.spark-tip {
+  position: absolute;
+  top: -4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 7px;
+  font-size: 10px;
+  line-height: 1.3;
+  white-space: nowrap;
+  background: #fff;
+  border: 1px solid var(--s-line, #ccc);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+  z-index: 3;
 }
 .spark .gridline {
   stroke: var(--s-line);
@@ -1991,9 +2075,11 @@ body.studio-body:before {
   .panel-payoff,
   .panel-hedges,
   .panel-valuation,
+  .panel-option-summary,
   .panel-past,
   .panel-future,
   .panel-results,
+  .panel-strategy-score,
   .panel-tracking {
     grid-column: 1/-1;
   }
@@ -2514,6 +2600,29 @@ body.studio-body:before {
   background: rgba(74, 158, 255, 0.1);
   border-color: #4a9eff;
 }
+
+.breadcrumb-actions { display: flex; align-items: center; gap: 10px; }
+.snapshot-picker { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--s-muted, inherit); }
+.snapshot-picker select { font-size: 12px; padding: 3px 6px; max-width: 320px; }
+.snapshot-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #fbf0d6;
+  border-bottom: 2px solid #d68f00;
+  font-size: 13px;
+  color: var(--s-text);
+  /* Stays in view below the sticky top nav, so a scrolled panel is never mistaken for live data. */
+  position: sticky;
+  top: 58px;
+  z-index: 5;
+}
+.studio[data-theme="dark"] .snapshot-banner { background: #3a2e12; }
+.snapshot-banner strong { color: #a36a00; }
+.studio[data-theme="dark"] .snapshot-banner strong { color: #ffc24a; }
+.snapshot-banner button { white-space: nowrap; }
 
 .empty-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 

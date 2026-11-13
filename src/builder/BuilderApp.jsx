@@ -1,6 +1,7 @@
 import OptionDistribution from "./OptionDistribution.jsx";
 import AgentReport from "./AgentReport.jsx";
 import OptionChainView from "./OptionChainView.jsx";
+import TigerSubscriptions from "./TigerSubscriptions.jsx";
 import { money, num, pct, pillTone } from "./format.js";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 const MacroHeatmapDashboard = lazy(() => import("../components/MacroHeatmapDashboard.jsx"));
@@ -41,40 +42,58 @@ const PANELS = [
   ["technicals", "Stock technicals", "trend"],
   ["options", "Options analytics", "pie"],
   ["valuation", "Agent valuation", "bulb"],
+  ["option-summary", "Option and price summary", "pie"],
   ["oi-distribution", "Open interest distribution", "chart"],
   ["volume-distribution", "Volume distribution", "chart"],
   ["past", "Past events", "calendar"],
   ["future", "Upcoming events", "calendar"],
   ["tracking", "AI tracking", "target"],
   ["ai-stock-analysis", "AI Stock Analysis", "chip"],
+  ["strategy-score", "Strategy score", "target"],
   ["results", "Scan results", "search"],
 ];
 const DEFAULT_LAYOUT = {
   order: [
-    "payoff",
-    "hedges",
     "tracking",
-    "results",
-    "technicals",
-    "options",
     "valuation",
+    "option-summary",
     "oi-distribution",
     "volume-distribution",
+    "technicals",
+    "options",
     "past",
     "future",
+    "payoff",
+    "hedges",
+    "strategy-score",
+    "results",
   ],
+  layoutVersion: 4,
   hidden: [],
   collapsed: [],
   metrics: {},
   theme: "light",
 };
+const TOP_PANELS = ["valuation", "option-summary", "oi-distribution", "volume-distribution", "technicals", "options", "past", "future"];
 function restoreLayout(saved = {}) {
-  const order = Array.isArray(saved.order)
+  let order = Array.isArray(saved.order)
     ? saved.order.filter((id) => DEFAULT_LAYOUT.order.includes(id))
     : DEFAULT_LAYOUT.order;
+  // v3: one-time migration putting the analysis rows (valuation + summary, OI + volume, technicals + options, events) on top of saved layouts.
+  if ((saved.layoutVersion || 1) < 3) {
+    order = [...TOP_PANELS, ...order.filter((id) => !TOP_PANELS.includes(id))];
+  }
+  // v4: AI tracking moves to the top and the Strategy score strip (now a panel) takes its old slot.
+  if ((saved.layoutVersion || 1) < 4) {
+    const at = Math.max(order.indexOf("tracking"), 0),
+      rest = order.filter((id) => id !== "tracking" && id !== "strategy-score");
+    rest.splice(at, 0, "strategy-score");
+    order = ["tracking", ...rest];
+  }
   return {
     ...DEFAULT_LAYOUT,
     ...saved,
+    layoutVersion: DEFAULT_LAYOUT.layoutVersion,
     order: [...new Set([...order, ...DEFAULT_LAYOUT.order])],
   };
 }
@@ -227,42 +246,104 @@ function Drawer({ title, onClose, children, wide = false }) {
     </dialog>
   );
 }
-function Sparkline({ series, labels = [] }) {
+function Sparkline({ series, labels = [], dates = [], format }) {
+  const [hover, setHover] = useState(null);
   const values = series.flatMap((s) => s.filter(Number.isFinite));
   if (values.length < 2)
     return <div className="empty-chart">Historical data unavailable</div>;
   const min = Math.min(...values),
     max = Math.max(...values),
-    range = max - min || 1;
+    range = max - min || 1,
+    fmt = format ?? ((v) => num(v, 2)),
+    colors = ["#087e63", "#9770db"],
+    yOf = (v) => 82 - ((v - min) / range) * 72;
+  // Scrub: map the pointer's horizontal position to the nearest point of every series.
+  function scrub(e) {
+    const box = e.currentTarget.getBoundingClientRect();
+    if (!box.width) return;
+    setHover(Math.min(1, Math.max(0, (e.clientX - box.left) / box.width)));
+  }
+  const points =
+    hover == null
+      ? []
+      : series.map((s, k) => {
+          const i = Math.round(hover * (s.length - 1)),
+            value = s[i];
+          return {
+            k,
+            value,
+            date: dates[k]?.[i] ?? dates[0]?.[i],
+            x: s.length > 1 ? i / (s.length - 1) : 0,
+          };
+        }).filter((p) => Number.isFinite(p.value));
+  const lead = points[0];
   return (
     <div className="spark">
-      <svg
-        viewBox="0 0 480 90"
-        role="img"
-        aria-label={labels.join(" and ")}
-        preserveAspectRatio="none"
+      <div
+        className="spark-plot"
+        onPointerMove={scrub}
+        onPointerDown={scrub}
+        onPointerLeave={() => setHover(null)}
+        onPointerCancel={() => setHover(null)}
       >
-        {[15, 45, 75].map((y) => (
-          <path key={y} d={`M0 ${y}H480`} className="gridline" />
-        ))}
-        {series.map((s, k) => (
-          <polyline
-            key={k}
-            fill="none"
-            stroke={k ? "#9770db" : "#087e63"}
-            strokeWidth="2.2"
-            points={s
-              .map(
-                (v, i) =>
-                  `${(i * 480) / (s.length - 1 || 1)},${82 - ((v - min) / range) * 72}`,
-              )
-              .join(" ")}
-          />
-        ))}
-      </svg>
+        <svg
+          viewBox="0 0 480 90"
+          role="img"
+          aria-label={labels.join(" and ")}
+          preserveAspectRatio="none"
+        >
+          {[15, 45, 75].map((y) => (
+            <path key={y} d={`M0 ${y}H480`} className="gridline" />
+          ))}
+          {series.map((s, k) => (
+            <polyline
+              key={k}
+              fill="none"
+              stroke={colors[k] ?? colors[1]}
+              strokeWidth="2.2"
+              vectorEffect="non-scaling-stroke"
+              points={s
+                .map((v, i) => `${(i * 480) / (s.length - 1 || 1)},${yOf(v)}`)
+                .join(" ")}
+            />
+          ))}
+        </svg>
+        {lead && (
+          <>
+            <span className="spark-cursor" style={{ left: `${lead.x * 100}%` }} />
+            {points.map((p) => (
+              <span
+                key={p.k}
+                className="spark-dot"
+                style={{
+                  left: `${p.x * 100}%`,
+                  top: `${(yOf(p.value) / 90) * 100}%`,
+                  background: colors[p.k] ?? colors[1],
+                }}
+              />
+            ))}
+            <div
+              className="spark-tip"
+              style={{
+                left: `${lead.x * 100}%`,
+                transform: `translateX(${lead.x > 0.7 ? "-100%" : lead.x < 0.3 ? "0" : "-50%"})`,
+              }}
+            >
+              {lead.date && <b>{lead.date}</b>}
+              {points.map((p) => (
+                <span key={p.k} style={{ color: colors[p.k] ?? colors[1] }}>
+                  {labels[p.k] ? `${labels[p.k]} ` : ""}
+                  {fmt(p.value)}
+                  {p.date && p.date !== lead.date ? ` · ${p.date}` : ""}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
       <div className="chart-labels">
         {labels.map((s, i) => (
-          <span key={s} style={{ color: i ? "#9770db" : "#087e63" }}>
+          <span key={s} style={{ color: colors[i] ?? colors[1] }}>
             — {s}
           </span>
         ))}
@@ -561,6 +642,23 @@ function csvCell(value) {
   return '"' + s.replaceAll('"', '""') + '"';
 }
 
+const NO_RESULTS = {};
+const NOT_IN_SNAPSHOT = { events: [], warnings: ["Not saved in this snapshot."] };
+function snapshotLabel(s) {
+  const when = new Date(s.capturedAt).toLocaleString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${when} · ${s.rows} result${s.rows === 1 ? "" : "s"}${s.parts.includes("distribution") ? "" : " · no option chain"}`;
+}
+function daysAgo(iso) {
+  const days = Math.round((Date.now() - Date.parse(iso)) / 86400000);
+  return days <= 0 ? "today" : days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
 export default function BuilderApp({ presentation = null }) {
   const basePath = presentation?.basePath ?? "/builder";
   const demo = new URLSearchParams(location.search).get("demo") === "1";
@@ -667,8 +765,8 @@ function Workspace({ demo, user, logout, presentation }) {
     [saved, setSaved] = useState([]),
     [layout, setLayout] = useState(DEFAULT_LAYOUT),
     [dirty, setDirty] = useState(false);
-  const [rows, setRows] = useState(sample?.rows ?? []),
-    [datasets, setDatasets] = useState(sample?.datasets ?? {}),
+  const [liveRows, setRows] = useState(sample?.rows ?? []),
+    [liveDatasets, setDatasets] = useState(sample?.datasets ?? {}),
     [items, setItems] = useState(sample?.items ?? []),
     [agent, setAgent] = useState(sample?.agent ?? null),
     [agentAvailable, setAgentAvailable] = useState(false);
@@ -722,7 +820,33 @@ function Workspace({ demo, user, logout, presentation }) {
       return ready;
     }
   });
-  const [hedgeScan, setHedgeScan] = useState({ busy: false, error: "", results: {}, at: null, waitingUntil: null });
+  const [liveHedgeScan, setHedgeScan] = useState({ busy: false, error: "", results: {}, at: null, waitingUntil: null });
+  const [selectedMonitoredStock, setSelectedMonitoredStock] = useState(null);
+  // Historical snapshots: a saved scan of the selected stock replaces the live rows, datasets and panel data
+  // below. While `history` is set, nothing here requests live market data.
+  const [snapshotList, setSnapshotList] = useState([]),
+    [snapshot, setSnapshot] = useState(null),
+    [snapshotBusy, setSnapshotBusy] = useState(false);
+  const history =
+    snapshot?.scan && snapshot.symbol === selectedMonitoredStock ? snapshot : null;
+  const rows = history ? history.scan.rows : liveRows;
+  const datasets = useMemo(
+    () => (history ? { [history.symbol]: history.scan.dataset } : liveDatasets),
+    [history, liveDatasets],
+  );
+  const hedgeScan = useMemo(
+    () =>
+      history
+        ? {
+            busy: false,
+            error: "",
+            results: history.hedges?.results ?? NO_RESULTS,
+            at: history.hedges?.generatedAt ?? null,
+            waitingUntil: null,
+          }
+        : liveHedgeScan,
+    [history, liveHedgeScan],
+  );
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true; // StrictMode re-runs effects: it must come back to true
@@ -749,7 +873,7 @@ function Workspace({ demo, user, logout, presentation }) {
     ).length;
   }
   async function runHedgeScan(only = enabledScans, symbols = null) {
-    if (!only.length) return;
+    if (!only.length || history) return;
     setHedgeScan((h) => ({ ...h, busy: true, error: "", waitingUntil: null }));
     try {
       const started = await api("/hedge-scan/jobs", {
@@ -786,7 +910,6 @@ function Workspace({ demo, user, logout, presentation }) {
       if (alive.current) setHedgeScan((h) => ({ ...h, busy: false, error: e.message, waitingUntil: null }));
     }
   }
-  const [selectedMonitoredStock, setSelectedMonitoredStock] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     try {
       const w = Number(localStorage.getItem("studio-sidebar-width"));
@@ -847,9 +970,11 @@ function Workspace({ demo, user, logout, presentation }) {
     );
     return pool.find((r) => r.id === selectedId) ?? pool[0] ?? null;
   }, [rows, pmRows, selectedId, selectedMonitoredStock]);
+  // A snapshot is scored with the tracking items it was scanned with, so its ratings read as they did then.
+  const scoreItems = history?.scan.items ?? items;
   const ratedRows = useMemo(
-    () => rows.map((r) => applyCatalysts(r, items, includeCatalysts)),
-    [rows, items, includeCatalysts],
+    () => rows.map((r) => applyCatalysts(r, scoreItems, includeCatalysts)),
+    [rows, scoreItems, includeCatalysts],
   );
   const selected = ratedRows.find((r) => r.id === row?.id),
     symbol = selectedMonitoredStock ?? row?.symbol ?? strategy.symbols[0],
@@ -857,8 +982,8 @@ function Workspace({ demo, user, logout, presentation }) {
     tech = useMemo(() => technicals(dataset?.bars ?? []), [dataset]);
   // Polymarket rows are scored separately, so the tracking strip scores the items against the symbol on its own.
   const trackingRow = useMemo(
-    () => selected ?? applyCatalysts({ symbol, template: row?.template, baseScore: null, scoreRange: [0, 0] }, items, includeCatalysts),
-    [selected, symbol, row?.template, items, includeCatalysts],
+    () => selected ?? applyCatalysts({ symbol, template: row?.template, baseScore: null, scoreRange: [0, 0] }, scoreItems, includeCatalysts),
+    [selected, symbol, row?.template, scoreItems, includeCatalysts],
   );
   const tableRows = useMemo(() => [...ratedRows, ...pmRows], [ratedRows, pmRows]);
   const quoteSizeAvailable = tableRows.some((r) => minLegValue(r, quoteSize) != null);
@@ -893,7 +1018,7 @@ function Workspace({ demo, user, logout, presentation }) {
         .sort((a, b) => compareRows(a, b, sort)),
     [tableRows, selectedMonitoredStock, templateFilter, expiryFilter, minRating, minAnnRet, minLiquidity, maxIvRank, minDte, maxDte, earningsFilter, quoteSizeFilter, spreadFilter, optVolFilter, maxLossFilter, sort],
   );
-  const valuation = agentResult(agent, symbol),
+  const valuation = history ? (history.scan.valuation ?? null) : agentResult(agent, symbol),
     valuationRun = agentRunFor(agent, symbol, researchingSymbols.has(symbol)),
     visibleItems = items.filter(
       (i) =>
@@ -908,6 +1033,26 @@ function Workspace({ demo, user, logout, presentation }) {
     setDistributionData(null);
     setDistributionError("");
     if (!dataset) {
+      setDistributionLoading(false);
+      return;
+    }
+    if (history) {
+      const saved = history.distribution;
+      if (!saved)
+        setDistributionError("The option chain was not saved in this snapshot.");
+      else {
+        const limit = addDays(saved.asOf.slice(0, 10), distributionDays);
+        setDistributionData({
+          ...saved,
+          contracts: saved.contracts.filter((c) => c.expiration <= limit),
+          warnings: [
+            ...(saved.warnings ?? []),
+            ...(saved.days < distributionDays
+              ? ["This snapshot saved the 1-year chain only; later expiries are not available."]
+              : []),
+          ],
+        });
+      }
       setDistributionLoading(false);
       return;
     }
@@ -937,7 +1082,45 @@ function Workspace({ demo, user, logout, presentation }) {
     return () => {
       live = false;
     };
-  }, [symbol, dataset?.asOf, demo, distributionDays]);
+  }, [symbol, dataset?.asOf, demo, distributionDays, history]);
+  useEffect(() => {
+    setSnapshot(null);
+    setSnapshotList([]);
+  }, [selectedMonitoredStock]);
+  // The list is re-read after each live scan of the stock, so today's snapshot shows up straight away.
+  const liveAsOf = selectedMonitoredStock ? liveDatasets[selectedMonitoredStock]?.asOf : null;
+  useEffect(() => {
+    if (demo || !selectedMonitoredStock) return;
+    let live = true;
+    api(`/builder/snapshots?symbol=${encodeURIComponent(selectedMonitoredStock)}`)
+      .then((data) => live && setSnapshotList(data.snapshots ?? []))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [demo, selectedMonitoredStock, liveAsOf]);
+  async function openSnapshot(id) {
+    setError("");
+    if (!id) {
+      // Drop the saved chain with the snapshot, so no live request is ever built from snapshot data.
+      setDistributionData(null);
+      setSnapshot(null);
+      return;
+    }
+    setSnapshotBusy(true);
+    try {
+      const s = await api(`/builder/snapshots/${id}`);
+      setDistributionData(null);
+      setSnapshot(s);
+      setSelectedId(s.scan?.rows?.[0]?.id ?? "");
+      setPage(0);
+      setNotice("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSnapshotBusy(false);
+    }
+  }
   useEffect(() => {
     if (view !== "economy" || demo || macro) return;
     let live = true;
@@ -954,7 +1137,7 @@ function Workspace({ demo, user, logout, presentation }) {
   }, [view, demo]);
   function navigate(next) {
     const p = next === "workspace" ? basePath : `${basePath}/${next}`;
-    history.pushState({}, "", p + (demo ? "?demo=1" : ""));
+    window.history.pushState({}, "", p + (demo ? "?demo=1" : ""));
     setView(next);
   }
   useEffect(() => {
@@ -1127,6 +1310,11 @@ function Workspace({ demo, user, logout, presentation }) {
     );
   }
   async function run(kind = "scan", only = null) {
+    if (kind === "scan" && history) {
+      setError("");
+      setNotice("You are viewing a saved snapshot. Go back to live to scan.");
+      return;
+    }
     if (kind === "scan" && !demo && hedgeScan.busy) return; // a scan (possibly waiting out a rate limit) is already running
     const runStrategy = only ? { ...strategy, symbols: [only] } : strategy;
     const templates = templatesForHedgeChoices(enabledScans);
@@ -1237,6 +1425,10 @@ function Workspace({ demo, user, logout, presentation }) {
     const request = ++selectionRequest.current;
     setResearch(null);
     setResearchError("");
+    if (history) {
+      setResearch(history.research);
+      return;
+    }
     if (!dataset || demo) return;
     api(`/builder/research/${symbol}`)
       .then((r) => {
@@ -1245,8 +1437,15 @@ function Workspace({ demo, user, logout, presentation }) {
       .catch((e) => {
         if (request === selectionRequest.current) setResearchError(e.message);
       });
-  }, [symbol, dataset?.asOf, demo]);
+  }, [symbol, dataset?.asOf, demo, history]);
   useEffect(() => {
+    if (history) {
+      setEvents({
+        past: history.events?.past ?? NOT_IN_SNAPSHOT,
+        future: history.events?.future ?? NOT_IN_SNAPSHOT,
+      });
+      return;
+    }
     if (!dataset || demo) return;
     let live = true;
     setEvents({ past: null, future: null });
@@ -1269,7 +1468,7 @@ function Workspace({ demo, user, logout, presentation }) {
     return () => {
       live = false;
     };
-  }, [symbol, past, future, eventExtras, dataset?.asOf, demo]);
+  }, [symbol, past, future, eventExtras, dataset?.asOf, demo, history]);
   const getPnl = useCallback(
     ({ spot, date }) => (row ? payoff(row, spot, date) : 0),
     [row],
@@ -2290,6 +2489,8 @@ function Workspace({ demo, user, logout, presentation }) {
           <>
             <Sparkline
               series={[(dataset?.bars ?? []).slice(-120).map((b) => b.close)]}
+              dates={[(dataset?.bars ?? []).slice(-120).map((b) => b.date)]}
+              format={(v) => money(v, 2)}
               labels={[symbol + " price"]}
             />
             {metrics("technicals", [
@@ -2316,6 +2517,7 @@ function Workspace({ demo, user, logout, presentation }) {
             stockSymbol={symbol}
             stockBars={dataset?.bars}
             demo={demo}
+            savedStock={history ? (history.stockVolume ?? []) : null}
             stockSettings={
               layout.stockVolume ?? {
                 visible: true,
@@ -2330,7 +2532,7 @@ function Workspace({ demo, user, logout, presentation }) {
           />
         );
       case "options": {
-        const from = addDays(dateOnly(Date.now()), -volDays),
+        const from = addDays(dateOnly(history ? Date.parse(history.capturedAt) : Date.now()), -volDays),
           ivs = (research?.volatility?.history ?? []).filter(
             (b) => b.date >= from,
           ),
@@ -2339,8 +2541,10 @@ function Workspace({ demo, user, logout, presentation }) {
               date: b.date,
               value: realizedVol(a.slice(0, i + 1)),
             }))
-            .filter((b) => b.date >= from && b.value != null)
-            .map((b) => b.value);
+            .filter((b) => b.date >= from && b.value != null),
+          hvDates = hv.map((b) => b.date),
+          hvValues = hv.map((b) => b.value),
+          volFmt = (v) => `${(v <= 3 ? v * 100 : v).toFixed(1)}%`;
         return (
           <>
             <div className="event-controls">
@@ -2358,7 +2562,9 @@ function Workspace({ demo, user, logout, presentation }) {
               </div>
             </div>
             <Sparkline
-              series={ivs.length ? [ivs.map((b) => b.iv), hv] : [hv]}
+              series={ivs.length ? [ivs.map((b) => b.iv), hvValues] : [hvValues]}
+              dates={ivs.length ? [ivs.map((b) => b.date), hvDates] : [hvDates]}
+              format={volFmt}
               labels={
                 ivs.length
                   ? ["IV history", "HV history"]
@@ -2451,6 +2657,55 @@ function Workspace({ demo, user, logout, presentation }) {
             )}
           </div>
         );
+      case "strategy-score":
+        return (
+                  <section className="score-strip">
+                    <strong>
+                      Strategy score{" "}
+                      <b>
+                        {selected?.overall ??
+                          (selected
+                            ? `${selected.adjustedRange[0]}–${selected.adjustedRange[1]}`
+                            : "—")}
+                        <small>/100</small>
+                      </b>
+                    </strong>
+                    <span>
+                      Base <b>{selected?.baseScore ?? "Incomplete"}</b>
+                    </span>
+                    <span>
+                      Catalysts{" "}
+                      <b className={tone(selected?.catalystImpact)}>
+                        {selected ? delta(selected.catalystImpact) : "—"}
+                      </b>
+                    </span>
+                    {selected?.riskAdjustment && (
+                      <span>
+                        Risk{" "}
+                        <b className={tone(selected.riskAdjustment.total)}>
+                          {delta(selected.riskAdjustment.total)}
+                        </b>
+                      </span>
+                    )}
+                    <span className="subtle">
+                      {selected?.baseScore == null
+                        ? "Liquidity unverified · score range only"
+                        : "Explainable quality score"}
+                    </span>
+                    <span className="spacer" />
+                    <button
+                      className="text-button"
+                      disabled={!selected}
+                      onClick={() =>
+                        setModal({ type: "rating", row: selected })
+                      }
+                    >
+                      View breakdown →
+                    </button>
+                  </section>
+        );
+      case "option-summary":
+        return null; // Placeholder: intentionally blank until the summary content is defined.
       case "past":
         return eventsPanel("past");
       case "future":
@@ -2881,6 +3136,8 @@ function Workspace({ demo, user, logout, presentation }) {
                 t.equity.map((e) => e.value),
                 t.equity.map((e) => e.benchmark),
               ]}
+              dates={[t.equity.map((e) => e.date)]}
+              format={(v) => money(v, 0)}
               labels={["Strategy equity", "Buy & hold"]}
             />
             <div className="results-scroll">
@@ -3046,6 +3303,7 @@ function Workspace({ demo, user, logout, presentation }) {
                   }
                 }}
               />
+              <TigerSubscriptions demo={demo} />
               <span className="eyebrow">ANALYSIS</span>
               <button
                 className={view === "backtests" ? "active" : ""}
@@ -3135,7 +3393,8 @@ function Workspace({ demo, user, logout, presentation }) {
                 <button
                   className="primary"
                   onClick={() => run("scan", selectedMonitoredStock)}
-                  disabled={busy}
+                  disabled={busy || Boolean(history)}
+                  title={history ? "Go back to live to scan" : undefined}
                 >
                   <Icon name="search" />
                   {busy
@@ -3145,7 +3404,7 @@ function Workspace({ demo, user, logout, presentation }) {
                       : "Scan stocks"}
                 </button>
                 {selectedMonitoredStock && (
-                  <button onClick={() => run()} disabled={busy || hedgeScan.busy}>
+                  <button onClick={() => run()} disabled={busy || hedgeScan.busy || Boolean(history)}>
                     <Icon name="search" />
                     Scan all tickers
                   </button>
@@ -3154,12 +3413,54 @@ function Workspace({ demo, user, logout, presentation }) {
               {selectedMonitoredStock && (
                 <div className="filter-breadcrumb">
                   <span>📊 Filtered to: <strong>{selectedMonitoredStock}</strong></span>
-                  <button
-                    className="clear-filter"
-                    onClick={() => setSelectedMonitoredStock(null)}
-                    title="Clear filter"
-                  >
-                    ✕ Clear filter
+                  <span className="breadcrumb-actions">
+                    {!demo && (
+                      <label
+                        className="snapshot-picker"
+                        title="Each scan is saved (the latest per market day) and kept for 30 days."
+                      >
+                        View
+                        <select
+                          aria-label="Live data or a saved snapshot"
+                          value={history?.id ?? ""}
+                          disabled={snapshotBusy || busy}
+                          onChange={(e) => openSnapshot(e.target.value)}
+                        >
+                          <option value="">Live</option>
+                          {snapshotList.length ? (
+                            <optgroup label="Saved scans · last 30 days">
+                              {snapshotList.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {snapshotLabel(s)}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : (
+                            <option disabled>No saved scans yet</option>
+                          )}
+                        </select>
+                      </label>
+                    )}
+                    <button
+                      className="clear-filter"
+                      onClick={() => setSelectedMonitoredStock(null)}
+                      title="Clear filter"
+                    >
+                      ✕ Clear filter
+                    </button>
+                  </span>
+                </div>
+              )}
+              {history && (
+                <div className="snapshot-banner" role="status">
+                  <span>
+                    <strong>Historical snapshot</strong> · {history.symbol} as scanned{" "}
+                    {sourceDate(history.capturedAt)} ({daysAgo(history.capturedAt)}). Panels show
+                    saved data only; nothing is fetched live.
+                    {!history.distribution && " The option chain was not saved for this scan."}
+                  </span>
+                  <button className="primary" onClick={() => openSnapshot("")}>
+                    Back to live
                   </button>
                 </div>
               )}
@@ -3217,50 +3518,6 @@ function Workspace({ demo, user, logout, presentation }) {
                 <MonitoredStocksTileGrid demo={demo} onSelectStock={setSelectedMonitoredStock} />
               ) : (
                 <>
-                  <section className="score-strip">
-                    <strong>
-                      Strategy score{" "}
-                      <b>
-                        {selected?.overall ??
-                          (selected
-                            ? `${selected.adjustedRange[0]}–${selected.adjustedRange[1]}`
-                            : "—")}
-                        <small>/100</small>
-                      </b>
-                    </strong>
-                    <span>
-                      Base <b>{selected?.baseScore ?? "Incomplete"}</b>
-                    </span>
-                    <span>
-                      Catalysts{" "}
-                      <b className={tone(selected?.catalystImpact)}>
-                        {selected ? delta(selected.catalystImpact) : "—"}
-                      </b>
-                    </span>
-                    {selected?.riskAdjustment && (
-                      <span>
-                        Risk{" "}
-                        <b className={tone(selected.riskAdjustment.total)}>
-                          {delta(selected.riskAdjustment.total)}
-                        </b>
-                      </span>
-                    )}
-                    <span className="subtle">
-                      {selected?.baseScore == null
-                        ? "Liquidity unverified · score range only"
-                        : "Explainable quality score"}
-                    </span>
-                    <span className="spacer" />
-                    <button
-                      className="text-button"
-                      disabled={!selected}
-                      onClick={() =>
-                        setModal({ type: "rating", row: selected })
-                      }
-                    >
-                      View breakdown →
-                    </button>
-                  </section>
                   <div className="studio-grid">
                     {layout.order
                       .filter((id) => !layout.hidden.includes(id))
@@ -3275,7 +3532,7 @@ function Workspace({ demo, user, logout, presentation }) {
                             onDragOver={(e) => e.preventDefault()}
                             onDrop={(e) => dropPanel(e, id)}
                           >
-                            {id === "results" ? null : panelHeader(...p)}
+                            {id === "results" || id === "strategy-score" ? null : panelHeader(...p)}
                             {!layout.collapsed.includes(id) && content(id)}
                           </section>
                         );

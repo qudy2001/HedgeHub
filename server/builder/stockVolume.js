@@ -51,6 +51,7 @@ export function createStockVolumeService({
   read = tigerRequest,
   now = Date.now,
   wait = (ms, signal) => sleep(ms, undefined, { signal }),
+  onResult = null,
 } = {}) {
   const jobs = new Map();
   let running = 0,
@@ -158,6 +159,7 @@ export function createStockVolumeService({
       };
       job.status = "completed";
       job.progress = 100;
+      onResult?.(job.owner, settings, job.result);
     } catch (e) {
       if (!job.abort.signal.aborted) {
         job.status = "failed";

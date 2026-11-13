@@ -3,6 +3,7 @@ import { createDistributionLoader } from "./distributions.js";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { createBuilderStore } from "./store.js";
+import { createSnapshotStore } from "./snapshotStore.js";
 import { createAgentService, agentConfigured } from "./agents.js";
 import {
   DEFAULT_STRATEGY,
@@ -184,16 +185,55 @@ export function validateItem(input, old = {}) {
 export function registerBuilderRoutes(
   app,
   {
-    store = createBuilderStore(),
+    store: injectedStore = null,
+    snapshots: injectedSnapshots = null,
     loadData = defaultData,
     researchService = null,
     loadMacro = defaultMacro,
+    loadDistribution = createDistributionLoader(),
+    // Fetch the full option chain as part of a single-stock scan, so its snapshot does not depend on the browser.
+    captureChainOnScan = false,
   } = {},
 ) {
+  const store = injectedStore ?? createBuilderStore();
+  // A caller that brings its own store (tests) gets a throwaway snapshot store, never the real data file.
+  const snapshots =
+    injectedSnapshots ?? createSnapshotStore(injectedStore ? ":memory:" : undefined);
+  // Snapshots are a by-product: a failure to save one must never fail the scan or the panel request.
+  const capture = (fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      console.warn(`[builder] snapshot not saved: ${e.message}`);
+      return null;
+    }
+  };
+  const saveDistribution = (owner, symbol, days, data) =>
+    capture(() =>
+      snapshots.attach(owner, symbol, "distribution", { ...data, days }, {
+        meta: { days, asOf: data.asOf, contracts: data.contracts?.length ?? 0 },
+        unless: (old, snapshot) =>
+          (old.meta.asOf === data.asOf && old.meta.days === days) ||
+          (old.meta.contracts > 0 && !data.contracts?.length) ||
+          // A wider chain loaded since the last scan already covers this horizon.
+          (old.meta.days > days && old.capturedAt >= snapshot.capturedAt),
+      }),
+    );
   let stockVolume;
   app.post("/api/builder/stock-volume", (req, res) => {
     try {
-      stockVolume ??= createStockVolumeService();
+      stockVolume ??= createStockVolumeService({
+        onResult: (owner, settings, result) =>
+          capture(() =>
+            snapshots.attach(
+              owner,
+              settings.symbol,
+              `stockVolume:${settings.interval}:${settings.days}`,
+              { interval: settings.interval, days: settings.days, buckets: settings.buckets, result },
+              { variants: 6 },
+            ),
+          ),
+      });
       res.status(202).json(stockVolume.start(req.user.id, req.body));
     } catch (e) {
       res.status(400).json({ error: e.message });
@@ -211,7 +251,6 @@ export function registerBuilderRoutes(
       .status(job ? 200 : 404)
       .json(job ?? { error: "History request not found" });
   });
-  const loadDistribution = createDistributionLoader();
   app.get("/api/builder/distributions/:symbol", async (req, res) => {
     try {
       const symbol = validateStrategy({ symbols: [req.params.symbol] })
@@ -219,7 +258,9 @@ export function registerBuilderRoutes(
         days = Number(req.query.days ?? 365);
       if (![365, 730].includes(days))
         throw new Error("Unsupported expiry horizon");
-      res.json(await loadDistribution(symbol, days));
+      const data = await loadDistribution(symbol, days);
+      saveDistribution(req.user.id, symbol, days, data);
+      res.json(data);
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
@@ -492,6 +533,95 @@ export function registerBuilderRoutes(
   }
   const earningsStatus = (next, complete, row) =>
     next && next <= row.expiry ? "Before expiry" : next || complete ? "Clear" : "Unknown";
+  function saveScanSnapshots(owner, job, strategy, rows, datasets, warnings) {
+    const valuations = job.strategyId
+      ? (capture(() => store.agent(owner, job.strategyId))?.valuations ?? [])
+      : [];
+    for (const [symbol, dataset] of Object.entries(datasets)) {
+      const own = rows.filter((r) => r.symbol === symbol);
+      capture(() =>
+        snapshots.saveScan(
+          owner,
+          symbol,
+          {
+            rows: own,
+            dataset,
+            warnings: warnings.filter((w) => w.startsWith(symbol + ": ")),
+            items: (job.items ?? []).filter((i) => !i.symbol || i.symbol === symbol),
+            includeCatalysts: job.includeCatalysts,
+            templates: job.templates ?? null,
+            strategy,
+            valuation:
+              valuations.find(
+                (v) => v.symbol === symbol && (!v.status || v.status === "completed"),
+              ) ?? null,
+          },
+          { spot: dataset.spot ?? null, strategy: strategy.name ?? null },
+        ),
+      );
+    }
+    if (captureChainOnScan && strategy.symbols.length === 1 && datasets[strategy.symbols[0]]) {
+      const symbol = strategy.symbols[0];
+      loadDistribution(symbol, 365)
+        .then((data) => saveDistribution(owner, symbol, 365, data))
+        .catch(() => {});
+    }
+  }
+  // Hedge-choice scans (Polymarket and the like) run beside the Builder scan; their results join the snapshot.
+  function attachHedgeScan(owner, symbols, result) {
+    for (const symbol of symbols ?? [])
+      capture(() =>
+        snapshots.attach(owner, symbol, "hedges", {
+          generatedAt: result.generatedAt ?? new Date().toISOString(),
+          results: Object.fromEntries(
+            Object.entries(result.results ?? {}).map(([id, r]) => [
+              id,
+              Array.isArray(r?.rows)
+                ? { ...r, rows: r.rows.filter((x) => !x.symbol || x.symbol === symbol) }
+                : r,
+            ]),
+          ),
+        }),
+      );
+  }
+  const snapshotView = (s) => {
+    const part = (name) => s.parts[name]?.data ?? null;
+    return {
+      id: s.id,
+      symbol: s.symbol,
+      day: s.day,
+      capturedAt: s.capturedAt,
+      scan: part("scan"),
+      distribution: part("distribution"),
+      stockVolume: Object.entries(s.parts)
+        .filter(([name]) => name.startsWith("stockVolume:"))
+        .map(([, p]) => p.data),
+      research: part("research"),
+      events: { past: part("events:past"), future: part("events:future") },
+      hedges: part("hedges"),
+      savedAt: Object.fromEntries(Object.entries(s.parts).map(([name, p]) => [name, p.capturedAt])),
+    };
+  };
+  app.get(
+    "/api/builder/snapshots",
+    route((req, res) => {
+      const symbol = req.query.symbol
+        ? validateStrategy({ symbols: [req.query.symbol] }).symbols[0]
+        : null;
+      res.json({
+        retentionDays: snapshots.retentionDays,
+        snapshots: snapshots.list(req.user.id, symbol),
+      });
+    }),
+  );
+  app.get(
+    "/api/builder/snapshots/:id",
+    route((req, res) => {
+      const s = snapshots.get(req.user.id, req.params.id);
+      if (!s) throw Object.assign(new Error("Snapshot not found"), { status: 404 });
+      res.json(snapshotView(s));
+    }),
+  );
   async function runJob(owner, job, strategy, kind) {
     const control = { cancelled: false, worker: null };
     active.set(job.id, control);
@@ -582,6 +712,7 @@ export function registerBuilderRoutes(
       }
       if (!control.cancelled) {
         rows.sort((a, b) => (b.overall ?? -1) - (a.overall ?? -1));
+        if (kind === "scan") saveScanSnapshots(owner, job, strategy, rows, datasets, warnings);
         update({
           status: "completed",
           progress: 100,
@@ -620,6 +751,7 @@ export function registerBuilderRoutes(
           status: "queued",
           progress: 0,
           strategy,
+          strategyId: typeof req.body.strategyId === "string" ? req.body.strategyId : null,
           items,
           includeCatalysts: req.body.includeCatalysts !== false,
           templates: Array.isArray(req.body.templates)
@@ -638,7 +770,9 @@ export function registerBuilderRoutes(
       const symbol = validateStrategy({ symbols: [req.params.symbol] })
         .symbols[0];
       if (!researchService) throw new Error("Research service unavailable");
-      res.json(await researchService.research(symbol, { lookbackDays: 30 }));
+      const data = await researchService.research(symbol, { lookbackDays: 30 });
+      capture(() => snapshots.attach(req.user.id, symbol, "research", data));
+      res.json(data);
     }),
   );
   app.get(
@@ -768,17 +902,25 @@ export function registerBuilderRoutes(
             ? "Previous-session close to next-session close; association, not causation"
             : "Scenario input required; no forecast is implied by the calendar";
       }
-      res.json({
+      const payload = {
         events: events.sort((a, b) => a.date.localeCompare(b.date)),
         warnings,
         from,
         to,
         complete: false,
-      });
+      };
+      capture(() =>
+        snapshots.attach(req.user.id, symbol, `events:${direction}`, { ...payload, days }),
+      );
+      res.json(payload);
     }),
   );
   const timer = setInterval(() => agents.tick().catch(() => {}), 60000);
   timer.unref();
+  // Snapshots older than the retention window go at start-up, every six hours, and whenever one is saved.
+  capture(() => snapshots.prune());
+  const pruneTimer = setInterval(() => capture(() => snapshots.prune()), 6 * 3600000);
+  pruneTimer.unref();
   // Keeps tracking items that were created from AI market topics in step with those topics.
   const syncMarketTopics = (topics) => {
     const byId = new Map(topics.map((topic) => [String(topic.id), topic]));
@@ -801,10 +943,14 @@ export function registerBuilderRoutes(
   }, 15000).unref();
   return {
     store,
+    snapshots,
+    attachHedgeScan,
     agents,
     syncMarketTopics,
     close: () => {
       clearInterval(timer);
+      clearInterval(pruneTimer);
+      snapshots.close();
       stockVolume?.close();
       for (const c of active.values()) {
         c.cancelled = true;

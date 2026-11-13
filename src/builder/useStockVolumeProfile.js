@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { validateStockProfile } from "../../shared/stockVolumeProfile.js";
+import { validateStockProfile, STOCK_INTERVAL_LABELS } from "../../shared/stockVolumeProfile.js";
 async function request(path, body) {
   const r = await fetch("/api/builder/stock-volume" + path, {
     credentials: "same-origin",
@@ -15,6 +15,10 @@ async function request(path, body) {
   if (!r.ok) throw new Error(data.error || "Could not load stock volume");
   return data;
 }
+const sameBuckets = (a, b) =>
+  a?.length === b.length &&
+  a.every((x, i) => x.lowStrike === b[i].lowStrike && x.highStrike === b[i].highStrike);
+// `saved` (a snapshot's stored results, or null for live) switches the hook to read-only: no request is ever made.
 export default function useStockVolumeProfile({
   active,
   symbol,
@@ -24,6 +28,7 @@ export default function useStockVolumeProfile({
   demo,
   dailyBars,
   refresh,
+  saved = null,
 }) {
   const [state, setState] = useState({});
   const bucketKey = JSON.stringify(
@@ -35,7 +40,7 @@ export default function useStockVolumeProfile({
     ),
     key = JSON.stringify([symbol, bucketKey, interval, days, demo, refresh]);
   useEffect(() => {
-    if (!active || !symbol || !buckets.length) {
+    if (saved || !active || !symbol || !buckets.length) {
       setState({});
       return;
     }
@@ -127,6 +132,19 @@ export default function useStockVolumeProfile({
       worker?.terminate();
       cancel();
     };
-  }, [active, symbol, bucketKey, interval, days, demo, dailyBars, refresh]);
+  }, [active, symbol, bucketKey, interval, days, demo, dailyBars, refresh, Boolean(saved)]);
+  if (saved) {
+    if (!active || !symbol || !buckets.length) return {};
+    const match = saved.find(
+      (v) => v.interval === interval && v.days === days && sameBuckets(v.buckets, buckets),
+    );
+    if (match) return { result: match.result };
+    const others = [...new Set(saved.map((v) => `${STOCK_INTERVAL_LABELS[v.interval] ?? v.interval} bars over ${v.days} day${v.days === 1 ? "" : "s"}`))];
+    return {
+      error: others.length
+        ? `Not saved in this snapshot for these settings. Saved: ${others.join("; ")} (strike view, as scanned).`
+        : "No stock volume was saved in this snapshot.",
+    };
+  }
   return state.key === key && active ? state : {};
 }

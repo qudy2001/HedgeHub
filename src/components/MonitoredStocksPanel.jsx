@@ -50,6 +50,29 @@ export default function MonitoredStocksPanel({ selectedStock, onSelectStock, dem
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Last good quote per symbol, kept in memory and localStorage so a failed or empty refresh never blanks a price.
+  function withLastKnownQuotes(list) {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('monitoredStockQuotes')) || {}; } catch { saved = {}; }
+    const merged = list.map((stock) => {
+      if (stock.price !== null && stock.price !== undefined) {
+        saved[stock.symbol] = { price: stock.price, percentChange: stock.percentChange, direction: stock.direction, lastUpdated: stock.lastUpdated };
+        return stock;
+      }
+      const old = saved[stock.symbol];
+      return old ? { ...stock, ...old, stale: true } : stock;
+    });
+    try { localStorage.setItem('monitoredStockQuotes', JSON.stringify(saved)); } catch { /* storage unavailable */ }
+    return merged;
+  }
+
+  function cachedSymbols() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('monitoredStockQuotes')) || {};
+      return Object.keys(saved).map((symbol) => ({ symbol, price: null }));
+    } catch { return []; }
+  }
+
   async function loadMonitoredStocks() {
     try {
       setError(null);
@@ -62,13 +85,15 @@ export default function MonitoredStocksPanel({ selectedStock, onSelectStock, dem
         const response = await fetch('/api/monitored-stocks');
         if (!response.ok) throw new Error('Failed to load stocks');
         const data = await response.json();
-        setStocks(data.stocks || []);
+        setStocks(withLastKnownQuotes(data.stocks || []));
         setMaxSlots(data.maxSlots || 5);
         setUsedSlots(data.usedSlots || 0);
       }
     } catch (err) {
       setError(err.message);
       console.error('Error loading monitored stocks:', err);
+      // Show the last known prices while the next refresh is pending.
+      setStocks((current) => (current.length ? current : withLastKnownQuotes(cachedSymbols())));
     }
   }
 
@@ -207,7 +232,7 @@ export default function MonitoredStocksPanel({ selectedStock, onSelectStock, dem
                       <DataPendingBadge stock={stock} />
                       {stock.price !== null ? (
                         <>
-                          <span className="price">${stock.price.toFixed(2)}</span>
+                          <span className="price" style={stock.stale ? { opacity: 0.55 } : undefined} title={stock.stale ? 'Last known price; refreshing' : undefined}>${stock.price.toFixed(2)}</span>
                           <span className={`change ${stock.direction}`}>
                             {stock.direction === 'up' ? '↑' : '↓'}{Math.abs(stock.percentChange).toFixed(2)}%
                           </span>

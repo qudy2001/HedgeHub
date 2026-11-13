@@ -1135,7 +1135,7 @@ app.get("/api/health", (_request, response) => {
 const researchStore = createResearchStore();
 const researchService = createResearchService(researchStore);
 registerResearchRoutes(app, researchStore, researchService);
-const builderService = registerBuilderRoutes(app, { researchService });
+const builderService = registerBuilderRoutes(app, { researchService, captureChainOnScan: true });
 const researchTimer = setInterval(() => { researchService.tick().catch(() => {}); }, 15 * 60_000);
 researchTimer.unref();
 
@@ -5503,7 +5503,16 @@ const hedgeScanJobs = createJobStore();
 app.post("/api/hedge-scan/jobs", (request, response) => {
   try {
     const body = request.body ?? {};
-    const job = hedgeScanJobs.start(request.user.id, () => withRateLimitWaiting(() => runHedgeScan(body)));
+    const job = hedgeScanJobs.start(request.user.id, async () => {
+      const result = await withRateLimitWaiting(() => runHedgeScan(body));
+      // Keep these results with the day's Builder snapshot of each scanned stock.
+      builderService.attachHedgeScan(
+        request.user.id,
+        (Array.isArray(body.symbols) ? body.symbols : []).map((s) => String(s ?? "").trim().toUpperCase()).filter(Boolean).slice(0, 20),
+        result
+      );
+      return result;
+    });
     response.status(202).json({ id: job.id, status: job.status });
   } catch (error) {
     response.status(error.status ?? 500).json({ error: error.message });
