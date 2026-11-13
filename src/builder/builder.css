@@ -378,10 +378,11 @@ body.studio-body:before {
   grid-column: span 3;
 }
 .panel-technicals,
-.panel-options,
-.panel-valuation,
-.panel-option-summary {
+.panel-options {
   grid-column: span 6;
+}
+.panel-valuation {
+  grid-column: 1/-1;
 }
 .panel-past,
 .panel-future {
@@ -2075,7 +2076,6 @@ body.studio-body:before {
   .panel-payoff,
   .panel-hedges,
   .panel-valuation,
-  .panel-option-summary,
   .panel-past,
   .panel-future,
   .panel-results,
@@ -2803,4 +2803,132 @@ body.studio-body:before {
 }
 .agent-report-tags li.neutral {
   background: var(--s-bg);
+}
+
+/* Option and price summary: signal tiles, key-level ladder, takeaways */
+.option-summary {
+  display: grid;
+  gap: 12px;
+}
+.summary-signals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 6px;
+}
+.summary-signal {
+  min-width: 0;
+  border: 1px solid var(--s-line);
+  border-left-width: 3px;
+  background: var(--s-bg);
+  border-radius: 5px;
+  padding: 6px 9px;
+}
+.summary-signal span,
+.summary-signal small {
+  display: block;
+  color: var(--s-muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.summary-signal strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.6;
+}
+.summary-signal.positive {
+  border-left-color: var(--s-green);
+}
+.summary-signal.positive strong {
+  color: var(--s-green);
+}
+.summary-signal.negative {
+  border-left-color: var(--s-red);
+}
+.summary-signal.negative strong {
+  color: var(--s-red);
+}
+.summary-signal.warn {
+  border-left-color: var(--s-earnings);
+}
+.summary-signal.warn strong {
+  color: var(--s-earnings);
+}
+.summary-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px 28px;
+  align-items: start;
+}
+.summary-body section {
+  min-width: 0;
+}
+.summary-body h4 {
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--s-muted);
+}
+.summary-levels {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.summary-levels th,
+.summary-levels td {
+  padding: 3px 8px 3px 0;
+  text-align: left;
+  font-weight: 400;
+  border-bottom: 1px solid var(--s-line);
+  white-space: nowrap;
+}
+.summary-levels td:nth-child(2),
+.summary-levels td:nth-child(3) {
+  text-align: right;
+}
+.summary-levels td:last-child {
+  padding-right: 0;
+  font-size: 10px;
+  white-space: normal;
+}
+.summary-levels tr.spot th,
+.summary-levels tr.spot td {
+  font-weight: 650;
+  background: var(--s-tint);
+}
+.summary-levels tr.spot th {
+  padding-left: 6px;
+}
+.summary-takeaways {
+  margin: 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Agent valuation and the option summary share one panel: valuation on the left, summary on the right */
+.valuation-combined {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(0, 2fr);
+  gap: 16px 28px;
+  align-items: start;
+}
+.valuation-combined > .option-summary {
+  border-left: 1px solid var(--s-line);
+  padding-left: 28px;
+}
+@media (max-width: 900px) {
+  .valuation-combined {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .valuation-combined > .option-summary {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid var(--s-line);
+    padding-top: 14px;
+  }
 }

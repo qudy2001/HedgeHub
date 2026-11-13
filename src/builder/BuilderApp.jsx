@@ -1,4 +1,5 @@
 import OptionDistribution from "./OptionDistribution.jsx";
+import OptionSummary, { SUMMARY_SECTIONS } from "./OptionSummary.jsx";
 import AgentReport, { AgentHighlights } from "./AgentReport.jsx";
 import { reportHighlights } from "../../shared/agentReport.js";
 import OptionChainView from "./OptionChainView.jsx";
@@ -43,8 +44,7 @@ const PANELS = [
   ["hedges", "Hedge choices", "shield"],
   ["technicals", "Stock technicals", "trend"],
   ["options", "Options analytics", "pie"],
-  ["valuation", "Agent valuation", "bulb"],
-  ["option-summary", "Option and price summary", "pie"],
+  ["valuation", "Agent valuation & options", "bulb"],
   ["oi-distribution", "Open interest distribution", "chart"],
   ["volume-distribution", "Volume distribution", "chart"],
   ["past", "Past events", "calendar"],
@@ -58,7 +58,6 @@ const DEFAULT_LAYOUT = {
   order: [
     "tracking",
     "valuation",
-    "option-summary",
     "oi-distribution",
     "volume-distribution",
     "technicals",
@@ -76,12 +75,12 @@ const DEFAULT_LAYOUT = {
   metrics: {},
   theme: "light",
 };
-const TOP_PANELS = ["valuation", "option-summary", "oi-distribution", "volume-distribution", "technicals", "options", "past", "future"];
+const TOP_PANELS = ["valuation", "oi-distribution", "volume-distribution", "technicals", "options", "past", "future"];
 function restoreLayout(saved = {}) {
   let order = Array.isArray(saved.order)
     ? saved.order.filter((id) => DEFAULT_LAYOUT.order.includes(id))
     : DEFAULT_LAYOUT.order;
-  // v3: one-time migration putting the analysis rows (valuation + summary, OI + volume, technicals + options, events) on top of saved layouts.
+  // v3: one-time migration putting the analysis rows (valuation with the option summary, OI + volume, technicals + options, events) on top of saved layouts.
   if ((saved.layoutVersion || 1) < 3) {
     order = [...TOP_PANELS, ...order.filter((id) => !TOP_PANELS.includes(id))];
   }
@@ -129,7 +128,7 @@ const METRICS = {
   payoff: ["Net option cost", "Max loss", "Max gain", "Breakeven"],
   technicals: ["RSI", "EMA average", "Support", "Resistance"],
   options: ["IV", "HV", "IV rank", "Min OI"],
-  valuation: ["Target", "Agent view"],
+  valuation: ["Target", "Agent view", ...SUMMARY_SECTIONS],
 };
 const EVENT_EXTRA_GROUPS = [
   {
@@ -1008,6 +1007,19 @@ function Workspace({ demo, user, logout, presentation }) {
     symbol = selectedMonitoredStock ?? row?.symbol ?? strategy.symbols[0],
     dataset = datasets[symbol],
     tech = useMemo(() => technicals(dataset?.bars ?? []), [dataset]);
+  // Stock-side inputs for the Option and price summary panel (underlying IV first, then the selected row's).
+  const summaryStats = useMemo(
+    () => ({
+      rsi: tech.rsi,
+      support: tech.support,
+      resistance: tech.resistance,
+      hv: tech.hv,
+      emaAverage: emaAverage(dataset?.bars ?? []),
+      iv: research?.volatility?.history?.at(-1)?.iv ?? research?.volatility?.iv ?? (row?.modeled ? null : row?.iv),
+      ivRank: research?.volatility?.historical?.rank,
+    }),
+    [tech, dataset, research, row],
+  );
   // Polymarket rows are scored separately, so the tracking strip scores the items against the symbol on its own.
   const trackingRow = useMemo(
     () => selected ?? applyCatalysts({ symbol, template: row?.template, baseScore: null, scoreRange: [0, 0] }, scoreItems, includeCatalysts),
@@ -2639,7 +2651,9 @@ function Workspace({ demo, user, logout, presentation }) {
       }
       case "valuation": {
         const highlights = reportHighlights(valuation?.report);
+        // One panel: the agent's valuation beside the rule-based option and price summary for the same stock.
         return (
+          <div className="valuation-combined">
           <div className={`valuation ${highlights.rating || highlights.tags.length ? "has-insight" : ""}`}>
             <div className="valuation-main">
             {valuation ? (
@@ -2712,6 +2726,16 @@ function Workspace({ demo, user, logout, presentation }) {
               <AgentHighlights rating={highlights.rating} tags={highlights.tags} />
             )}
           </div>
+          <OptionSummary
+            data={distributionData}
+            loading={distributionLoading}
+            error={distributionError}
+            spot={dataset?.spot}
+            stats={summaryStats}
+            symbol={symbol}
+            hidden={(label) => metricHidden("valuation", label)}
+          />
+          </div>
         );
       }
       case "strategy-score":
@@ -2761,8 +2785,6 @@ function Workspace({ demo, user, logout, presentation }) {
                     </button>
                   </section>
         );
-      case "option-summary":
-        return null; // Placeholder: intentionally blank until the summary content is defined.
       case "past":
         return eventsPanel("past");
       case "future":
