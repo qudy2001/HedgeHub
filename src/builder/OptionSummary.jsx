@@ -18,7 +18,13 @@ export default function OptionSummary({ data, loading, error, spot, stats, symbo
     [data, spot, stats],
   );
   if (!(spot > 0))
-    return <p className="subtle">Select a stock to summarize its options and price.</p>;
+    return (
+      <p className="subtle">
+        {symbol
+          ? `Scan ${symbol} to summarize its options and price.`
+          : "Select a stock to summarize its options and price."}
+      </p>
+    );
   const { signals, levels, takeaways, expected } = summary,
     showLevels = !hidden("Key levels") && levels.length > 1,
     showTakeaways = !hidden("What stands out") && takeaways.length > 0;
