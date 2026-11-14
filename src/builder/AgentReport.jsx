@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { parseAgentReport, parseInline, ratingSentiment, tagSentiment } from "../../shared/agentReport.js";
 
 const STEP_VALUE = 24;
@@ -50,6 +51,42 @@ function ListItem({ item }) {
         </p>
       ))}
     </li>
+  );
+}
+
+// The agents' short read of what is happening to the company (see companySummary), under the valuation.
+export function CompanySummary({ items }) {
+  const [full, setFull] = useState(false);
+  if (!items.length) return null;
+  const more = items.some((i) => i.lead !== i.text),
+    sources = [...new Set(items.map((i) => i.label.toLowerCase()))],
+    checked = items.map((i) => i.checkedAt).filter(Boolean).sort().at(-1);
+  return (
+    <section className="company-summary">
+      <h4>What's happening</h4>
+      <ul>
+        {items.map((item) => (
+          <li key={`${item.section}:${item.sentiment}`} className={item.sentiment.toLowerCase()}>
+            <strong>
+              {item.label} · {item.sentiment}
+            </strong>{" "}
+            {full ? item.text : item.lead}
+          </li>
+        ))}
+      </ul>
+      <small className="subtle">
+        From the agents' {sources.join(" and ")} report{sources.length === 1 ? "" : "s"}
+        {checked ? ` · ${String(checked).slice(0, 10)}` : ""}. Their read, not verified facts.
+        {more && (
+          <>
+            {" "}
+            <button className="text-button" aria-expanded={full} onClick={() => setFull(!full)}>
+              {full ? "Show less" : "Show more"}
+            </button>
+          </>
+        )}
+      </small>
+    </section>
   );
 }
 

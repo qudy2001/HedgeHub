@@ -67,3 +67,97 @@ test("agent report highlights: rating plus keyword tags with a conservative sent
   assert.equal(ratingSentiment("Buy"), "bullish");
   assert.deepEqual(reportHighlights(null), { rating: null, tags: [] });
 });
+
+test("companySummary leads with fundamentals and news, two stances per section", async () => {
+  const { companySummary } = await import("../shared/agentReport.js");
+  const s = (sourceSection, sentiment, rationale, extra = {}) => ({
+    symbol: "NVDA",
+    sourceSection,
+    sentiment,
+    rationale,
+    checkedAt: "2026-11-13",
+    ...extra,
+  });
+  const suggestions = [
+    s("news_report", "Neutral", "News neutral."),
+    s("news_report", "Bearish", "News bearish."),
+    s("news_report", "Bearish", "Same stance, second item."),
+    s("news_report", "Bullish", "News bullish."),
+    s("fundamentals_report", "Bearish", "Fundamentals bearish."),
+    s("fundamentals_report", "Bullish", "  Fundamentals bullish.  "),
+    s("sentiment_report", "Bullish", "Sentiment bullish."),
+    s("investment_plan", "Bullish", "Plan, not company news."),
+    s("market_report", "Bullish", "Technicals."),
+    s("fundamentals_report", "Bullish", "", {}),
+    { ...s("fundamentals_report", "Bullish", "Other stock."), symbol: "TSLA" },
+  ];
+  // Unrated research shows both sides: bullish then bearish, fundamentals before news, sentiment left out.
+  assert.deepEqual(
+    companySummary(suggestions, "NVDA").map((i) => [i.label, i.sentiment, i.text]),
+    [
+      ["Fundamentals", "Bullish", "Fundamentals bullish."],
+      ["Fundamentals", "Bearish", "Fundamentals bearish."],
+      ["News", "Bullish", "News bullish."],
+      ["News", "Bearish", "News bearish."],
+    ],
+  );
+  // Rated research keeps the two stances the agents were most confident in.
+  const rated = [
+    s("news_report", "Bullish", "Weak.", { confidence: 20 }),
+    s("news_report", "Neutral", "Dominant.", { confidence: 60 }),
+    s("news_report", "Bearish", "Second.", { confidence: 55 }),
+  ];
+  assert.deepEqual(
+    companySummary(rated, "NVDA").map((i) => i.text),
+    ["Dominant.", "Second."],
+  );
+  // Sentiment only fills in when there is nothing about the company itself.
+  assert.deepEqual(
+    companySummary([s("sentiment_report", "Bearish", "Only sentiment.")], "NVDA").map((i) => i.label),
+    ["Sentiment"],
+  );
+  assert.deepEqual(companySummary(suggestions, "AAPL"), []);
+  assert.deepEqual(companySummary(null, "NVDA"), []);
+});
+
+test("extractAgent carries each stance's confidence onto its suggestions", async () => {
+  const { extractAgent } = await import("../server/builder/agents.js");
+  const run = {
+    id: "r1",
+    jobs: {
+      NVDA: {
+        status: "completed",
+        report_sections: { news_report: "x", final_trade_decision: "y" },
+        section_summaries: {
+          news_report: {
+            categories: {
+              bearish: { confidence: 70, rationale: "Why.", items: [{ label: "Export controls" }] },
+              bullish: { rationale: "Unrated.", items: [{ label: "Capex guides" }] },
+            },
+          },
+        },
+      },
+    },
+  };
+  const bySentiment = Object.fromEntries(extractAgent(run).suggestions.map((x) => [x.sentiment, x.confidence]));
+  assert.deepEqual(bySentiment, { Bearish: 70, Bullish: null });
+});
+
+test("leadSentence keeps figures intact and skips a too-short opener", async () => {
+  const { leadSentence, companySummary } = await import("../shared/agentReport.js");
+  const text =
+    "The single genuine deterioration is cash conversion: Q2 FCF fell 56% to $21.4B on a $30.7B drag. Layered on top are inventory builds.";
+  assert.equal(
+    leadSentence(text),
+    "The single genuine deterioration is cash conversion: Q2 FCF fell 56% to $21.4B on a $30.7B drag.",
+  );
+  assert.equal(leadSentence("Short. Then the real point follows here."), "Short. Then the real point follows here.");
+  assert.equal(leadSentence("  One sentence only.  "), "One sentence only.");
+  assert.equal(leadSentence(null), "");
+  const [item] = companySummary(
+    [{ symbol: "NVDA", sourceSection: "news_report", sentiment: "Bearish", rationale: text }],
+    "NVDA",
+  );
+  assert.equal(item.lead, leadSentence(text));
+  assert.equal(item.text, text);
+});

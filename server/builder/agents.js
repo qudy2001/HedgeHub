@@ -107,6 +107,8 @@ export function extractAgent(run) {
             agentStatus: item.status,
             agentResolved: item.completed === true,
             rationale: group.rationale ?? "",
+            // How strongly the agents hold this stance for the section (0-100); ranks the company summary.
+            confidence: Number.isFinite(group.confidence) ? group.confidence : null,
             history: [],
             impactUntil: null,
           });

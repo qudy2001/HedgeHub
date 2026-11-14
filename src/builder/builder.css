@@ -2932,3 +2932,50 @@ body.studio-body:before {
     padding-top: 14px;
   }
 }
+
+/* Agents' read of what is happening to the company: full width under the price target and keywords */
+.company-summary {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--s-line);
+}
+.company-summary h4 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--s-muted);
+}
+.company-summary ul {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.company-summary small .text-button {
+  font-size: inherit;
+}
+.company-summary li {
+  padding-left: 10px;
+  border-left: 2px solid var(--s-line);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.company-summary li strong {
+  font-size: 11px;
+  color: var(--s-muted);
+}
+.company-summary li.bullish {
+  border-left-color: var(--s-green);
+}
+.company-summary li.bullish strong {
+  color: var(--s-green);
+}
+.company-summary li.bearish {
+  border-left-color: var(--s-red);
+}
+.company-summary li.bearish strong {
+  color: var(--s-red);
+}

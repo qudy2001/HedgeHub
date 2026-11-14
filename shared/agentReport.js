@@ -139,3 +139,53 @@ export function reportHighlights(source) {
   }
   return { rating, tags: tags.map((text) => ({ text, sentiment: tagSentiment(text) })) };
 }
+
+// What is happening to the company, from research the agents already wrote: each report section's summary
+// gives a short rationale per stance (bullish / neutral / bearish), carried on that section's suggestions.
+// Fundamentals and news describe the company itself, so they lead; sentiment only fills in when both are absent.
+// Per section the two stances the agents were most confident in are kept (bullish and bearish when unrated).
+const COMPANY_SECTIONS = [
+  ["fundamentals_report", "Fundamentals"],
+  ["news_report", "News"],
+  ["sentiment_report", "Sentiment"],
+];
+const STANCE_ORDER = ["Bullish", "Bearish", "Neutral"];
+// First sentence of a rationale, for the compact view. Figures such as "$21.4B" do not end it (no space follows
+// the point), and a very short opener is kept together with the sentence after it.
+export function leadSentence(text) {
+  const source = String(text ?? "").trim(),
+    match = /^(.{60,}?[.!?])\s+(?=["'“(]?[A-Z])/s.exec(source);
+  return match ? match[1] : source;
+}
+export function companySummary(suggestions, symbol, limit = 4) {
+  const out = [];
+  for (const [section, label] of COMPANY_SECTIONS) {
+    if (section === "sentiment_report" && out.length) break;
+    const stances = new Map();
+    for (const s of suggestions ?? []) {
+      const text = String(s.rationale ?? "").trim();
+      if (s.symbol !== symbol || s.sourceSection !== section || !text || stances.has(s.sentiment)) continue;
+      stances.set(s.sentiment, {
+        section,
+        label,
+        sentiment: STANCE_ORDER.includes(s.sentiment) ? s.sentiment : "Neutral",
+        text,
+        lead: leadSentence(text),
+        confidence: Number.isFinite(s.confidence) ? s.confidence : null,
+        checkedAt: s.checkedAt ?? null,
+      });
+    }
+    const found = [...stances.values()],
+      rated = found.length > 0 && found.every((f) => f.confidence != null);
+    out.push(
+      ...found
+        .sort((a, b) =>
+          rated && a.confidence !== b.confidence
+            ? b.confidence - a.confidence
+            : STANCE_ORDER.indexOf(a.sentiment) - STANCE_ORDER.indexOf(b.sentiment),
+        )
+        .slice(0, 2),
+    );
+  }
+  return out.slice(0, limit);
+}

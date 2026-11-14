@@ -1,7 +1,7 @@
 import OptionDistribution from "./OptionDistribution.jsx";
 import OptionSummary, { SUMMARY_SECTIONS } from "./OptionSummary.jsx";
-import AgentReport, { AgentHighlights } from "./AgentReport.jsx";
-import { reportHighlights } from "../../shared/agentReport.js";
+import AgentReport, { AgentHighlights, CompanySummary } from "./AgentReport.jsx";
+import { companySummary, reportHighlights } from "../../shared/agentReport.js";
 import OptionChainView from "./OptionChainView.jsx";
 import TigerSubscriptions from "./TigerSubscriptions.jsx";
 import { money, num, pct, pillTone } from "./format.js";
@@ -128,7 +128,7 @@ const METRICS = {
   payoff: ["Net option cost", "Max loss", "Max gain", "Breakeven"],
   technicals: ["RSI", "EMA average", "Support", "Resistance"],
   options: ["IV", "HV", "IV rank", "Min OI"],
-  valuation: ["Target", "Agent view", ...SUMMARY_SECTIONS],
+  valuation: ["Target", "Agent view", "What's happening", ...SUMMARY_SECTIONS],
 };
 const EVENT_EXTRA_GROUPS = [
   {
@@ -2651,6 +2651,11 @@ function Workspace({ demo, user, logout, presentation }) {
       }
       case "valuation": {
         const highlights = reportHighlights(valuation?.report);
+        // The suggestions are the live research, so a historical snapshot does not show them as its own.
+        const happening =
+          history || !valuation || metricHidden("valuation", "What's happening")
+            ? []
+            : companySummary(agent?.suggestions, symbol);
         // One panel: the agent's valuation beside the rule-based option and price summary for the same stock.
         return (
           <div className="valuation-combined">
@@ -2725,6 +2730,7 @@ function Workspace({ demo, user, logout, presentation }) {
             {(highlights.rating || highlights.tags.length > 0) && (
               <AgentHighlights rating={highlights.rating} tags={highlights.tags} />
             )}
+            <CompanySummary items={happening} />
           </div>
           <OptionSummary
             data={distributionData}
