@@ -135,6 +135,10 @@ services:
       TRADINGAGENTS_WEB_COOKIE_SECURE: ${TRADINGAGENTS_WEB_COOKIE_SECURE:-false}
     ports:
       - "${TRADINGAGENTS_PORT:-8000}:8000"
+    volumes:
+      # Settings, saved API keys, run history and logs. Without this they live in
+      # the container and are lost whenever it is recreated.
+      - tradingagents_data:/home/appuser/.tradingagents
 
   # Optional: only starts with `docker compose --profile mcp up -d`.
   # MCP server (see mcp-server/) that exposes market topics / analysis tasks to
@@ -196,3 +200,4 @@ services:
 
 volumes:
   postgres_data:
+  tradingagents_data:
