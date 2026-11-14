@@ -10,7 +10,9 @@ Tools: `list_market_topics`, `upsert_market_topic`, `get_next_analysis_task`, `c
 
 ## Scheduled-task templates
 
-Admin -> Analysis tasks -> "AI schedule templates" holds ready-made prompts for Claude and ChatGPT scheduled tasks (task queue runner, weekly sweep, daily market pulse, per-stock tracking, earnings, position risk and more). Fill in the fields, copy, and paste into the platform's scheduler, or use "Queue in HedgeHub" so HedgeHub keeps the schedule and one runner task works through the queue.
+Admin -> Analysis tasks -> "AI schedule templates" holds ready-made prompts for Claude, ChatGPT, Grok and Gemini scheduled tasks (task queue runner, weekly sweep, daily market pulse, per-stock tracking, earnings, position risk and more). Fill in the fields, copy, and paste into the platform's scheduler, or use "Queue in HedgeHub" so HedgeHub keeps the schedule and one runner task works through the queue.
+
+The "Daily desk" group is for running several platforms side by side: one daily prompt each for ChatGPT (overall view), Grok (social sentiment on X), Claude (deep research) and Gemini (news and calendar through Google Search). Each platform writes only its own lane of topics; the lane is decided by the title prefix (`Social:`, `News:`, `Event:`, `Thesis:`, `Research:`) and then by the category, and `deskLane()` is the code version of that rule. Every summary starts `As of <time> by <platform>. Stage: <stage>. Next check: <date>.`, so the topic list shows who wrote what and when it is due again, and each lane rewrites one anchor topic per run, which doubles as a sign that its scheduled task is still alive. The same page has a "Daily desk status" panel (`shared/deskStatus.js`) that reads those headers back: which lane last wrote and when, each topic's stage and next check, open flags, and topics close to being archived. Desk runs do not appear under "Recent runs", which only lists queue tasks.
 
 The templates live in `shared/aiScheduleTemplates.js`. `tests/aiScheduleTemplates.test.js` checks that every tool they mention is still registered in `src/server.js`, so renaming a tool tells you which prompts to update.
 

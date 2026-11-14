@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   AI_SCHEDULE_TEMPLATES,
+  DESK_LANES,
   HEDGEHUB_MCP_TOOLS,
   TEMPLATE_GROUPS,
   defaultTemplateValues,
   describeSchedule,
+  deskAnchors,
+  deskLane,
   getTemplate,
   renderTemplate,
   resolveTemplateValues,
@@ -48,7 +51,9 @@ test("every template renders with its defaults and produces clean, pasteable ASC
       assert.ok(result.ok, `${template.id} (${mode}): ${JSON.stringify(result.errors)}`);
       assert.doesNotMatch(result.text, /undefined|NaN|\[object|\$\{|\{\{/, `${template.id} (${mode}) has a template leftover`);
       assert.match(result.text, /^[\x09\x0a\x20-\x7e]+$/, `${template.id} (${mode}) has non-ASCII characters`);
-      assert.ok(result.text.length < 7000, `${template.id} (${mode}) is ${result.text.length} characters`);
+      // The desk prompts carry the lane map and the lifecycle rules, so they are allowed to run longer.
+      const limit = template.group === "desk" && mode === "schedule" ? 9500 : 7000;
+      assert.ok(result.text.length < limit, `${template.id} (${mode}) is ${result.text.length} characters`);
     }
   }
 });
@@ -272,4 +277,133 @@ test("every template has a schedule hint, and the pulse follows its market", () 
   assert.equal(at({ market: "us", session: "premarket" }).cron, "0 13 * * 1-5");
   assert.equal(at({ market: "us", session: "close" }).cron, "45 21 * * 1-5");
   assert.equal(at({ market: "europe", session: "premarket" }).cron, "0 7 * * 1-5");
+});
+
+// ---- daily desk: one lane per AI platform ----------------------------------------------------------------------
+const DESK_IDS = ["desk-chatgpt", "desk-grok", "desk-claude", "desk-gemini"];
+const desk = (id) => getTemplate(id);
+
+test("daily desk: one template per platform, each speaking for its own lane", () => {
+  assert.deepEqual(
+    AI_SCHEDULE_TEMPLATES.filter((template) => template.group === "desk").map((template) => template.id),
+    DESK_IDS
+  );
+  assert.equal(TEMPLATE_GROUPS[0].id, "desk");
+  for (const [laneId, lane] of Object.entries(DESK_LANES)) {
+    const template = desk(`desk-${laneId}`);
+    assert.equal(template.platform, lane.name);
+    assert.equal(template.queueable, false, "a lane needs its own platform's clock");
+    assert.ok(!templateVariables(template).some((variable) => variable.key === "compact"));
+    const { text } = render(template);
+    assert.match(text, new RegExp(`You are ${lane.name}\\.`));
+    assert.match(text, new RegExp(`Write only in your lane \\(${lane.duty}\\)`));
+    assert.match(text, new RegExp(`by ${lane.name}\\. Stage: <stage>\\. Next check:`));
+    // Every prompt carries the same lane map, so no platform has to guess who owns a topic.
+    for (const other of Object.values(DESK_LANES)) {
+      assert.match(text, new RegExp(`^- ${other.name}, ${other.duty}: `, "m"), `${template.id} does not list ${other.name}`);
+    }
+    for (const anchor of Object.values(deskAnchors())) assert.ok(text.includes(`Anchor "${anchor}".`), `${template.id}: no anchor ${anchor}`);
+    assert.ok(text.includes(`YOUR ANCHOR: "${deskAnchors()[laneId]}"`), `${template.id} does not describe its own anchor`);
+  }
+});
+
+test("daily desk: the lane map in the prompts matches deskLane, and no topic has two owners", () => {
+  const owner = (title, category) => deskLane({ title, category });
+  // The topics in the list today.
+  assert.equal(owner("US 10Y Treasury yield", "general"), "chatgpt");
+  assert.equal(owner("Oil and gold", "commodity"), "chatgpt");
+  assert.equal(owner("US dollar and USD/JPY", "forex"), "chatgpt");
+  assert.equal(owner("TSLA and NVDA", "ticker"), "claude");
+  assert.equal(owner("Retail sentiment on TSLA and NVDA", "social"), "grok");
+  // The prefix wins over the category.
+  assert.equal(owner("Event: TSLA earnings", "ticker"), "gemini");
+  assert.equal(owner("Event: US CPI", "general"), "gemini");
+  assert.equal(owner("News: chip export rules", "general"), "gemini");
+  assert.equal(owner("Thesis: AI capex payback", "general"), "claude");
+  assert.equal(owner("social: meme squeeze", "ticker"), "grok");
+  assert.equal(owner("TSLA: overall outlook", "ticker"), "claude");
+  // Every anchor belongs to the lane that writes it.
+  const anchors = deskAnchors({ hubAnchor: "US market risk regime" });
+  assert.equal(owner(anchors.chatgpt, "general"), "chatgpt");
+  assert.equal(owner(anchors.grok, "social"), "grok");
+  assert.equal(owner(anchors.gemini, "general"), "gemini");
+  assert.equal(owner(anchors.claude, "general"), "claude");
+  // The prefixes deskLane knows are the ones the prompts name.
+  const { text } = render(desk("desk-chatgpt"));
+  for (const prefix of ["Social:", "News:", "Event:", "Thesis:", "Research:"]) assert.ok(text.includes(`"${prefix}"`), prefix);
+});
+
+test("daily desk: every lane adds topics, follows them through the lifecycle and proves its writes", () => {
+  for (const id of DESK_IDS) {
+    const { text } = render(desk(id));
+    for (const stage of ["standing", "new", "developing", "active", "fading", "resolved"]) {
+      assert.match(text, new RegExp(`^- ${stage}: `, "m"), `${id}: no ${stage} stage`);
+    }
+    assert.match(text, /handle each unresolved topic of yours whose Next check is today or earlier/);
+    // A resolved topic is saved once and then left to archive: a dated Next check would bring it back every run.
+    assert.ok(text.includes('the outcome and "Next check: none", then never save it again'));
+    assert.match(text, /skip resolved topics whatever their Next check says/);
+    assert.ok(text.includes("Next check: <YYYY-MM-DD, or none when resolved>"));
+    assert.match(text, /re-save any unresolved topic whose updatedAt is over 10 days old/);
+    assert.match(text, /HedgeHub archives a topic 30 days after its last update/);
+    assert.match(text, /call list_market_topics with status "archived" once: if it ever existed, reuse that exact title/);
+    assert.match(text, /Then call list_market_topics with status "active" again and confirm each topic you wrote/);
+    assert.match(text, /^STEP 1: TRIAGE/m);
+    assert.match(text, /collect the flags addressed to (ChatGPT|Grok|Claude|Gemini) from the other three anchors/);
+    assert.match(text, /Flags raised, Flags handled/);
+    assert.match(text, /\+15 reads Bullish, \+40 Strong bullish/);
+    assert.doesNotMatch(text, /DRY RUN/);
+    assert.match(render(desk(id), { runMode: "dry" }).text, /DRY RUN: do every step, but do not call upsert_market_topic/);
+  }
+  // Each lane has its own way of adding topics.
+  assert.match(render(desk("desk-chatgpt")).text, /- NEW \(at most 2\): a market-wide driver/);
+  assert.match(render(desk("desk-grok")).text, /- NEW \(at most 3\): nothing covers it.*Title "Social: <theme>", category social/);
+  assert.match(render(desk("desk-claude")).text, /- NEW \(at most 2, drivers and theses together\)/);
+  assert.match(render(desk("desk-gemini")).text, /becomes "News: <story>" \(at most 2 new per run\)/);
+  assert.match(render(desk("desk-gemini")).text, /save the same title again as new/);
+  // The overall view watches the other lanes.
+  assert.match(render(desk("desk-chatgpt")).text, /Lane health: read the "As of" date of the other three anchors/);
+});
+
+test("daily desk: fields flow into the prompts, and the four prompts stay in step", () => {
+  for (const id of DESK_IDS) {
+    const { text } = render(desk(id), { hubAnchor: "UK market regime", connector: "Hedgehub-mcp", refreshDays: 7 });
+    assert.match(text, /Anchor "UK market regime"\./, `${id} must know the overall-view anchor`);
+    assert.match(text, /through the "Hedgehub-mcp" connector/);
+    assert.match(text, /updatedAt is over 7 days old/);
+  }
+  assert.match(render(desk("desk-chatgpt"), { session: "close" }).text, /After-close recap/);
+  assert.doesNotMatch(render(desk("desk-chatgpt"), { tickers: "" }).text, /I trade/);
+  assert.match(render(desk("desk-grok"), { tickers: "gme, amc" }).text, /Always check GME, AMC, even when quiet/);
+  assert.match(render(desk("desk-claude"), { tickers: "aapl", deepDives: 1 }).text, /CLAUDE DAILY DESK - DEEP RESEARCH - AAPL\n.*1 subject researched properly/);
+  assert.doesNotMatch(render(desk("desk-claude"), { drivers: 0 }).text, /- Drivers:/);
+  assert.match(resolveTemplateValues(desk("desk-claude"), { tickers: "" }).errors.tickers, /at least one/i);
+  assert.doesNotMatch(render(desk("desk-gemini"), { factChecks: 0 }).text, /Fact check: take the/);
+  assert.match(render(desk("desk-gemini"), { market: "europe" }).text, /what moved UK\/Europe markets/);
+  // Claude can also work the research questions queued in HedgeHub.
+  const queued = render(desk("desk-claude"), { includeQueue: true }).text;
+  assert.match(queued, /tools: list_market_topics, upsert_market_topic, get_next_analysis_task and complete_analysis_task/);
+  assert.ok(queued.indexOf("FIRST: HEDGEHUB TASK QUEUE") < queued.indexOf("CLAUDE DAILY DESK"));
+});
+
+test("daily desk: the lanes run in order, the overall view last", () => {
+  const now = new Date("2026-10-15T12:00:00Z");
+  const minutes = (id, raw = {}) => {
+    const template = desk(id);
+    const [minute, hour] = scheduleHint(template, resolveTemplateValues(template, raw).values, { timeZone: "America/New_York", now }).cron.split(" ");
+    return Number(hour) * 60 + Number(minute);
+  };
+  for (const market of ["us", "europe", "asia", "global"]) {
+    const order = ["desk-gemini", "desk-grok", "desk-claude", "desk-chatgpt"].map((id) => {
+      const template = desk(id);
+      const { values } = resolveTemplateValues(template, { market });
+      return template.schedule(values).time;
+    });
+    assert.deepEqual([...order].sort(), order, `${market}: ${order.join(" ")}`);
+  }
+  assert.equal(minutes("desk-gemini"), 6 * 60 + 30);
+  assert.equal(minutes("desk-chatgpt"), 8 * 60 + 30);
+  assert.equal(minutes("desk-chatgpt", { session: "close" }), 16 * 60 + 45);
+  const london = scheduleHint(desk("desk-chatgpt"), resolveTemplateValues(desk("desk-chatgpt")).values, { timeZone: "Europe/London", now });
+  assert.match(london.text, /^Weekdays at 13:30 \(08:30 ET, last, so it reads the other three lanes\)$/);
 });

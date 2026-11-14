@@ -186,3 +186,33 @@ test("an item linked to a topic follows it, keeping the user's own choices", asy
   assert.equal(refreshItemFromTopic({ ...item, impactUntil: "2026-10-21" }, { id: 3, title: "F", weight: 5, bullishScore: 1, bearishScore: 1, summary: "s" }, now).impactUntil, "2026-11-19");
   assert.equal(next.history.length, 1);
 });
+
+test("replaying a topic does not make an old analysis look freshly checked", async () => {
+  const { refreshItemFromTopic } = await import("../shared/marketTopics.js");
+  const topic = { id: 3, title: "Fed", weight: 98, bullishScore: 20, bearishScore: 88, summary: "hold expected", updatedAt: "2026-10-23T13:00:55.234819+00:00" };
+  const item = { ...topicToItem({ ...topic, summary: "older text" }, "TSLA"), id: "x", checkedAt: "2026-10-22T01:00:00.000Z", history: [] };
+
+  // The AI's write: the item takes the topic's text and the topic's own timestamp.
+  const synced = refreshItemFromTopic(item, topic);
+  assert.equal(synced.condition, "hold expected");
+  assert.equal(synced.checkedAt, "2026-10-23T13:00:55.234Z");
+  assert.equal(synced.impactUntil, "2026-11-22");
+  assert.deepEqual(synced.history.map((entry) => entry.note), ["Updated from AI topic (2026-10-23)"]);
+
+  // The catch-up at server start, three weeks later: nothing new from the AI, so nothing changes.
+  assert.equal(refreshItemFromTopic(synced, topic), synced);
+  // Saving the item by hand moves its own clock forward; the replay still leaves it alone.
+  const saved = { ...synced, checkedAt: "2026-11-01T09:00:00.000Z" };
+  assert.equal(refreshItemFromTopic(saved, topic), saved);
+
+  // A newer analysis is picked up even if the item was saved after it (a sync that was missed).
+  const newer = { ...topic, summary: "cut priced in", updatedAt: "2026-10-30T13:00:00+00:00" };
+  const caught = refreshItemFromTopic(saved, newer);
+  assert.equal(caught.condition, "cut priced in");
+  assert.equal(caught.checkedAt, "2026-10-30T13:00:00.000Z");
+  assert.equal(caught.history.length, 2);
+
+  // A topic without a timestamp (older callers) still counts as checked now.
+  const { updatedAt, ...bare } = topic;
+  assert.ok(Date.now() - Date.parse(refreshItemFromTopic(item, bare).checkedAt) < 5000);
+});

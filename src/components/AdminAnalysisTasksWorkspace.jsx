@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AiScheduleTemplates from "./AiScheduleTemplates.jsx";
+import DeskStatus from "./DeskStatus.jsx";
 import "../styles/admin-analysis-tasks.css";
 
 const CADENCE_OPTIONS = ["", "hourly", "daily", "weekly", "monthly"];
@@ -422,7 +423,8 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
             <div>
               <h3>Recent runs</h3>
               <p className="admin-tasks__note">
-                What the AI wrote back through complete_analysis_task. Newest first, the last 50 tasks.
+                What the AI wrote back through complete_analysis_task. Newest first, the last 50 tasks. Daily desk runs
+                write topics directly and do not appear here: see Daily desk status below.
               </p>
             </div>
             <div className="admin-tasks__runs-actions">
@@ -448,6 +450,8 @@ export default function AdminAnalysisTasksWorkspace({ onAuthRequired = null } = 
           )}
         </section>
       </article>
+
+      <DeskStatus topics={topics} loading={loading} onRefresh={() => void loadWorkspace()} />
 
       <AiScheduleTemplates onUseAsTask={handleUseAsTask} />
     </main>

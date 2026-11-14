@@ -242,7 +242,9 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
   const queueDisabledReason = !template.queueable
     ? template.queueRunner
       ? "This one runs on your AI platform's schedule: it is what works through the queue."
-      : "This one needs the AI platform's own clock, so it cannot be queued."
+      : template.platform
+        ? `This lane belongs to ${template.platform}, so HedgeHub's shared queue cannot run it.`
+        : "This one needs the AI platform's own clock, so it cannot be queued."
     : null;
 
   return (
@@ -250,8 +252,8 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
       <header className="ai-templates__header">
         <h3>AI schedule templates</h3>
         <p className="ai-templates__lede">
-          Prompts to paste into a scheduled task in Claude or ChatGPT. The platform&apos;s clock triggers the run, and the HedgeHub connector lets the AI read and
-          write your AI topics. Pick one, edit the fields, copy.
+          Prompts to paste into a scheduled task in Claude, ChatGPT, Grok or Gemini. The platform&apos;s clock triggers the run, and the HedgeHub connector lets
+          the AI read and write your AI topics. Pick one, edit the fields, copy.
         </p>
       </header>
 
@@ -259,17 +261,24 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
         <summary>How to set one up</summary>
         <ol>
           <li>
-            <strong>Connect HedgeHub once.</strong> Claude: Settings, Connectors, add a custom connector. ChatGPT: Settings, Connectors, Advanced, Developer mode.
+            <strong>Connect HedgeHub once on each platform.</strong> Claude: Settings, Connectors, add a custom connector. ChatGPT: Settings, Connectors,
+            Advanced, Developer mode. Grok: grok.com/connectors, New connector, Custom. Gemini: on the Gemini website, Settings, Connected apps, add a custom app.
             The steps and the URL format are in <code>mcp-server/README.md</code>. The URL contains your access token, so treat it like a password; the templates
             never include it.
           </li>
           <li>
-            <strong>Copy a prompt</strong> below and create a scheduled task: Claude, Cowork, Scheduled (or type <code>/schedule</code>); ChatGPT, Tasks. Use the
-            schedule suggested for the template.
+            <strong>Copy a prompt</strong> below and create a scheduled task: Claude, Cowork, Scheduled (or type <code>/schedule</code>); ChatGPT, Tasks; Grok,
+            Tasks; Gemini, Scheduled actions. Use the schedule suggested for the template.
           </li>
           <li>
             <strong>Run it once by hand</strong> and approve the HedgeHub tools if asked. Then check the topics under Builder, AI suggestions. If the run says
             &quot;HedgeHub connector unavailable&quot;, the scheduled run cannot see the connector: check that it is enabled for the task, or try the other platform.
+          </li>
+          <li>
+            <strong>Using more than one platform?</strong> Use the <em>Daily desk</em> group: one prompt per platform, each with its own lane of topics (ChatGPT the
+            overall view, Grok social sentiment, Claude deep research, Gemini news and calendar), so they never overwrite each other. Every lane adds new topics,
+            moves them from new to resolved, and rewrites one anchor topic per run; when an anchor stops updating, that platform&apos;s task has stopped. Schedule
+            them in the suggested order, ChatGPT last.
           </li>
           <li>
             <strong>Or let HedgeHub keep the schedule.</strong> Schedule only <em>Task queue runner</em> on the platform, then use <em>Queue in HedgeHub</em> on the
@@ -308,6 +317,7 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
             <h4>{template.title}</h4>
             <p className="ai-templates__summary">{template.summary}</p>
             <div className="ai-templates__chips">
+              {template.platform ? <span className="ai-templates__chip">Paste into {template.platform}</span> : null}
               {hint ? <span className="ai-templates__chip ai-templates__chip--time">{hint.text}</span> : null}
               <span className="ai-templates__chip">{template.needsWeb ? "Needs web search" : "Mostly HedgeHub data"}</span>
               {template.queueable ? <span className="ai-templates__chip">Can be queued in HedgeHub ({template.taskCadence})</span> : null}

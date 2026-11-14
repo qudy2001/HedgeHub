@@ -150,18 +150,29 @@ export const TOPIC_ITEM_KEY = /^market topic (\d+)$/;
 
 // Returns the item refreshed from the topic (text, sentiment, contribution, last-checked, horizon); the user's own
 // choices (status, stock, scope, reviewed tick, sources) are kept.
-export function refreshItemFromTopic(item, topic, now = new Date()) {
-  const today = now.toISOString().slice(0, 10);
-  const horizon = new Date(now.getTime() + 30 * 86_400_000).toISOString().slice(0, 10);
-  return {
-    ...item,
+// "Last checked" is the moment the AI last wrote the topic, not the moment of this call: the server replays every topic
+// when it starts, and stamping that replay with the current time made a weeks-old analysis count as freshly checked.
+// An item that already carries this version of the topic is returned untouched. Pass `now` to force a time.
+export function refreshItemFromTopic(item, topic, now) {
+  const topicTime = Date.parse(topic.updatedAt ?? "");
+  const at = now ?? (Number.isFinite(topicTime) ? new Date(topicTime) : new Date());
+  const fresh = {
     title: String(topic.title).slice(0, 240),
     condition: String(topic.summary).slice(0, 1000),
     sentiment: topicSentiment(topic),
     points: topicPoints(topic),
-    rationale: `AI market topic: weight ${topic.weight}, bullish ${topic.bullishScore}, bearish ${topic.bearishScore}.`,
+    rationale: `AI market topic: weight ${topic.weight}, bullish ${topic.bullishScore}, bearish ${topic.bearishScore}.`
+  };
+  const current = !now && Date.parse(item.checkedAt ?? "") >= at.getTime() && Object.keys(fresh).every((key) => item[key] === fresh[key]);
+  if (current) return item;
+
+  const today = at.toISOString().slice(0, 10);
+  const horizon = new Date(at.getTime() + 30 * 86_400_000).toISOString().slice(0, 10);
+  return {
+    ...item,
+    ...fresh,
     impactUntil: !item.impactUntil || item.impactUntil < horizon ? horizon : item.impactUntil,
-    checkedAt: now.toISOString(),
-    history: [...(item.history ?? []), { at: now.toISOString(), note: `Updated from AI topic (${today})` }].slice(-100)
+    checkedAt: at.toISOString(),
+    history: [...(item.history ?? []), { at: at.toISOString(), note: `Updated from AI topic (${today})` }].slice(-100)
   };
 }
