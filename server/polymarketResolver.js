@@ -82,7 +82,9 @@ export function monthlyHitSlugs(slugKey, now = new Date(), months = 4) {
   return slugs;
 }
 
-function summarizeEvent(event) {
+// `now` decides which markets still count as tradable, so a caller that resolves events for a given moment gets
+// counts for that same moment.
+function summarizeEvent(event, now = new Date()) {
   const markets = Array.isArray(event?.markets) ? event.markets : [];
   const open = markets.filter((market) => market.closed !== true && market.active !== false);
   const tradable = open.filter((market) => {
@@ -99,7 +101,7 @@ function summarizeEvent(event) {
       endDate: market.endDate ?? event.endDate,
       yesPrice,
       noPrice: Number.isFinite(yesPrice) ? 1 - yesPrice : null
-    });
+    }, now);
   });
 
   return {
@@ -169,7 +171,7 @@ export async function resolveMonthlyHitEvents(slugKey, { now = new Date(), fetch
   const events = open
     .filter((event, index) => index === open.length - 1 || Date.parse(event.endDate) > now.getTime() + minLeadDays * DAY_MS)
     .slice(0, limit)
-    .map(summarizeEvent);
+    .map((event) => summarizeEvent(event, now));
 
   return { events, errors, failedSlugs };
 }
@@ -269,7 +271,7 @@ export async function checkOverrideEvent(url, { now = new Date(), fetchEvent = f
     } else if (!isOpenEvent(event, now)) {
       value = { url: canonical, slug, expired: true, title: event.title, endDate: event.endDate, reason: `"${event.title ?? slug}" has ended.` };
     } else {
-      value = { url: canonical, slug, expired: false, ...summarizeEvent(event) };
+      value = { url: canonical, slug, expired: false, ...summarizeEvent(event, now) };
     }
   } catch (error) {
     // A transient failure must not discard the user's choice.

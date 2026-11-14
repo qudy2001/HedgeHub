@@ -281,8 +281,9 @@ export async function fetchPolymarketEventBySlug(slug) {
   return (Array.isArray(payload) ? payload : []).find((event) => event?.slug === normalizedSlug) ?? null;
 }
 
+// `now` is the moment "tradable" is judged at (a market past its end date is not); it defaults to the present.
 export async function fetchPolymarketMarketsFromEventPage(eventUrl, options = {}) {
-  const { tradableOnly = true } = options;
+  const { tradableOnly = true, now = new Date() } = options;
   const canonicalUrl = canonicalPolymarketEventUrl(eventUrl);
 
   if (!canonicalUrl) {
@@ -301,6 +302,6 @@ export async function fetchPolymarketMarketsFromEventPage(eventUrl, options = {}
   );
 
   return tradableOnly
-    ? normalizedMarkets.filter((market) => isTradablePolymarketMarket(market))
+    ? normalizedMarkets.filter((market) => isTradablePolymarketMarket(market, now))
     : normalizedMarkets;
 }

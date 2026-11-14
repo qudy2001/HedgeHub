@@ -313,7 +313,9 @@ test("event markets load from the Gamma JSON API with order-book fields", async 
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
   };
   try {
-    const markets = await fetchPolymarketMarketsFromEventPage("https://www.polymarket.com/event/what-price-will-tsla-hit-in-october-2026/?tid=1");
+    const url = "https://www.polymarket.com/event/what-price-will-tsla-hit-in-october-2026/?tid=1";
+    // Judged at the fixture's own date: the test must not start failing the day the sample event ends.
+    const markets = await fetchPolymarketMarketsFromEventPage(url, { now: NOW });
     assert.equal(markets.length, 1);
     assert.equal(markets[0].yesPrice, 0.255);
     assert.equal(markets[0].bestBid, 0.24);
@@ -322,6 +324,11 @@ test("event markets load from the Gamma JSON API with order-book fields", async 
     assert.equal(markets[0].endDate, "2026-11-01T03:59:59.999Z");
     assert.equal(markets[0].seriesSlug, "tesla-hit-price-monthly");
     assert.ok(seen[0].includes("gamma-api.polymarket.com/events?slug=what-price-will-tsla-hit-in-october-2026"));
+
+    // Once the event has ended its markets are no longer tradable, but they can still be read for valuing positions.
+    const after = new Date("2026-11-02T00:00:00Z");
+    assert.deepEqual(await fetchPolymarketMarketsFromEventPage(url, { now: after }), []);
+    assert.equal((await fetchPolymarketMarketsFromEventPage(url, { now: after, tradableOnly: false })).length, 2);
 
     await assert.rejects(fetchPolymarketMarketsFromEventPage("https://polymarket.com/event/missing-event"), /not found/);
     assert.deepEqual(await fetchPolymarketMarketsFromEventPage("https://example.com/event/x"), []);
