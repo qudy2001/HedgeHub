@@ -31,7 +31,9 @@ export function maxPain(strikes) {
 }
 const mid = (c) => (c && c.bid > 0 && c.ask >= c.bid ? (c.bid + c.ask) / 2 : null);
 
-export function optionSummary({ contracts = [], spot, asOf, stats = {} } = {}) {
+// `language` ("en" or "zh") only changes the takeaways, the sentences shown under "What stands out" and sent to the
+// research agents. Signals and levels are interface labels and stay English.
+export function optionSummary({ contracts = [], spot, asOf, stats = {}, language = "en" } = {}) {
   const today = asOf ?? new Date().toISOString().slice(0, 10),
     seen = new Set();
   const valid = [];
@@ -172,7 +174,7 @@ export function optionSummary({ contracts = [], spot, asOf, stats = {} } = {}) {
     expected,
     signals,
     levels,
-    takeaways: buildTakeaways({ price, positioning, flow, expected, spot }),
+    takeaways: (language === "zh" ? buildTakeawaysZh : buildTakeaways)({ price, positioning, flow, expected, spot }),
   };
 }
 
@@ -300,4 +302,72 @@ function buildTakeaways({ price, positioning, flow, expected, spot }) {
       `${Math.round(flow.nearShare * 100)}% of volume expires within 30 days; the busiest strike is the ${usd(flow.busiest.strike)} ${flow.busiest.type}s (${compact(flow.busiest.volume)})${flow.freshCount ? `, and ${flow.freshCount} contract${flow.freshCount === 1 ? "" : "s"} traded more than their open interest` : ""}.`,
     );
   return out;
+}
+
+// The same read, written in Chinese rather than translated sentence by sentence. Keep the two in step: every English
+// takeaway has its counterpart here, built from the same numbers under the same conditions.
+function buildTakeawaysZh({ price, positioning, flow, expected, spot }) {
+  const out = [];
+  const { rsi, trendPct } = price;
+  if (rsi != null && trendPct != null) {
+    if (rsi < 30 && trendPct < -2)
+      out.push(`价格已明显超跌：RSI ${rsi.toFixed(1)}，低于 EMA 均线 ${Math.abs(trendPct).toFixed(1)}%。`);
+    else if (rsi > 70 && trendPct > 2)
+      out.push(`价格已明显超涨：RSI ${rsi.toFixed(1)}，高于 EMA 均线 ${trendPct.toFixed(1)}%。`);
+    else
+      out.push(
+        `价格${Math.abs(trendPct) <= 2 ? "贴近 EMA 均线" : `${trendPct > 0 ? "高于" : "低于"} EMA 均线 ${Math.abs(trendPct).toFixed(1)}%`}，RSI ${rsi.toFixed(1)}。`,
+      );
+  }
+  if (price.ivHvRatio != null) {
+    const gap = (price.iv - price.hv) * 100;
+    out.push(
+      `期权定价隐含的波动${Math.abs(gap) < 3 ? "与股价实际波动大致相当" : gap > 0 ? `比股价实际波动高 ${gap.toFixed(0)} 个百分点` : `比股价实际波动低 ${Math.abs(gap).toFixed(0)} 个百分点`}（IV ${(price.iv * 100).toFixed(0)}%，HV ${(price.hv * 100).toFixed(0)}%）${price.ivRank != null ? `，IV 分位 ${price.ivRank.toFixed(0)}` : ""}。`,
+    );
+  }
+  if (expected)
+    out.push(
+      `市场隐含到 ${expected.expiration} 的波动约为 ±${usd(expected.amount)}（±${expected.pct.toFixed(1)}%），对应区间 ${usd(expected.low)}–${usd(expected.high)}，${expected.method === "straddle" ? "由平值跨式期权推算" : "由隐含波动率推算"}。`,
+    );
+  const { callWall, putWall, maxPain: pain, keyExpiry } = positioning;
+  const painText = () => `${keyExpiry.expiration} 到期的最大痛点为 ${usd(pain)}，较现价 ${signed((pain / spot - 1) * 100)}%`;
+  if (callWall && putWall)
+    out.push(
+      `未平仓合约把价格夹在 ${usd(putWall.strike)} 的看跌期权墙（${compact(putWall.oi)}）和 ${usd(callWall.strike)} 的看涨期权墙（${compact(callWall.oi)}）之间${pain != null && keyExpiry ? `；${painText()}` : ""}。`,
+    );
+  else if (pain != null && keyExpiry) out.push(`${painText()}。`);
+  const oiLean = lean(positioning.putCallOi),
+    volLean = lean(flow.putCallVolume);
+  if (oiLean && volLean) {
+    const shift =
+      flow.putCallVolume > positioning.putCallOi * 1.25
+        ? "看跌期权的成交占比高于其未平仓占比，今日下行需求在增加"
+        : flow.putCallVolume < positioning.putCallOi * 0.8
+          ? "看涨期权的成交占比高于其未平仓占比，今日上行需求在增加"
+          : "今日成交与现有持仓结构一致";
+    out.push(`看跌/看涨比按未平仓量为 ${positioning.putCallOi.toFixed(2)}，按成交量为 ${flow.putCallVolume.toFixed(2)}：${shift}。`);
+  }
+  if (flow.busiest && flow.nearShare != null)
+    out.push(
+      `${Math.round(flow.nearShare * 100)}% 的成交量集中在 30 天内到期的合约；成交最活跃的是 ${usd(flow.busiest.strike)} ${OPTION_TYPE_ZH[flow.busiest.type] ?? flow.busiest.type}期权（${compact(flow.busiest.volume)}）${flow.freshCount ? `，另有 ${flow.freshCount} 个合约的成交量超过其未平仓量` : ""}。`,
+    );
+  return out;
+}
+
+export const OPTION_TYPE_ZH = { call: "看涨", put: "看跌" };
+// A key level's label and basis in Chinese, for text that is written in Chinese (the brief sent to the research agents).
+const LEVEL_ZH = {
+  Resistance: ["阻力位", () => "60 个交易日高点"],
+  "Call wall": ["看涨期权墙", () => "现价上方最大的看涨未平仓量"],
+  "Expected high": ["预期上沿", (date) => (date ? `截至 ${date}` : "")],
+  "EMA average": ["EMA 均线", () => "趋势参考"],
+  "Max pain": ["最大痛点", (date) => (date ? `${date} 到期` : "")],
+  Spot: ["现价", () => "当前价格"],
+  "Expected low": ["预期下沿", (date) => (date ? `截至 ${date}` : "")],
+  "Put wall": ["看跌期权墙", () => "现价下方最大的看跌未平仓量"],
+  Support: ["支撑位", () => "60 个交易日低点"],
+};
+export function levelTextZh(level) {
+  const [label, note] = LEVEL_ZH[level.label] ?? [level.label, () => level.note];
+  return { label, note: note(/\d{4}-\d{2}-\d{2}/.exec(level.note ?? "")?.[0]) };
 }

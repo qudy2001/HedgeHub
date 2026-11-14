@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { DAY, dateOnly } from "../../shared/builderEngine.js";
+import { agentOutputLanguage, normalizeContentLanguage } from "../../shared/contentLanguage.js";
 export const agentConfigured = () => Boolean(process.env.TRADINGAGENTS_URL);
 const ratings = {
   Buy: "Strong bullish",
@@ -37,13 +38,22 @@ export const jobStates = (extracted) =>
       { status: v.status, error: v.error, progress: v.progress, at: v.asOf },
     ]),
   );
+// What identifies a suggestion across runs. Labels written in Chinese keep their characters (width variants folded);
+// every other label keeps the letters-and-digits key it always had, so ids already saved do not change.
+export function suggestionKey(label) {
+  const text = String(label ?? "");
+  return /\p{Script=Han}/u.test(text)
+    ? text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+    : text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
 export function extractAgent(run) {
   const suggestions = [],
     valuations = [];
   for (const [symbol, job] of Object.entries(run.jobs ?? {})) {
     const report = job.report_sections?.final_trade_decision ?? "";
+    // The label stays English in both languages; the Chinese form is a safety net for a free-text fallback report.
     const priceTarget = report.match(
-      /\*?\*?Price Target\*?\*?\s*:\s*\$?([\d,]+(?:\.\d+)?)/i,
+      /\*{0,2}(?:Price Target|目标价格?)\*{0,2}\s*[:：]\s*\*{0,2}\s*(?:US)?\$?([\d,]+(?:\.\d+)?)/i,
     );
     valuations.push({
       symbol,
@@ -72,10 +82,7 @@ export function extractAgent(run) {
                 .filter(Boolean),
             ),
           ].slice(0, 8);
-          const key = String(item.label ?? "")
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, " ")
-            .trim();
+          const key = suggestionKey(item.label);
           if (!key) continue;
           const id = crypto
             .createHash("sha256")
@@ -185,18 +192,28 @@ export function mergeExtracted(state, extracted) {
     ].filter((x) => !EXCLUDED_SUGGESTION_SECTIONS.has(x.sourceSection)),
   };
 }
-// `optionContext(owner, symbol)` returns { text, meta } built from cached option data, or null. It is
+// `optionContext(owner, symbol, language)` returns { text, meta } built from cached option data, or null. It is
 // optional and best-effort: a run starts without it when nothing is cached or the lookup fails.
-export function createAgentService(store, { optionContext = null } = {}) {
+// `language(owner)` returns the owner's research language ("en" or "zh"); every run is started in it, so the agents
+// write in that language from their first prompt (TradingAgents `output_language`, which overrides its saved setting
+// for the run).
+export function createAgentService(store, { optionContext = null, language = null } = {}) {
   const locks = new Set();
+  const researchLanguage = (owner) => {
+    try {
+      return normalizeContentLanguage(language?.(owner));
+    } catch {
+      return normalizeContentLanguage();
+    }
+  };
   // The cached option briefs for a run's tickers: the request field TradingAgents reads, plus what was sent.
-  function optionBriefs(owner, tickers) {
+  function optionBriefs(owner, tickers, lang) {
     const text = {},
       meta = {};
     for (const ticker of tickers) {
       let brief = null;
       try {
-        brief = optionContext?.(owner, ticker) ?? null;
+        brief = optionContext?.(owner, ticker, lang) ?? null;
       } catch (e) {
         console.warn(`[builder] option context for ${ticker} skipped: ${e.message}`);
       }
@@ -246,12 +263,14 @@ export function createAgentService(store, { optionContext = null } = {}) {
         Date.now() - Date.parse(state.lastStarted) >= DAY
       ) {
         const tickers = strategy.definition.symbols.slice(0, 10),
-          briefs = optionBriefs(owner, tickers);
+          lang = researchLanguage(owner),
+          briefs = optionBriefs(owner, tickers, lang);
         const run = await request("/runs", {
           tickers,
           analysis_date: dateOnly(Date.now()),
           look_back_days: 365,
           look_forward_days: 365,
+          output_language: agentOutputLanguage(lang),
           ...briefs.body,
         });
         state = {
@@ -259,6 +278,7 @@ export function createAgentService(store, { optionContext = null } = {}) {
           runId: run.id,
           status: run.status,
           jobs: {},
+          language: lang,
           optionContext: briefs.meta,
           lastStarted: new Date().toISOString(),
           error: null,
@@ -314,12 +334,14 @@ export function createAgentService(store, { optionContext = null } = {}) {
         !symState.lastStarted ||
         Date.now() - Date.parse(symState.lastStarted) >= DAY
       ) {
-        const briefs = optionBriefs(owner, [symbol]);
+        const lang = researchLanguage(owner),
+          briefs = optionBriefs(owner, [symbol], lang);
         const run = await request("/runs", {
           tickers: [symbol],
           analysis_date: dateOnly(Date.now()),
           look_back_days: 365,
           look_forward_days: 365,
+          output_language: agentOutputLanguage(lang),
           ...briefs.body,
         });
         symState = {
@@ -327,6 +349,7 @@ export function createAgentService(store, { optionContext = null } = {}) {
           runId: run.id,
           status: run.status,
           job: null,
+          language: lang,
           optionContext: briefs.meta[symbol] ?? null,
           lastStarted: new Date().toISOString(),
           error: null,

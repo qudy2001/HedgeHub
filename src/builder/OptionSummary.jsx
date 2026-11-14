@@ -6,7 +6,8 @@ export const SUMMARY_SECTIONS = ["Signals", "Key levels", "What stands out"];
 
 // Condensed read of the option chain and price panels: signal tiles, a price ladder of the levels
 // that matter, and plain-language takeaways. All figures come from shared/optionSummary.js.
-export default function OptionSummary({ data, loading, error, spot, stats, symbol, hidden = () => false }) {
+// `language` is the user's research language: it sets the language of the takeaways only.
+export default function OptionSummary({ data, loading, error, spot, stats, symbol, hidden = () => false, language = "en" }) {
   const summary = useMemo(
     () =>
       optionSummary({
@@ -14,8 +15,9 @@ export default function OptionSummary({ data, loading, error, spot, stats, symbo
         spot,
         asOf: data?.asOf?.slice(0, 10),
         stats,
+        language,
       }),
-    [data, spot, stats],
+    [data, spot, stats, language],
   );
   if (!(spot > 0))
     return (

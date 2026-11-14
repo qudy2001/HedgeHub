@@ -65,7 +65,7 @@ test("agent report highlights: rating plus keyword tags with a conservative sent
   assert.equal(ratingSentiment("Hold"), "neutral");
   assert.equal(ratingSentiment("Underweight"), "bearish");
   assert.equal(ratingSentiment("Buy"), "bullish");
-  assert.deepEqual(reportHighlights(null), { rating: null, tags: [] });
+  assert.deepEqual(reportHighlights(null), { rating: null, language: "en", tags: [] });
 });
 
 test("companySummary leads with fundamentals and news, two stances per section", async () => {
@@ -160,4 +160,89 @@ test("leadSentence keeps figures intact and skips a too-short opener", async () 
   );
   assert.equal(item.lead, leadSentence(text));
   assert.equal(item.text, text);
+});
+
+// ---- reports written in Chinese ---------------------------------------------------------------------------------
+// The field labels and the rating scale stay English (both sides parse them); everything free-text is Chinese.
+const zhReport = `**Rating**: Overweight
+
+**Keywords**: 分批建仓, 现金流承压, 确认后加仓, 缺口风险
+
+**Executive Summary**: 以分批方式建立增持仓位：先在 166 美元附近投入 1.5% 的资金，止损设在 147.50 美元，其余 4.5% 等待两个确认信号后再加仓。
+
+**Price Target**: 206
+
+**Execution Scenarios**:
+- 首批建仓 | Trigger: 股价站稳 166 美元 | Entry: 166 | Stop Loss: 147.5 | Notes: 财报前只投入首批仓位
+`;
+
+test("a Chinese report keeps its rating, keywords and steps, and shows the rating in Chinese", async () => {
+  const { ratingLabel, textLanguage, isRatingField, leadSentence } = await import("../shared/agentReport.js");
+  const h = reportHighlights(zhReport);
+  assert.equal(h.rating, "Overweight");
+  assert.equal(h.language, "zh");
+  assert.equal(ratingLabel(h.rating, h.language), "增持");
+  assert.equal(ratingLabel("Overweight", "en"), "Overweight");
+  assert.equal(ratingLabel("谨慎观望", "zh"), "谨慎观望"); // not one of the five: shown as written
+  assert.deepEqual(h.tags.map((t) => t.text), ["分批建仓", "现金流承压", "确认后加仓", "缺口风险"]);
+  assert.deepEqual(h.tags.map((t) => t.sentiment), ["neutral", "bearish", "neutral", "neutral"]);
+  assert.equal(tagSentiment("营收增长超预期"), "bullish");
+  assert.equal(tagSentiment("增长放缓"), "neutral"); // one word from each side
+  assert.equal(ratingSentiment("增持"), "bullish");
+  assert.equal(ratingSentiment("减持"), "bearish");
+  assert.equal(ratingSentiment("持有"), "neutral");
+  assert.equal(textLanguage("Hold TSLA at a 3% core"), "en");
+  assert.ok(isRatingField("Rating") && isRatingField("评级") && !isRatingField("Price Target"));
+
+  const blocks = parseAgentReport(zhReport);
+  // A four-tag Chinese keyword line is short, but it is still shown as tags, not as a grid cell.
+  assert.deepEqual(blocks.map((b) => b.type), ["facts", "section", "section", "facts", "heading", "list"]);
+  const step = blocks.at(-1).items[0];
+  assert.equal(step.title, "首批建仓");
+  assert.deepEqual(step.fields.map((f) => f.label), ["Trigger", "Entry", "Stop Loss", "Notes"]);
+
+  // Colon inside the bold, full-width punctuation, Chinese labels and separators: what a free-text fallback writes.
+  const loose = reportHighlights("**评级：** 增持\n\n**关键词：** 分批建仓、现金流承压，确认后加仓；缺口风险、数据中心需求强劲、估值重估");
+  assert.equal(loose.rating, "增持");
+  assert.equal(loose.tags.length, 6);
+  assert.deepEqual(loose.tags.slice(-2).map((t) => t.sentiment), ["bullish", "bullish"]);
+
+  assert.equal(
+    leadSentence("唯一真正恶化的是现金转化：第二财季自由现金流环比下降 56%，至 214 亿美元。叠加库存增加，营运资本拖累达 307 亿美元。"),
+    "唯一真正恶化的是现金转化：第二财季自由现金流环比下降 56%，至 214 亿美元。",
+  );
+  assert.equal(leadSentence("很短。后面才是重点。"), "很短。后面才是重点。");
+});
+
+test("extractAgent keeps Chinese evidence items, and English ids do not move", async () => {
+  const { extractAgent, suggestionKey } = await import("../server/builder/agents.js");
+  const job = (items) => ({
+    status: "completed",
+    decision: "Overweight",
+    report_sections: { news_report: "x", final_trade_decision: "**Rating**: Overweight\n\n**Price Target**: 1,206.50" },
+    section_summaries: { news_report: { categories: { bullish: { rationale: "理由。", items } } } },
+  });
+  const zh = extractAgent({
+    id: "r1",
+    jobs: { NVDA: job([{ label: "第三财季毛利率维持在 74% 以上" }, { label: "数据中心订单未见削减" }, { label: "数据中心订单未见削减" }]) },
+  });
+  // Two different Chinese labels are two suggestions (a letters-only key would have dropped both); a repeat is one.
+  assert.deepEqual(zh.suggestions.map((s) => s.title), ["第三财季毛利率维持在 74% 以上", "数据中心订单未见削减"]);
+  assert.equal(zh.suggestions[0].eventKey, "第三财季毛利率维持在 74 以上");
+  assert.equal(zh.valuations[0].rating, "Bullish");
+  assert.equal(zh.valuations[0].priceTarget, 1206.5);
+  // Width variants of the same label are the same suggestion.
+  assert.equal(suggestionKey("Ｑ３ 毛利率：７４％"), suggestionKey("Q3 毛利率:74%"));
+  // English labels keep the key, and so the id, they had before.
+  assert.equal(suggestionKey("Q3 FY27 print: gross margin >= 74%"), "q3 fy27 print gross margin 74");
+  assert.equal(suggestionKey("Señor notes → café"), "se or notes caf");
+  const en = extractAgent({ id: "r2", jobs: { NVDA: job([{ label: "Export controls" }]) } });
+  assert.equal(en.suggestions[0].id, "88a5676fe53357af9a2c3b95");
+
+  // A free-text fallback report in Chinese still yields its price target.
+  const fallback = extractAgent({
+    id: "r3",
+    jobs: { TSLA: { status: "completed", decision: "Hold", report_sections: { final_trade_decision: "**目标价：** $453" } } },
+  });
+  assert.equal(fallback.valuations[0].priceTarget, 453);
 });

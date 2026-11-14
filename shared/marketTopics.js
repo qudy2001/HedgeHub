@@ -29,6 +29,14 @@ export function normalizeTopicSymbols(value) {
   return symbols;
 }
 
+// How two topic titles are compared: topics are matched by title, and a title typed in Chinese can differ only in
+// width (a full-width colon, full-width letters and digits) or in spacing ("X 市场情绪" and "X市场情绪", a space after
+// the colon or none). NFKC folds the width variants and spaces are ignored altogether.
+// server/db-postgres.js applies the same folding in SQL (findMarketTopicByTitle).
+export function topicTitleKey(title) {
+  return String(title ?? "").normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+}
+
 // Validates one upsert. `category` and `symbols` are optional: when omitted they keep the existing topic's
 // values (or "general" / none for a new topic), so older clients that only send the original fields still work.
 export function sanitizeMarketTopicInput(body = {}, existing = null) {

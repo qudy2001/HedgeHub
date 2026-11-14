@@ -2160,12 +2160,20 @@ export function listMarketTopics() {
   `);
 }
 
+// Titles are compared case-insensitively with width variants folded and spaces ignored (shared/marketTopics.js
+// topicTitleKey is the same rule): a title typed with a full-width colon, or with or without a space between Chinese
+// and Latin text, is the same topic. When several rows fold to one key, the one spelled exactly as asked wins, then an
+// active one, then the most recently updated.
+const topicTitleKeySql = (expression) => `lower(regexp_replace(normalize(${expression}, NFKC), '\\s+', '', 'g'))`;
+
 export function findMarketTopicByTitle(title) {
+  const wanted = quoteLiteral(String(title ?? "").trim());
   return queryJson(
     `
       SELECT ${MARKET_TOPIC_COLUMNS}
       FROM market_topics
-      WHERE lower(title) = lower(${quoteLiteral(String(title ?? "").trim())})
+      WHERE ${topicTitleKeySql("title")} = ${topicTitleKeySql(wanted)}
+      ORDER BY (lower(title) = lower(${wanted})) DESC, (status = 'active') DESC, updated_at DESC, id
       LIMIT 1
     `,
     false

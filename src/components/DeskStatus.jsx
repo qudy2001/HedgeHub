@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import "../styles/desk-status.css";
-import { deskAnchors } from "../../shared/aiScheduleTemplates.js";
+import { deskAnchorTitles } from "../../shared/deskProtocol.js";
 import { deskStatus } from "../../shared/deskStatus.js";
 
 const HEALTH = {
@@ -36,9 +36,11 @@ function formatTimestamp(value) {
 function savedAnchors() {
   try {
     const saved = JSON.parse(localStorage.getItem("hedgehub.aiTemplates"));
-    return deskAnchors({ hubAnchor: String(saved?.values?.["desk-chatgpt"]?.hubAnchor ?? "").trim() });
+    // The templates panel writes Chinese prompts unless it was switched to English, so a lane that has not run yet is
+    // shown waiting for the anchor that prompt will create.
+    return deskAnchorTitles({ hubAnchor: String(saved?.values?.["desk-chatgpt"]?.hubAnchor ?? "").trim() }, saved?.language === "en" ? "en" : "zh");
   } catch {
-    return deskAnchors();
+    return deskAnchorTitles({}, "zh");
   }
 }
 

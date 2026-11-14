@@ -1,5 +1,15 @@
 import { useState } from "react";
-import { parseAgentReport, parseInline, ratingSentiment, tagSentiment } from "../../shared/agentReport.js";
+import {
+  isKeywordField,
+  isRatingField,
+  parseAgentReport,
+  parseInline,
+  ratingLabel,
+  ratingSentiment,
+  splitKeywords,
+  tagSentiment,
+  textLanguage,
+} from "../../shared/agentReport.js";
 
 const STEP_VALUE = 24;
 
@@ -92,13 +102,14 @@ export function CompanySummary({ items }) {
 
 // Formatted view of a TradingAgents report. Builds React elements only, so report text is never injected as HTML.
 // Compact rating + keyword chips (used in the Agent valuation panel).
-export function AgentHighlights({ rating, tags }) {
+// `language` is the language the report was written in: a Chinese report shows the rating in Chinese.
+export function AgentHighlights({ rating, tags, language = "en" }) {
   return (
     <div className="agent-highlights">
       {rating && (
         <div className="agent-rating">
           <span>Rating</span>
-          <strong className={ratingSentiment(rating)}>{rating}</strong>
+          <strong className={ratingSentiment(rating)}>{ratingLabel(rating, language)}</strong>
         </div>
       )}
       {tags.length > 0 && (
@@ -118,7 +129,8 @@ export function AgentHighlights({ rating, tags }) {
 }
 
 export default function AgentReport({ text, className = "" }) {
-  const blocks = parseAgentReport(text);
+  const blocks = parseAgentReport(text),
+    language = textLanguage(text);
   if (!blocks.length)
     return <p className="subtle">No report available.</p>;
   return (
@@ -139,7 +151,7 @@ export default function AgentReport({ text, className = "" }) {
                 <div key={j}>
                   <dt>{f.label}</dt>
                   <dd>
-                    <Inline text={f.value} />
+                    <Inline text={isRatingField(f.label) ? ratingLabel(f.value, language) : f.value} />
                   </dd>
                 </div>
               ))}
@@ -149,9 +161,9 @@ export default function AgentReport({ text, className = "" }) {
           return (
             <section key={i}>
               <h4>{block.label}</h4>
-              {/^keywords?$/i.test(block.label) ? (
+              {isKeywordField(block.label) ? (
                 <ul className="agent-report-tags">
-                  {block.text.split(/\s*,\s*/).map((tag, j) => (
+                  {splitKeywords(block.text).map((tag, j) => (
                     <li key={j} className={tagSentiment(tag)}>
                       {tag}
                     </li>

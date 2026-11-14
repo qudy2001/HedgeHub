@@ -97,3 +97,23 @@ test("summary stays empty-safe without a chain", () => {
   assert.deepEqual(s.signals.map((x) => x.key), ["Momentum"]);
   assert.deepEqual(s.levels.map((l) => l.label), ["Spot"]);
 });
+
+test("the Chinese takeaways say what the English ones say, with the same figures; tiles and levels stay English", () => {
+  const en = optionSummary({ contracts: chain, spot: 100, asOf: "2026-11-13", stats }),
+    zh = optionSummary({ contracts: chain, spot: 100, asOf: "2026-11-13", stats, language: "zh" });
+  assert.equal(zh.takeaways.length, en.takeaways.length);
+  assert.ok(zh.takeaways.some((t) => /价格已明显超跌/.test(t)));
+  assert.ok(zh.takeaways.some((t) => /今日下行需求在增加/.test(t)));
+  assert.ok(zh.takeaways.some((t) => /看跌期权墙.*看涨期权墙.*最大痛点/.test(t)));
+  assert.ok(zh.takeaways.some((t) => /由平值跨式期权推算/.test(t)));
+  const figures = (lines) => lines.map((t) => (t.match(/\d+(?:\.\d+)?/g) ?? []).sort().join(" "));
+  assert.deepEqual(figures(zh.takeaways), figures(en.takeaways));
+  for (const line of zh.takeaways) {
+    assert.match(line, /。$/);
+    assert.deepEqual(line.replace(/RSI|EMA|IV|HV/g, "").match(/[A-Za-z]{2,}/g) ?? [], [], line);
+  }
+  // What is not prose is the same object in both languages.
+  assert.deepEqual(zh.signals, en.signals);
+  assert.deepEqual(zh.levels, en.levels);
+  assert.deepEqual(optionSummary({ language: "zh" }).takeaways, []);
+});

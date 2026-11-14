@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { createBuilderStore } from "./store.js";
 import { createSnapshotStore } from "./snapshotStore.js";
 import { createAgentService, agentConfigured } from "./agents.js";
+import { CONTENT_LANGUAGES, normalizeContentLanguage } from "../../shared/contentLanguage.js";
 import { createOptionContext } from "./optionContext.js";
 import {
   DEFAULT_STRATEGY,
@@ -266,7 +267,12 @@ export function registerBuilderRoutes(
       res.status(400).json({ error: e.message });
     }
   });
-  const agents = createAgentService(store, { optionContext: createOptionContext(snapshots) }),
+  // Preferences that apply to everything a user does in the Builder. Unknown keys are dropped, bad values fall back.
+  const preferences = (owner) => ({ contentLanguage: normalizeContentLanguage(store.prefs(owner).contentLanguage) });
+  const agents = createAgentService(store, {
+      optionContext: createOptionContext(snapshots),
+      language: (owner) => preferences(owner).contentLanguage,
+    }),
     active = new Map(),
     cache = new Map();
   let running = 0;
@@ -290,8 +296,23 @@ export function registerBuilderRoutes(
         strategies: store.strategies(req.user.id),
         defaults: DEFAULT_STRATEGY,
         agentConfigured: agentConfigured(),
+        preferences: preferences(req.user.id),
       }),
     ),
+  );
+  app.get(
+    "/api/builder/preferences",
+    route((req, res) => res.json(preferences(req.user.id))),
+  );
+  app.put(
+    "/api/builder/preferences",
+    route((req, res) => {
+      const wanted = req.body?.contentLanguage;
+      if (!CONTENT_LANGUAGES.some(([key]) => key === wanted))
+        throw Object.assign(new Error("contentLanguage must be en or zh"), { status: 400 });
+      store.savePrefs(req.user.id, { ...store.prefs(req.user.id), contentLanguage: wanted });
+      res.json(preferences(req.user.id));
+    }),
   );
   // AI market topics (written through the MCP connector) for the "AI suggestions" view. Postgres only.
   app.get(

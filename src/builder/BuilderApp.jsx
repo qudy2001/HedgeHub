@@ -2,6 +2,7 @@ import OptionDistribution from "./OptionDistribution.jsx";
 import OptionSummary, { SUMMARY_SECTIONS } from "./OptionSummary.jsx";
 import AgentReport, { AgentHighlights, CompanySummary } from "./AgentReport.jsx";
 import { companySummary, reportHighlights } from "../../shared/agentReport.js";
+import { CONTENT_LANGUAGES, normalizeContentLanguage } from "../../shared/contentLanguage.js";
 import OptionChainView from "./OptionChainView.jsx";
 import TigerSubscriptions from "./TigerSubscriptions.jsx";
 import { money, num, pct, pillTone } from "./format.js";
@@ -796,7 +797,9 @@ function Workspace({ demo, user, logout, presentation }) {
     [liveDatasets, setDatasets] = useState(sample?.datasets ?? {}),
     [items, setItems] = useState(sample?.items ?? []),
     [agent, setAgent] = useState(sample?.agent ?? null),
-    [agentAvailable, setAgentAvailable] = useState(false);
+    [agentAvailable, setAgentAvailable] = useState(false),
+    // The language AI research (and the rule-based option read beside it) is written in. The interface stays English.
+    [contentLanguage, setContentLanguage] = useState(normalizeContentLanguage());
   const [selectedId, setSelectedId] = useState(sample?.rows[0]?.id ?? ""),
     [notice, setNotice] = useState(""),
     [error, setError] = useState(""),
@@ -1220,6 +1223,7 @@ function Workspace({ demo, user, logout, presentation }) {
       .then((data) => {
         setSaved(data.strategies);
         setAgentAvailable(data.agentConfigured);
+        setContentLanguage(normalizeContentLanguage(data.preferences?.contentLanguage));
         if (data.strategies.length) loadStrategy(data.strategies[0].id);
       })
       .catch((e) => setError(e.message));
@@ -1564,6 +1568,18 @@ function Workspace({ demo, user, logout, presentation }) {
       const id = await save();
       setAgent(await api(`/builder/strategies/${id}/research`, {}));
     } catch (e) {
+      setError(e.message);
+    }
+  }
+  // Saved per user on the server, because daily research runs without the page open.
+  async function changeContentLanguage(next) {
+    const previous = contentLanguage;
+    setContentLanguage(normalizeContentLanguage(next));
+    try {
+      const saved = await api("/builder/preferences", { contentLanguage: next }, "PUT");
+      setContentLanguage(normalizeContentLanguage(saved.contentLanguage));
+    } catch (e) {
+      setContentLanguage(previous);
       setError(e.message);
     }
   }
@@ -2728,7 +2744,7 @@ function Workspace({ demo, user, logout, presentation }) {
             )}
             </div>
             {(highlights.rating || highlights.tags.length > 0) && (
-              <AgentHighlights rating={highlights.rating} tags={highlights.tags} />
+              <AgentHighlights rating={highlights.rating} tags={highlights.tags} language={highlights.language} />
             )}
             <CompanySummary items={happening} />
           </div>
@@ -2740,6 +2756,7 @@ function Workspace({ demo, user, logout, presentation }) {
             stats={summaryStats}
             symbol={symbol}
             hidden={(label) => metricHidden("valuation", label)}
+            language={contentLanguage}
           />
           </div>
         );
@@ -3012,6 +3029,25 @@ function Workspace({ demo, user, logout, presentation }) {
               for each stock individually below.
             </p>
           </div>
+          {!demo && (
+            <label
+              className="snapshot-picker research-language"
+              title="The language new research is written in, from the agents' first prompt on. Research already saved keeps its language until the stock is run again."
+            >
+              Research language
+              <select
+                value={contentLanguage}
+                onChange={(e) => changeContentLanguage(e.target.value)}
+                aria-label="Research language"
+              >
+                {CONTENT_LANGUAGES.map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
         {!agentAvailable && (
           <div className="panel">

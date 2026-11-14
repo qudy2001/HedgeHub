@@ -138,12 +138,59 @@ test("research runs carry the cached option brief only for symbols that have one
     assert.equal("options_context" in calls[1].body, false);
     assert.equal(single.runsBySymbol.NONE.optionContext, null);
 
-    // Without an option-context source the request is exactly what it was before.
+    // Without an option-context source the request carries no brief, and the language defaults to English.
     await createAgentService(store).refreshSymbol("u1", { ...strategy, id: "s2" }, "TEST", true);
-    assert.deepEqual(Object.keys(calls[2].body), ["tickers", "analysis_date", "look_back_days", "look_forward_days"]);
+    assert.deepEqual(Object.keys(calls[2].body), ["tickers", "analysis_date", "look_back_days", "look_forward_days", "output_language"]);
+    assert.equal(calls[2].body.output_language, "English");
+    assert.equal(calls[0].body.output_language, "English");
+
+    // A user whose research language is Chinese: every run says so, and the brief is asked for in that language.
+    const asked = [];
+    const zhAgents = createAgentService(store, {
+      language: (owner) => (owner === "u2" ? "zh" : owner === "u3" ? "klingon" : "en"),
+      optionContext: (owner, symbol, language) => {
+        asked.push(language);
+        return { text: `${language} brief`, meta: {} };
+      },
+    });
+    const zhState = await zhAgents.refresh("u2", { id: "s3", definition: { symbols: ["TEST"] } }, true);
+    assert.equal(calls[3].body.output_language, "Chinese");
+    assert.deepEqual(calls[3].body.options_context, { TEST: "zh brief" });
+    assert.equal(zhState.language, "zh");
+    const zhSingle = await zhAgents.refreshSymbol("u2", { id: "s4", definition: { symbols: ["TEST"] } }, "TEST", true);
+    assert.equal(calls[4].body.output_language, "Chinese");
+    assert.equal(zhSingle.runsBySymbol.TEST.language, "zh");
+    // An unknown value falls back to English rather than reaching TradingAgents.
+    await zhAgents.refresh("u3", { id: "s5", definition: { symbols: ["TEST"] } }, true);
+    assert.equal(calls[5].body.output_language, "English");
+    assert.deepEqual(asked, ["zh", "zh", "en"]);
   } finally {
     globalThis.fetch = realFetch;
     if (realUrl == null) delete process.env.TRADINGAGENTS_URL;
     else process.env.TRADINGAGENTS_URL = realUrl;
   }
+});
+
+test("the Chinese brief carries the same numbers as the English one, in Chinese", () => {
+  const en = brief(),
+    zh = brief({ language: "zh" });
+  assert.match(zh.text, /^### 期权持仓：TEST/);
+  assert.match(zh.text, /来源：HedgeHub 缓存的 Tiger 期权链，采集于 2026-11-12 18:56 UTC（本次研究前 1 天）/);
+  assert.match(zh.text, /\*\*未平仓量\*\*.*看涨 .* \/ 看跌 .*看跌\/看涨比/);
+  assert.match(zh.text, /\| 价位 \| 价格 \| 较现价 \| 依据 \|/);
+  assert.match(zh.text, /\| 看涨期权墙 \|/);
+  assert.match(zh.text, /\n解读：\n- /);
+  assert.match(zh.text, /局限：/);
+  assert.deepEqual(zh.meta, en.meta);
+  // Nothing but the wording differs: every figure in the English brief appears in the Chinese one.
+  const figures = (text) => [...new Set(text.match(/\$[\d,.]+\d|[+-]?\d+(?:\.\d+)?%|\d+(?:\.\d+)?[KM]\b|\d{4}-\d{2}-\d{2}/g))].sort();
+  assert.deepEqual(figures(zh.text), figures(en.text));
+  // No English sentence is left behind: outside the source name, tickers and units, the brief has no Latin words.
+  const latin = zh.text.replace(/HedgeHub|Tiger|TEST|UTC|RSI|EMA|IV|HV/g, "").match(/[A-Za-z]{3,}/g) ?? [];
+  assert.deepEqual(latin, []);
+
+  const thin = brief({ language: "zh", contracts: [c("2026-11-20", "call", 100, 12, 3)] });
+  assert.equal(thin.meta.thin, true);
+  assert.match(thin.text, /挂牌期权太清淡/);
+  assert.equal(brief({ language: "zh", spot: 0 }), null);
 });

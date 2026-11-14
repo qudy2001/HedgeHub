@@ -1,10 +1,12 @@
 // Daily desk status: what the four AI lanes (see shared/aiScheduleTemplates.js) last wrote, read back from the topics.
 // HedgeHub cannot tell the platforms apart on the wire (they share one API key), so everything here comes from the
 // summary header each desk prompt writes: "As of <time> by <Platform>. Stage: <stage>. Next check: <date or none>."
-import { DESK_LANES, deskAnchors, deskLane } from "./aiScheduleTemplates.js";
-import { topicSentiment } from "./marketTopics.js";
+// (or its Chinese form; shared/deskProtocol.js reads both).
+import { DESK_LANES } from "./aiScheduleTemplates.js";
+import { DESK_STAGES, deskAnchorTitles, deskLane, parseDeskSummary } from "./deskProtocol.js";
+import { topicSentiment, topicTitleKey } from "./marketTopics.js";
 
-export const DESK_STAGES = ["standing", "new", "developing", "active", "fading", "resolved"];
+export { DESK_STAGES, parseDeskSummary };
 // The order the lanes run in on a trading day; ChatGPT goes last because it reads the other three.
 export const DESK_LANE_ORDER = ["gemini", "grok", "claude", "chatgpt"];
 // A lane whose last write is older than this is reported late (a Friday run must still count on Monday morning).
@@ -14,53 +16,17 @@ const ARCHIVE_AFTER_DAYS = 30;
 const ARCHIVE_WARNING_DAYS = 14;
 const DAY_MS = 86_400_000;
 
-const LANE_BY_NAME = Object.fromEntries(Object.entries(DESK_LANES).map(([id, lane]) => [lane.name.toLowerCase(), id]));
-const LANE_NAMES = Object.values(DESK_LANES).map((lane) => lane.name).join("|");
-
-// "<Lane>: <subject> - <what to check>; <Lane>: ..." A request may contain a semicolon of its own, so a piece that does
-// not open with a lane name belongs to the request before it.
-function parseFlags(summary) {
-  const at = summary.search(/\bFlags:/);
-  if (at < 0) return [];
-  const body = summary.slice(at + "Flags:".length).trim().replace(/\.$/, "");
-  if (!body || /^none\b/i.test(body)) return [];
-  const flags = [];
-  for (const piece of body.split(";").map((part) => part.trim()).filter(Boolean)) {
-    const addressed = piece.match(new RegExp(`^(${LANE_NAMES})\\s*:\\s*(.+)$`, "is"));
-    if (addressed) flags.push({ to: LANE_BY_NAME[addressed[1].toLowerCase()], text: addressed[2].trim() });
-    else if (flags.length) flags[flags.length - 1].text += `; ${piece}`;
-  }
-  return flags;
-}
-
-// The header and the flags of one summary. Fields the summary does not carry come back null.
-export function parseDeskSummary(summary) {
-  const text = String(summary ?? "");
-  const head = text.slice(0, 200);
-  const by = head.match(new RegExp(`\\bby (${LANE_NAMES})\\b`, "i"));
-  const stage = head.match(/\bStage:\s*([a-z]+)/i)?.[1]?.toLowerCase();
-  const next = head.match(/\bNext check:\s*(\d{4}-\d{2}-\d{2}|none)/i)?.[1]?.toLowerCase();
-  return {
-    by: by ? LANE_BY_NAME[by[1].toLowerCase()] : null,
-    stage: DESK_STAGES.includes(stage) ? stage : null,
-    nextCheck: next ?? null,
-    flags: parseFlags(text)
-  };
-}
-
 // Next check dates are written in US Eastern time, so "today" is the Eastern calendar day.
 function easternDate(now) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(now);
 }
 
-function sameTitle(a, b) {
-  return String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
-}
-
-// topics: rows as returned by the market-topic APIs (active and archived). anchors: deskAnchors(), with the user's own
-// hub title when they changed it. Returns the four lanes in run order plus every open flag.
-export function deskStatus(topics = [], { now = new Date(), anchors = deskAnchors() } = {}) {
+// topics: rows as returned by the market-topic APIs (active and archived). anchors: per lane, the title or titles that
+// count as its anchor (deskAnchorTitles(): English and Chinese, plus the user's own hub title when they changed it).
+// Returns the four lanes in run order plus every open flag.
+export function deskStatus(topics = [], { now = new Date(), anchors = deskAnchorTitles() } = {}) {
   const today = easternDate(now);
+  const anchorKeys = Object.fromEntries(Object.entries(anchors).map(([lane, titles]) => [lane, [titles].flat().map(topicTitleKey)]));
   const rows = topics.map((topic) => {
     const header = parseDeskSummary(topic.summary);
     const updated = Date.parse(topic.updatedAt ?? "");
@@ -81,7 +47,7 @@ export function deskStatus(topics = [], { now = new Date(), anchors = deskAnchor
       stage: header.stage,
       nextCheck: header.nextCheck,
       flags: header.flags,
-      anchor: sameTitle(topic.title, anchors[lane]),
+      anchor: (anchorKeys[lane] ?? []).includes(topicTitleKey(topic.title)),
       // Written before the desk existed, or by a prompt that is not a desk prompt: no lane has adopted it yet.
       legacy: !header.by,
       // Another platform wrote into this lane.
@@ -107,7 +73,8 @@ export function deskStatus(topics = [], { now = new Date(), anchors = deskAnchor
       id,
       name: DESK_LANES[id].name,
       duty: DESK_LANES[id].duty,
-      anchorTitle: anchors[id],
+      // The anchor as it is titled in the list; before the first run, the title the prompt will give it.
+      anchorTitle: anchor?.title ?? [anchors[id]].flat()[0],
       // "missing": never written; "adopted": written by this lane's desk prompt; "legacy": exists, but not yet rewritten.
       anchorState: !anchor ? "missing" : anchor.writtenBy === id ? "adopted" : "legacy",
       lastWrite,

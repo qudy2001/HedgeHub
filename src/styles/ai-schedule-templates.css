@@ -254,6 +254,22 @@
   font-size: 0.9rem;
 }
 
+/* Sits between the "Prompt to paste" label and the character count. */
+.ai-templates__prompt-head .ai-templates__language {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 0.8rem;
+}
+
+.ai-templates .ai-templates__language select {
+  width: auto;
+  min-width: 0;
+  padding: 2px 6px;
+  font-size: 0.8rem;
+}
+
 .ai-templates .ai-templates__preview {
   min-height: 300px;
   background: var(--input-bg-strong);

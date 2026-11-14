@@ -85,6 +85,25 @@ test("market topics store category and symbols, and updates only change them whe
     assert.equal(history[0].weight, 90);
     assert.equal(history[1].category, "social");
 
+    // Chinese titles and summaries survive the round trip, and a title that differs only in width or spacing (a
+    // full-width colon, a full-width space, full-width letters) is the same topic, not a new one.
+    const zh = db.createMarketTopic(
+      sanitizeMarketTopicInput({ title: "DB test 社交: 英伟达逼空讨论", ...fields, summary: "截至 2026-11-14 08:30 ET，由 Grok 撰写。阶段：新增。", category: "social", symbols: ["nvda"] })
+    );
+    ids.push(zh.id);
+    assert.equal(zh.title, "DB test 社交: 英伟达逼空讨论");
+    assert.equal(zh.summary, "截至 2026-11-14 08:30 ET，由 Grok 撰写。阶段：新增。");
+    for (const variant of ["DB test 社交：英伟达逼空讨论", "ＤＢ　ｔｅｓｔ 社交:  英伟达逼空讨论", "db TEST 社交:英伟达逼空讨论"])
+      assert.equal(db.findMarketTopicByTitle(variant)?.id, zh.id, variant);
+    assert.equal(db.findMarketTopicByTitle("DB test 社交: 英伟达逼空"), null);
+    // When a width variant was saved as a second row before this rule existed, the exact spelling still wins.
+    const twin = db.createMarketTopic(sanitizeMarketTopicInput({ title: "DB test 社交：英伟达逼空讨论", ...fields, category: "social" }));
+    ids.push(twin.id);
+    assert.equal(db.findMarketTopicByTitle("DB test 社交：英伟达逼空讨论").id, twin.id);
+    assert.equal(db.findMarketTopicByTitle("DB test 社交: 英伟达逼空讨论").id, zh.id);
+    psql(`DELETE FROM market_topics WHERE id IN (${zh.id}, ${twin.id})`);
+    ids.splice(ids.indexOf(zh.id), 2);
+
     // Lifecycle: stale active topics are archived, long-archived ones are deleted with their history.
     psql(`UPDATE market_topics SET updated_at = NOW() - INTERVAL '31 days' WHERE id = ${legacy.id}`);
     assert.equal(db.maintainMarketTopics().archived >= 1, true);

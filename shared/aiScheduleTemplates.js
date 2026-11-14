@@ -5,6 +5,8 @@
 //    task; the generic "Task queue runner" template, scheduled once on the platform, works through the queue).
 // Shared by the Admin UI and the tests. Keep every prompt ASCII: they are pasted into third-party apps, and topic titles
 // are matched exactly, so smart quotes or long dashes would silently create duplicate topics.
+import { ZH_PACK } from "./aiScheduleTemplates.zh.js";
+import { deskAnchors, deskLane } from "./deskProtocol.js";
 import { normalizeTopicSymbols } from "./marketTopics.js";
 
 export const HEDGEHUB_MCP_TOOLS = [
@@ -430,32 +432,9 @@ export const DESK_LANES = {
   }
 };
 
-const DESK_PREFIXES = [
-  ["Social:", "grok"],
-  ["News:", "gemini"],
-  ["Event:", "gemini"],
-  ["Thesis:", "claude"],
-  ["Research:", "claude"]
-];
-
-// Which lane owns a topic: { title, category } -> "chatgpt" | "grok" | "claude" | "gemini".
-export function deskLane(topic) {
-  const title = String(topic?.title ?? "").trim().toLowerCase();
-  const prefixed = DESK_PREFIXES.find(([prefix]) => title.startsWith(prefix.toLowerCase()));
-  if (prefixed) return prefixed[1];
-  if (topic?.category === "social") return "grok";
-  if (topic?.category === "ticker") return "claude";
-  return "chatgpt";
-}
-
-export function deskAnchors(values = {}) {
-  return {
-    chatgpt: values.hubAnchor || "US market risk regime",
-    grok: "Social: X market mood",
-    gemini: "News: market drivers today",
-    claude: "Research: deep-dive log"
-  };
-}
+// Which lane owns a topic and what each lane's anchor is called are part of the desk's wire format, shared with the
+// Chinese prompts and with the status panel: see shared/deskProtocol.js.
+export { deskAnchors, deskLane };
 
 const DESK_TOOLS = "list_market_topics and upsert_market_topic";
 const DESK_QUEUE_TOOLS = "list_market_topics, upsert_market_topic, get_next_analysis_task and complete_analysis_task";
@@ -566,6 +545,7 @@ const deskTemplate = (laneId, template) => {
   const lane = DESK_LANES[laneId];
   return {
     group: "desk",
+    lane: laneId,
     platform: lane.name,
     needsWeb: true,
     queueable: false,
@@ -1220,8 +1200,51 @@ export const AI_SCHEDULE_TEMPLATES = [
   }
 ];
 
-export function getTemplate(id) {
-  return AI_SCHEDULE_TEMPLATES.find((template) => template.id === id) ?? null;
+// ---- prompt languages ------------------------------------------------------------------------------------------
+// A template's definition (id, fields, schedule, limits, the text shown in the Admin panel) is the same in every
+// language; a language pack supplies what the AI reads. The English pack is the text in this file; the Chinese one is
+// written separately in shared/aiScheduleTemplates.zh.js (not translated from this file line by line).
+export const TEMPLATE_LANGUAGES = [
+  ["en", "English"],
+  ["zh", "中文"]
+];
+const EN_PACK = {
+  language: "en",
+  intro,
+  topicRules,
+  compactRules,
+  queueBlock: QUEUE_BLOCK,
+  report: REPORT,
+  extraHeading: "EXTRA INSTRUCTIONS FROM ME"
+};
+const PACKS = { en: EN_PACK, zh: ZH_PACK };
+const templateLanguage = (language) => (language in PACKS ? language : "en");
+
+function localizeTemplate(template, pack) {
+  const defaults = pack.defaults[template.id] ?? {};
+  return {
+    ...template,
+    language: pack.language,
+    body: pack.bodies[template.id],
+    variables: template.variables.map((variable) => (variable.key in defaults ? { ...variable, default: defaults[variable.key] } : variable)),
+    ...(template.lane
+      ? {
+          intro: (v, options) => pack.desk.intro(v, template.lane, options),
+          rules: (v, cap) => pack.desk.rules(v, template.lane, { cap, ...template.limits(v) }),
+          report: pack.desk.report
+        }
+      : {})
+  };
+}
+// Built once, so a template is the same object every time it is asked for.
+const LOCALIZED = { en: AI_SCHEDULE_TEMPLATES, zh: AI_SCHEDULE_TEMPLATES.map((template) => localizeTemplate(template, ZH_PACK)) };
+
+export function templatesFor(language = "en") {
+  return LOCALIZED[templateLanguage(language)];
+}
+
+export function getTemplate(id, language = "en") {
+  return templatesFor(language).find((template) => template.id === id) ?? null;
 }
 
 // mode "schedule": the full self-contained prompt for a Claude / ChatGPT scheduled task.
@@ -1231,23 +1254,24 @@ export function renderTemplate(template, raw = {}, { mode = "schedule" } = {}) {
   const { values, errors } = resolveTemplateValues(template, raw);
   if (Object.keys(errors).length) return { ok: false, text: "", errors, values };
 
+  const pack = PACKS[templateLanguage(template.language)];
   const cap = Math.max(1, template.cap(values));
   const body = template.body(values);
-  const extra = values.extra ? `EXTRA INSTRUCTIONS FROM ME\n${values.extra}` : "";
+  const extra = values.extra ? `${pack.extraHeading}\n${values.extra}` : "";
 
   if (mode === "task") {
-    const text = [body, extra, compactRules(cap)].filter(Boolean).join("\n\n");
+    const text = [body, extra, pack.compactRules(cap)].filter(Boolean).join("\n\n");
     return { ok: true, text, errors: {}, values };
   }
 
   const queue = Boolean(template.queueRunner || values.includeQueue);
   const sections = [
-    template.intro ? template.intro(values, { queue }) : intro(values, { queue }),
-    values.includeQueue ? QUEUE_BLOCK : "",
+    template.intro ? template.intro(values, { queue }) : pack.intro(values, { queue }),
+    values.includeQueue ? pack.queueBlock : "",
     body,
     extra,
-    template.rules ? template.rules(values, cap) : values.compact ? compactRules(cap) : topicRules(cap),
-    template.report ?? REPORT
+    template.rules ? template.rules(values, cap) : values.compact ? pack.compactRules(cap) : pack.topicRules(cap),
+    template.report ?? pack.report
   ].filter(Boolean);
   return { ok: true, text: sections.join("\n\n"), errors: {}, values };
 }

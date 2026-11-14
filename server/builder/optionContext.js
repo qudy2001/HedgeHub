@@ -11,7 +11,8 @@ export function createOptionContext(
   snapshots,
   { maxAgeDays = OPTION_CONTEXT_MAX_AGE_DAYS, now = Date.now } = {},
 ) {
-  return function optionContext(owner, symbol) {
+  // `language` ("en" or "zh") is the language the research run works in; the brief is written in it.
+  return function optionContext(owner, symbol, language = "en") {
     const at = now(),
       hit = snapshots
         .list(owner, symbol)
@@ -41,6 +42,7 @@ export function createOptionContext(
         ivRank: volatility?.historical?.rank,
       },
       now: at,
+      language,
     });
   };
 }

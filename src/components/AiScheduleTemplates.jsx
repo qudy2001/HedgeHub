@@ -3,6 +3,7 @@ import "../styles/ai-schedule-templates.css";
 import {
   AI_SCHEDULE_TEMPLATES,
   TEMPLATE_GROUPS,
+  TEMPLATE_LANGUAGES,
   defaultTemplateValues,
   getTemplate,
   renderTemplate,
@@ -11,16 +12,19 @@ import {
 } from "../../shared/aiScheduleTemplates.js";
 
 const STORAGE_KEY = "hedgehub.aiTemplates";
+// The language of the prompt that is copied out (and so of the topics the AI writes). This panel stays English.
+const DEFAULT_PROMPT_LANGUAGE = "zh";
 
 function loadSaved() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     return {
       selected: typeof saved?.selected === "string" ? saved.selected : "",
-      values: saved?.values && typeof saved.values === "object" ? saved.values : {}
+      values: saved?.values && typeof saved.values === "object" ? saved.values : {},
+      language: TEMPLATE_LANGUAGES.some(([key]) => key === saved?.language) ? saved.language : DEFAULT_PROMPT_LANGUAGE
     };
   } catch {
-    return { selected: "", values: {} };
+    return { selected: "", values: {}, language: DEFAULT_PROMPT_LANGUAGE };
   }
 }
 
@@ -169,6 +173,7 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
   const [saved] = useState(loadSaved);
   const [selectedId, setSelectedId] = useState(() => (getTemplate(saved.selected) ? saved.selected : AI_SCHEDULE_TEMPLATES[0].id));
   const [valuesById, setValuesById] = useState(saved.values);
+  const [language, setLanguage] = useState(saved.language);
   const [status, setStatus] = useState(null);
   const timeZone = useMemo(() => {
     try {
@@ -178,7 +183,7 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
     }
   }, []);
 
-  const template = getTemplate(selectedId) ?? AI_SCHEDULE_TEMPLATES[0];
+  const template = getTemplate(selectedId, language) ?? getTemplate(AI_SCHEDULE_TEMPLATES[0].id, language);
   const variables = useMemo(() => templateVariables(template), [template]);
   const raw = useMemo(() => ({ ...defaultTemplateValues(template), ...(valuesById[template.id] ?? {}) }), [template, valuesById]);
   const result = useMemo(() => renderTemplate(template, raw), [template, raw]);
@@ -189,11 +194,11 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ selected: selectedId, values: valuesById }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ selected: selectedId, values: valuesById, language }));
     } catch {
       /* storage unavailable (private window); the choices just are not remembered */
     }
-  }, [selectedId, valuesById]);
+  }, [selectedId, valuesById, language]);
 
   useEffect(() => {
     if (!status) return undefined;
@@ -373,6 +378,16 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
           <div className="ai-templates__prompt">
             <div className="ai-templates__prompt-head">
               <label htmlFor="ai-template-preview">Prompt to paste</label>
+              <label className="ai-templates__language" title="The language the prompt is written in, and so the language the AI researches and writes your topics in. Existing topics keep their titles.">
+                Prompt language
+                <select value={language} onChange={(event) => setLanguage(event.target.value)} aria-label="Prompt language">
+                  {TEMPLATE_LANGUAGES.map(([key, label]) => (
+                    <option key={key} value={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <span className="timestamp">{result.ok ? `${result.text.length.toLocaleString("en-GB")} characters` : "Fix the highlighted fields"}</span>
             </div>
             <textarea
@@ -380,6 +395,7 @@ export default function AiScheduleTemplates({ onUseAsTask = null } = {}) {
               className="ai-templates__preview"
               readOnly
               rows={16}
+              lang={result.ok ? language : "en"}
               value={result.ok ? result.text : "Fill in the highlighted fields above to see the prompt."}
               onFocus={(event) => event.target.select()}
             />

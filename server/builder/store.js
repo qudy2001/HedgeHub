@@ -13,7 +13,8 @@ export function createBuilderStore(
   db.exec(`CREATE TABLE IF NOT EXISTS studio_strategies(owner TEXT,id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,id));
     CREATE TABLE IF NOT EXISTS studio_items(owner TEXT,strategy_id TEXT,id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,strategy_id,id));
     CREATE TABLE IF NOT EXISTS studio_jobs(owner TEXT,id TEXT PRIMARY KEY,payload TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS studio_agent(owner TEXT,strategy_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,strategy_id));`);
+    CREATE TABLE IF NOT EXISTS studio_agent(owner TEXT,strategy_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,strategy_id));
+    CREATE TABLE IF NOT EXISTS studio_prefs(owner TEXT PRIMARY KEY,payload TEXT NOT NULL);`);
   const parse = (r) => (r ? JSON.parse(r.payload) : null);
   for (const r of db.prepare("SELECT * FROM studio_jobs").all()) {
     const j = parse(r);
@@ -135,6 +136,14 @@ export function createBuilderStore(
         id,
         JSON.stringify(p),
       );
+      return p;
+    },
+    // Per-user preferences that apply across strategies (for example the research language).
+    prefs(owner) {
+      return parse(db.prepare("SELECT * FROM studio_prefs WHERE owner=?").get(owner)) ?? {};
+    },
+    savePrefs(owner, p) {
+      db.prepare("INSERT OR REPLACE INTO studio_prefs VALUES (?,?)").run(owner, JSON.stringify(p));
       return p;
     },
     close() {
