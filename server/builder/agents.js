@@ -183,8 +183,30 @@ export function mergeExtracted(state, extracted) {
     ].filter((x) => !EXCLUDED_SUGGESTION_SECTIONS.has(x.sourceSection)),
   };
 }
-export function createAgentService(store) {
+// `optionContext(owner, symbol)` returns { text, meta } built from cached option data, or null. It is
+// optional and best-effort: a run starts without it when nothing is cached or the lookup fails.
+export function createAgentService(store, { optionContext = null } = {}) {
   const locks = new Set();
+  // The cached option briefs for a run's tickers: the request field TradingAgents reads, plus what was sent.
+  function optionBriefs(owner, tickers) {
+    const text = {},
+      meta = {};
+    for (const ticker of tickers) {
+      let brief = null;
+      try {
+        brief = optionContext?.(owner, ticker) ?? null;
+      } catch (e) {
+        console.warn(`[builder] option context for ${ticker} skipped: ${e.message}`);
+      }
+      if (!brief?.text) continue;
+      text[ticker] = brief.text;
+      meta[ticker] = brief.meta ?? {};
+    }
+    return {
+      body: Object.keys(text).length ? { options_context: text } : {},
+      meta,
+    };
+  }
   async function refresh(owner, strategy, force = false) {
     const key = owner + ":" + strategy.id;
     if (locks.has(key)) return store.agent(owner, strategy.id);
@@ -221,17 +243,21 @@ export function createAgentService(store) {
         !state.lastStarted ||
         Date.now() - Date.parse(state.lastStarted) >= DAY
       ) {
+        const tickers = strategy.definition.symbols.slice(0, 10),
+          briefs = optionBriefs(owner, tickers);
         const run = await request("/runs", {
-          tickers: strategy.definition.symbols.slice(0, 10),
+          tickers,
           analysis_date: dateOnly(Date.now()),
           look_back_days: 365,
           look_forward_days: 365,
+          ...briefs.body,
         });
         state = {
           ...state,
           runId: run.id,
           status: run.status,
           jobs: {},
+          optionContext: briefs.meta,
           lastStarted: new Date().toISOString(),
           error: null,
         };
@@ -286,17 +312,20 @@ export function createAgentService(store) {
         !symState.lastStarted ||
         Date.now() - Date.parse(symState.lastStarted) >= DAY
       ) {
+        const briefs = optionBriefs(owner, [symbol]);
         const run = await request("/runs", {
           tickers: [symbol],
           analysis_date: dateOnly(Date.now()),
           look_back_days: 365,
           look_forward_days: 365,
+          ...briefs.body,
         });
         symState = {
           ...symState,
           runId: run.id,
           status: run.status,
           job: null,
+          optionContext: briefs.meta[symbol] ?? null,
           lastStarted: new Date().toISOString(),
           error: null,
         };

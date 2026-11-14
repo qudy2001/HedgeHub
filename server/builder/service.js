@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { createBuilderStore } from "./store.js";
 import { createSnapshotStore } from "./snapshotStore.js";
 import { createAgentService, agentConfigured } from "./agents.js";
+import { createOptionContext } from "./optionContext.js";
 import {
   DEFAULT_STRATEGY,
   TEMPLATES,
@@ -265,7 +266,7 @@ export function registerBuilderRoutes(
       res.status(400).json({ error: e.message });
     }
   });
-  const agents = createAgentService(store),
+  const agents = createAgentService(store, { optionContext: createOptionContext(snapshots) }),
     active = new Map(),
     cache = new Map();
   let running = 0;
