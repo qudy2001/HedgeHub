@@ -88,8 +88,8 @@ test("the Chinese scoring guidance matches how HedgeHub reads the scores, and su
   assert.equal(topicSentiment({ bullishScore: 70, bearishScore: 30 }), "Strong bullish");
   for (const template of ZH) {
     const text = render(template.id);
-    assert.match(text, /\+15 显示为看多，\+40 为强烈看多，看空方向对称/, template.id);
-    assert.match(text, /commodity 和 forex 话题打的是对股市的影响/, template.id);
+    assert.match(text, /\+15 以上算看多，\+40 以上算强烈看多，看空同理/, template.id);
+    assert.match(text, /commodity 和 forex 话题也按对股市的影响打分/, template.id);
     const max = Number(/最多 (\d+) 字/.exec(text)[1]);
     assert.ok(max <= 500, `${template.id}: a ${max}-character Chinese summary would be cut by the Builder's 1000-character limit once numbers and names are added`);
   }
@@ -109,17 +109,16 @@ test("titles in Chinese prompts use a half-width colon, carry no dates, and old 
   assert.match(render("stock-overview", {}, { mode: "task" }), /旧的英文标题也沿用/);
   assert.match(render("daily-market-pulse"), /已有同一主题的旧英文标题则沿用旧标题/);
   const pulse = render("daily-market-pulse", { market: "europe" });
-  assert.match(pulse, /- "欧洲股市: 趋势与宽度"（category general）/);
+  assert.match(pulse, /- "欧洲股市: 大盘走势与广度"（category general）/);
   assert.match(pulse, /- "美元与外汇"（category forex）/);
-  assert.doesNotMatch(render("daily-market-pulse", { slots: ["fx"], breakingMax: 0 }), /趋势与宽度|突发:/);
+  assert.doesNotMatch(render("daily-market-pulse", { slots: ["fx"], breakingMax: 0 }), /大盘走势与广度|突发:/);
 });
 
 test("Chinese desk: each prompt speaks for its lane, and its header, stages, prefixes and anchors read back", () => {
   const prompts = Object.fromEntries(Object.keys(DESK_PLATFORMS).map((lane) => [lane, render(`desk-${lane}`)]));
   const anchors = deskAnchors({}, "zh");
   for (const [lane, text] of Object.entries(prompts)) {
-    const name = DESK_PLATFORMS[lane];
-    assert.match(text, new RegExp(`你是 ${name}。`));
+    assert.match(text, new RegExp(`你是${DESK_WORDS.zh.roles[lane]}。`));
     // The header the prompt asks for is the header HedgeHub parses.
     const header = /“(截至 [^”]+)”/.exec(text)[1];
     for (const [stage, word] of Object.entries(DESK_WORDS.zh.stages)) {
@@ -138,7 +137,7 @@ test("Chinese desk: each prompt speaks for its lane, and its header, stages, pre
       for (const prefix of Object.values(DESK_WORDS[language].prefixes)) assert.ok(text.includes(`"${prefix}"`), `${lane}: ${prefix}`);
       for (const title of Object.values(deskAnchors({}, language))) assert.ok(text.includes(`"${title}"`), `${lane}: ${title}`);
     }
-    assert.match(text, new RegExp(`你的锚点："${anchors[lane]}"`));
+    assert.match(text, new RegExp(`你的主话题："${anchors[lane]}"`));
     assert.match(text, /生命周期/);
     assert.match(text, /写完后再用 status "active" 调用一次 list_market_topics/);
     assert.match(text, /最多写入 \d+ 次，其中新建不超过 \d+ 个/);
@@ -146,10 +145,10 @@ test("Chinese desk: each prompt speaks for its lane, and its header, stages, pre
   }
   // What the lane map says is what deskLane does.
   const owner = { [DESK_WORDS.zh.prefixes.social]: "grok", [DESK_WORDS.zh.prefixes.news]: "gemini", [DESK_WORDS.zh.prefixes.event]: "gemini", [DESK_WORDS.zh.prefixes.thesis]: "claude", [DESK_WORDS.zh.prefixes.research]: "claude" };
-  const laneLines = prompts.chatgpt.split("\n").filter((line) => /^- (Grok|Gemini|Claude|ChatGPT)，/.test(line));
+  const laneLines = prompts.chatgpt.split("\n").filter((line) => /^- (舆情分析师|新闻编辑|深度研究员|宏观策略师)，/.test(line));
   assert.equal(laneLines.length, 4);
   for (const [prefix, lane] of Object.entries(owner)) {
-    assert.ok(laneLines.find((line) => line.startsWith(`- ${DESK_PLATFORMS[lane]}，`)).includes(`"${prefix}"`), prefix);
+    assert.ok(laneLines.find((line) => line.startsWith(`- ${DESK_WORDS.zh.roles[lane]}，`)).includes(`"${prefix}"`), prefix);
     assert.equal(deskLane({ title: `${prefix} 示例`, category: "general" }), lane);
   }
   // Titles a Chinese prompt tells a lane to create land in that lane.
@@ -159,17 +158,33 @@ test("Chinese desk: each prompt speaks for its lane, and its header, stages, pre
   assert.equal(deskLane({ title: "美元与外汇", category: "forex" }), "chatgpt");
 });
 
+test("Chinese desk prompts name the four members by role, never by platform", () => {
+  for (const lane of Object.keys(DESK_PLATFORMS)) {
+    const text = render(`desk-${lane}`);
+    assert.doesNotMatch(text, /ChatGPT|Grok|Claude|Gemini/, lane);
+    assert.match(text, new RegExp(`你是${DESK_WORDS.zh.roles[lane]}。`));
+    assert.match(text, new RegExp(`由${DESK_WORDS.zh.roles[lane]}撰写。`));
+  }
+  // What a role-named summary says is read back as the lane, and the platform names are still read.
+  const summary = "截至 2026-11-16 07:00 ET，由舆情分析师撰写。阶段：长期。下次检查：2026-11-17。提醒：深度研究员：NVDA - 复核出口管制；新闻编辑：事件: 美国 CPI - 确认时间。";
+  const parsed = parseDeskSummary(summary);
+  assert.equal(parsed.by, "grok");
+  assert.deepEqual(parsed.flags, [{ to: "claude", text: "NVDA - 复核出口管制" }, { to: "gemini", text: "事件: 美国 CPI - 确认时间" }]);
+  assert.equal(parseDeskSummary("截至 2026-11-16 07:00 ET，由 宏观策略师 撰写。阶段：活跃。下次检查：无。").by, "chatgpt");
+  assert.equal(parseDeskSummary("截至 2026-11-16 07:00 ET，由 ChatGPT 撰写。阶段：活跃。下次检查：无。").by, "chatgpt");
+});
+
 test("Chinese desk and templates: fields, switches and the queue flow into the prompt", () => {
   assert.match(render("desk-chatgpt", { runMode: "dry" }), /- 试运行：每一步都照做，但不要调用 upsert_market_topic/);
   // The hub anchor defaults to a Chinese title; the user's own title is used in all four prompts.
-  assert.equal(defaultTemplateValues(getTemplate("desk-chatgpt", "zh")).hubAnchor, "美股市场风险状态");
+  assert.equal(defaultTemplateValues(getTemplate("desk-chatgpt", "zh")).hubAnchor, "美股大势研判");
   assert.equal(defaultTemplateValues(getTemplate("desk-chatgpt", "en")).hubAnchor, "US market risk regime");
-  for (const lane of Object.keys(DESK_PLATFORMS)) assert.match(render(`desk-${lane}`, { hubAnchor: "我的大盘判断" }), /锚点 "我的大盘判断"（列表里已有旧标题 "US market risk regime" 时沿用旧标题）/);
-  assert.match(render("desk-chatgpt", { hubAnchor: "US market risk regime" }), /锚点 "US market risk regime"。/);
-  assert.match(render("desk-chatgpt", { session: "close", market: "asia" }), /CHATGPT 每日研究台 - 全局判断 - 亚太，收盘后\n[^]*日经 225[^]*对亚太股市的净压力/);
-  assert.match(render("desk-claude", { tickers: "tsla, nvda, aapl", deepDives: 3, horizon: "90 days", drivers: 0 }), /深度研究 - TSLA、NVDA、AAPL\n[^]*认真研究 3 个对象[^]*未来 90 天/);
+  for (const lane of Object.keys(DESK_PLATFORMS)) assert.match(render(`desk-${lane}`, { hubAnchor: "我的大盘判断" }), /主话题 "我的大盘判断"（列表里如果已有旧标题 "US market risk regime"，就沿用旧标题）/);
+  assert.match(render("desk-chatgpt", { hubAnchor: "US market risk regime" }), /主话题 "US market risk regime"。/);
+  assert.match(render("desk-chatgpt", { session: "close", market: "asia" }), /宏观策略师每日任务：宏观大势（亚太，收盘后）\n[^]*日经 225[^]*对亚太股市的整体利多和利空/);
+  assert.match(render("desk-claude", { tickers: "tsla, nvda, aapl", deepDives: 3, horizon: "90 days", drivers: 0 }), /深度研究（TSLA、NVDA、AAPL）\n[^]*集中研究 3 个课题[^]*未来 90 天/);
   assert.doesNotMatch(render("desk-claude", { drivers: 0 }), /- 驱动因素：/);
-  assert.doesNotMatch(render("desk-gemini", { factChecks: 0 }), /事实核查：取其他线/);
+  assert.doesNotMatch(render("desk-gemini", { factChecks: 0 }), /事实核查：/);
   assert.match(render("desk-grok", { connector: "My Hub" }), /通过 "My Hub" 连接器/);
 
   // Queue: only when asked for, and always for the runner.
@@ -181,7 +196,7 @@ test("Chinese desk and templates: fields, switches and the queue flow into the p
 
   // Task mode: the instruction plus the short rules, without the scheduled-run framing.
   const task = render("earnings-tracker", { tickers: "msft", lookahead: 10 }, { mode: "task" });
-  assert.match(task, /^财报跟踪 - MSFT\n/);
+  assert.match(task, /^财报跟踪：MSFT\n/);
   assert.match(task, /未来 10 天内没有财报/);
   assert.match(task, /话题规则（upsert_market_topic，每次传全部字段）/);
   assert.doesNotMatch(task, /无人值守|运行报告/);

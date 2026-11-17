@@ -27,17 +27,20 @@ export const DESK_WORDS = {
   },
   zh: {
     // Half-width colon on purpose: it is what the prompts ask for. A full-width one is folded when titles are compared.
-    prefixes: { social: "社交:", news: "新闻:", event: "事件:", thesis: "论点:", research: "研究:" },
-    stages: { standing: "常驻", new: "新增", developing: "发展中", active: "活跃", fading: "消退", resolved: "已结束" },
-    by: (platform) => `由 ${platform} 撰写`,
+    prefixes: { social: "社交:", news: "新闻:", event: "事件:", thesis: "专题:", research: "研究:" },
+    stages: { standing: "长期", new: "新增", developing: "发酵中", active: "活跃", fading: "降温", resolved: "已结束" },
+    // The Chinese prompts call each lane by its role instead of by the platform it runs on, so a lane's prompt can be
+    // pasted into any platform. Summaries then say "由宏观策略师撰写"; the parser reads a role or a platform name.
+    roles: { chatgpt: "宏观策略师", grok: "舆情分析师", claude: "深度研究员", gemini: "新闻编辑" },
+    by: (name) => `由${name}撰写`,
     stage: "阶段",
     nextCheck: "下次检查",
     none: "无",
     flags: "提醒",
     anchors: {
-      chatgpt: "美股市场风险状态",
+      chatgpt: "美股大势研判",
       grok: "社交: X 市场情绪",
-      gemini: "新闻: 今日市场驱动",
+      gemini: "新闻: 今日要闻",
       claude: "研究: 深度研究日志"
     }
   }
@@ -81,8 +84,10 @@ export function deskAnchorTitles(values = {}, language = "en") {
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const either = (pick) => DESK_LANGUAGES.map((language) => escapeRegExp(pick(DESK_WORDS[language]))).join("|");
-const PLATFORM_NAMES = Object.values(DESK_PLATFORMS).join("|");
-const LANE_BY_NAME = Object.fromEntries(Object.entries(DESK_PLATFORMS).map(([id, name]) => [name.toLowerCase(), id]));
+// A lane is named by its platform or, in Chinese summaries, by its role.
+const LANE_NAMES = [...Object.entries(DESK_PLATFORMS), ...Object.entries(DESK_WORDS.zh.roles)];
+const PLATFORM_NAMES = LANE_NAMES.map(([, name]) => escapeRegExp(name)).join("|");
+const LANE_BY_NAME = Object.fromEntries(LANE_NAMES.map(([id, name]) => [name.toLowerCase(), id]));
 const STAGE_BY_WORD = Object.fromEntries(
   DESK_LANGUAGES.flatMap((language) => Object.entries(DESK_WORDS[language].stages).map(([stage, word]) => [word, stage]))
 );
@@ -114,7 +119,7 @@ function parseFlags(text) {
 
 // The header and the flags of one summary, in either language:
 //   "As of 2026-11-14 08:30 ET by ChatGPT. Stage: active. Next check: 2026-11-17."
-//   "截至 2026-11-14 08:30 ET，由 ChatGPT 撰写。阶段：活跃。下次检查：2026-11-17。"
+//   "截至 2026-11-14 08:30 ET，由宏观策略师撰写。阶段：活跃。下次检查：2026-11-17。"
 // Fields the summary does not carry come back null; stage and next check are returned in their English form.
 export function parseDeskSummary(summary) {
   // NFKC folds full-width colons, semicolons and letters, so one set of patterns reads both ways of typing.

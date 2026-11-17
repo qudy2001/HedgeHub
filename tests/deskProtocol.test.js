@@ -9,7 +9,7 @@ test("topic titles compare with width variants, spacing and case folded", () => 
   assert.equal(topicTitleKey("ＴＳＬＡ：　Robotaxi  进展 "), topicTitleKey("TSLA: robotaxi 进展"));
   assert.equal(topicTitleKey("社交:X市场情绪"), topicTitleKey("社交: X 市场情绪"));
   assert.equal(topicTitleKey("US market risk regime"), "usmarketriskregime");
-  assert.notEqual(topicTitleKey("美股市场风险状态"), topicTitleKey("美股市场风险状况"));
+  assert.notEqual(topicTitleKey("美股大势研判"), topicTitleKey("美股大势判断"));
   assert.equal(topicTitleKey(null), "");
 });
 
@@ -19,13 +19,13 @@ test("lanes: the Chinese prefixes own the same lanes as the English ones, howeve
     ["社交：英伟达逼空讨论", "ticker", "grok"],
     ["新闻: 美联储官员讲话", "general", "gemini"],
     ["事件：美国 CPI", "general", "gemini"],
-    ["论点: AI 资本开支周期", "ticker", "claude"],
+    ["专题: AI 资本开支周期", "ticker", "claude"],
     ["研究：深度研究日志", "general", "claude"],
     ["Social: X market mood", "social", "grok"],
     ["TSLA: 整体展望", "ticker", "claude"],
     ["散户情绪升温", "social", "grok"],
     ["美元与外汇", "forex", "chatgpt"],
-    ["美股市场风险状态", "general", "chatgpt"]
+    ["美股大势研判", "general", "chatgpt"]
   ];
   for (const [title, category, lane] of cases) assert.equal(deskLane({ title, category }), lane, title);
   // Every vocabulary has the same prefixes and stages, so neither prompt language can name something the other lacks.
@@ -45,7 +45,7 @@ test("the Chinese summary header reads back as platform, stage and next check", 
   }
   // Half-width punctuation and a model that mixes the two vocabularies are read the same way.
   assert.deepEqual(parseDeskSummary("截至 2026-11-14 08:30 ET, 由 Claude 撰写. 阶段: active. Next check: 无.").stage, "active");
-  assert.deepEqual(parseDeskSummary("As of 2026-11-14 08:30 ET by Gemini. Stage: 发展中. 下次检查：2026-11-16。"), {
+  assert.deepEqual(parseDeskSummary("As of 2026-11-14 08:30 ET by Gemini. Stage: 发酵中. 下次检查：2026-11-16。"), {
     by: "gemini",
     stage: "developing",
     nextCheck: "2026-11-16",
@@ -63,11 +63,11 @@ test("the Chinese summary header reads back as platform, stage and next check", 
 
 test("Chinese flags are split per lane", () => {
   const { flags } = parseDeskSummary(
-    "截至 2026-11-14 08:30 ET，由 ChatGPT 撰写。阶段：常驻。下次检查：2026-11-17。现状：偏空。" +
-      "提醒：Grok：社交: X 市场情绪 - 恢复锚点；Claude：TSLA 与 NVDA - 复核出口管制消息；另核对指引。"
+    "截至 2026-11-14 08:30 ET，由 ChatGPT 撰写。阶段：长期。下次检查：2026-11-17。现状：偏空。" +
+      "提醒：Grok：社交: X 市场情绪 - 恢复主话题；Claude：TSLA 与 NVDA - 复核出口管制消息；另核对指引。"
   );
   assert.deepEqual(flags, [
-    { to: "grok", text: "社交: X 市场情绪 - 恢复锚点" },
+    { to: "grok", text: "社交: X 市场情绪 - 恢复主话题" },
     { to: "claude", text: "TSLA 与 NVDA - 复核出口管制消息; 另核对指引" }
   ]);
 });
@@ -76,9 +76,9 @@ test("anchors: each language has its own titles, and the status panel accepts ei
   assert.equal(deskAnchors({}, "zh").grok, "社交: X 市场情绪");
   assert.equal(deskAnchors({}, "en").grok, "Social: X market mood");
   assert.equal(deskAnchors({ hubAnchor: "我的大盘判断" }, "zh").chatgpt, "我的大盘判断");
-  assert.deepEqual(deskAnchorTitles({ hubAnchor: "我的大盘判断" }).chatgpt, ["我的大盘判断", "US market risk regime", "美股市场风险状态"]);
-  assert.deepEqual(deskAnchorTitles({}, "zh").gemini, ["新闻: 今日市场驱动", "News: market drivers today"]);
-  assert.deepEqual(deskAnchorTitles({}, "en").gemini, ["News: market drivers today", "新闻: 今日市场驱动"]);
+  assert.deepEqual(deskAnchorTitles({ hubAnchor: "我的大盘判断" }).chatgpt, ["我的大盘判断", "US market risk regime", "美股大势研判"]);
+  assert.deepEqual(deskAnchorTitles({}, "zh").gemini, ["新闻: 今日要闻", "News: market drivers today"]);
+  assert.deepEqual(deskAnchorTitles({}, "en").gemini, ["News: market drivers today", "新闻: 今日要闻"]);
   // Every anchor sits in the lane that writes it.
   for (const language of ["en", "zh"])
     for (const [lane, title] of Object.entries(deskAnchors({}, language)))
@@ -89,8 +89,8 @@ test("anchors: each language has its own titles, and the status panel accepts ei
   const status = deskStatus(
     [
       // A desk that switched to Chinese keeps its old English hub anchor and writes its summary in Chinese.
-      topic(1, "US market risk regime", "general", "截至 2026-11-16 07:30 ET，由 ChatGPT 撰写。阶段：常驻。下次检查：2026-11-17。提醒：Grok：英伟达 - 核对散户情绪。"),
-      topic(2, "社交：X 市场情绪", "social", "截至 2026-11-16 07:00 ET，由 Grok 撰写。阶段：常驻。下次检查：2026-11-16。提醒：无。"),
+      topic(1, "US market risk regime", "general", "截至 2026-11-16 07:30 ET，由 ChatGPT 撰写。阶段：长期。下次检查：2026-11-17。提醒：Grok：英伟达 - 核对散户情绪。"),
+      topic(2, "社交：X 市场情绪", "social", "截至 2026-11-16 07:00 ET，由 Grok 撰写。阶段：长期。下次检查：2026-11-16。提醒：无。"),
       topic(3, "事件: 美国 CPI", "general", "截至 2026-11-16 06:30 ET，由 Gemini 撰写。阶段：新增。下次检查：2026-11-18。")
     ],
     { now }
