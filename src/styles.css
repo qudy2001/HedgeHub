@@ -8039,3 +8039,41 @@ a {
 .strategy-settings__poly-status--info {
   border-left-color: #3c78c8;
 }
+
+/* Phones: keep the top toolbar on one line (the pills used to wrap to two lines each), and keep content clear of
+   the notch and home indicator when the app runs full screen from the home screen. */
+@media (max-width: 600px) {
+  .app-toolbar {
+    gap: 6px;
+    margin-bottom: 10px;
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .app-userbar {
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .app-toolbar .theme-toggle,
+  .app-toolbar .sidebar-toggle,
+  .app-userbar button {
+    min-height: 40px;
+    padding: 0 11px;
+    font-size: 0.82rem;
+    white-space: nowrap;
+  }
+
+  .app-userbar__label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.8rem;
+  }
+}
+
+/* Full-screen (home screen) use in landscape: keep content out from under the notch. Zero everywhere else. */
+.app-shell {
+  margin-left: env(safe-area-inset-left);
+  margin-right: env(safe-area-inset-right);
+}

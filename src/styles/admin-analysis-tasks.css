@@ -72,3 +72,55 @@
     justify-content: flex-start;
   }
 }
+
+/* Phones: this page nests three cards, which left 291px of a 375px screen for text. Trim the nesting, stack each
+   definition's buttons under its prompt, and let the prompt header wrap. */
+@media (max-width: 600px) {
+  .app-shell:has(.workspace--admin-analysis-tasks) {
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .workspace--admin-analysis-tasks {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .workspace--admin-analysis-tasks .admin-users__panel {
+    padding: 14px 12px;
+  }
+
+  .workspace--admin-analysis-tasks .admin-users__row:not(.admin-tasks__run) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace--admin-analysis-tasks .admin-users__row:not(.admin-tasks__run) .admin-users__badges {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .workspace--admin-analysis-tasks .ai-templates__prompt-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .workspace--admin-analysis-tasks .ai-templates__prompt-head > :first-child {
+    flex-basis: 100%;
+  }
+
+  .workspace--admin-analysis-tasks .ai-templates__prompt-head .ai-templates__language {
+    margin-left: 0;
+    margin-right: auto;
+  }
+}
+
+/* iOS zooms the page when a focused field's text is under 16px. */
+@media (pointer: coarse) {
+  .workspace--admin-analysis-tasks input:not([type="checkbox"]):not([type="radio"]),
+  .workspace--admin-analysis-tasks select,
+  .workspace--admin-analysis-tasks textarea {
+    font-size: 16px;
+  }
+}

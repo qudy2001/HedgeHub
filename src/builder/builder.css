@@ -2032,12 +2032,6 @@ body.studio-body:before {
   }
 }
 @media (max-width: 800px) {
-  .studio-shell {
-    display: block;
-  }
-  .studio-sidebar {
-    display: none;
-  }
   .studio-nav {
     height: 50px;
     gap: 6px;
@@ -2089,7 +2083,7 @@ body.studio-body:before {
   }
   .panel-hedges .hedge-choices {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
   .panel-hedges .position {
     display: flex;
@@ -2981,4 +2975,235 @@ body.studio-body:before {
 }
 .company-summary li.bearish strong {
   color: var(--s-red);
+}
+
+/* ---- Phones and tablets ---------------------------------------------------------------------------------------
+   Up to 1023px (phones, iPad portrait) the sidebar becomes a drawer opened from the header, so the panels get the
+   full width. From 1024px (iPad landscape, desktop) it stays docked. Safe-area insets cover the notch and the home
+   indicator when the app runs from the home screen. */
+.studio .nav-toggle,
+.sidebar-links,
+.sidebar-backdrop {
+  display: none;
+}
+.studio-nav {
+  box-sizing: content-box;
+  padding-top: env(safe-area-inset-top);
+  padding-left: max(24px, env(safe-area-inset-left));
+  padding-right: max(24px, env(safe-area-inset-right));
+}
+.studio-sidebar {
+  top: calc(58px + env(safe-area-inset-top));
+  height: calc(100vh - 58px - env(safe-area-inset-top));
+  height: calc(100dvh - 58px - env(safe-area-inset-top));
+}
+.studio-main {
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+}
+.chip-tooltip {
+  max-width: calc(100vw - 48px);
+}
+@media (max-width: 1023px) {
+  body.studio-nav-open {
+    overflow: hidden;
+  }
+  .studio .studio-shell {
+    display: block;
+  }
+  .studio .sidebar-resizer {
+    display: none;
+  }
+  .studio .nav-toggle {
+    display: inline-flex;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    justify-content: center;
+    margin-left: -6px;
+  }
+  .studio-nav {
+    gap: 10px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+  }
+  .studio .studio-brand {
+    min-width: 0;
+  }
+  .studio .studio-main {
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+  }
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 58;
+    background: #0b161a80;
+  }
+  .studio .studio-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 60;
+    width: min(310px, 86vw);
+    height: 100vh;
+    height: 100dvh;
+    padding: calc(18px + env(safe-area-inset-top)) 12px calc(18px + env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-left));
+    background: var(--s-panel);
+    box-shadow: 0 0 40px #0b161a40;
+    transform: translateX(-105%);
+    visibility: hidden;
+    transition:
+      transform 0.2s ease,
+      visibility 0.2s;
+    overscroll-behavior: contain;
+  }
+  .studio .studio-sidebar.open {
+    transform: none;
+    visibility: visible;
+  }
+  .studio .studio-sidebar > button,
+  .studio .sidebar-bottom button {
+    font-size: 14px;
+    padding: 11px 12px;
+    gap: 12px;
+    min-height: 44px;
+  }
+  .studio .studio-sidebar .monitored-stocks-panel h3,
+  .studio .studio-sidebar .monitored-stocks-panel .symbol,
+  .studio .studio-sidebar .monitored-stocks-panel .price {
+    font-size: 14px;
+  }
+  .studio .studio-sidebar .monitored-stocks-panel .change,
+  .studio .studio-sidebar .monitored-stocks-panel .slot-info,
+  .studio .studio-sidebar .monitored-stocks-panel .add-stock-btn {
+    font-size: 12px;
+  }
+  .studio .studio-sidebar .monitored-stocks-panel .stock-item {
+    min-height: 44px;
+  }
+  .studio .studio-sidebar > .eyebrow {
+    margin-top: 10px;
+    margin-bottom: 6px;
+  }
+  .sidebar-links {
+    display: grid;
+    gap: 2px;
+    margin-top: 14px;
+    border-top: 1px solid var(--s-line);
+    padding-top: 10px;
+  }
+  .sidebar-links a {
+    padding: 11px 12px;
+    font-size: 14px;
+  }
+  .studio .sidebar-bottom p {
+    display: none;
+  }
+}
+@media (max-width: 800px) {
+  .studio .studio-nav > a:not(.studio-brand),
+  .studio .mode-label {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio .studio-sidebar {
+    transition: none;
+  }
+}
+/* Touch screens: fingers need bigger targets than the dense desktop controls, and iOS zooms the page when a focused
+   field's text is smaller than 16px. */
+@media (pointer: coarse) {
+  .studio input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .studio select,
+  .studio textarea,
+  .studio-dialog input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .studio-dialog select,
+  .studio-dialog textarea {
+    font-size: 16px;
+  }
+  .studio-toolbar button,
+  .studio .panel-head button,
+  .studio-dialog button {
+    min-height: 36px;
+  }
+  .studio .collapse,
+  .studio .grip {
+    min-width: 32px;
+  }
+}
+/* No hover on touch screens: keep the per-stock remove button visible instead of revealing it on hover. */
+@media (hover: none) {
+  .studio .monitored-stocks-panel .remove-btn {
+    opacity: 1;
+    visibility: visible;
+  }
+}
+@media (max-width: 600px) {
+  .studio .track-actions {
+    flex-wrap: wrap;
+  }
+  .studio .track-actions > span:not(.spacer) {
+    white-space: nowrap;
+  }
+}
+@media (max-width: 600px) {
+  /* Scan results filters: an even grid instead of a ragged wrap (fields are 16px on touch screens). */
+  .studio .results-toolbar {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 6px;
+    align-items: center;
+  }
+  .studio .results-toolbar > strong {
+    grid-column: 1 / -1;
+  }
+  .studio .results-toolbar > select {
+    grid-column: span 3;
+    width: 100%;
+    min-width: 0;
+  }
+  .studio .results-toolbar > * {
+    grid-column: span 2;
+    min-width: 0;
+  }
+  .studio .results-toolbar > input.short {
+    width: 100%;
+    font-size: 16px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .studio .results-toolbar > input.short::placeholder {
+    font-size: 12px;
+  }
+}
+@media (max-width: 1023px) {
+  /* Portrait tablets: the payoff heatmap needs the full width to stay readable; hedge choices go underneath. */
+  .studio .panel-payoff,
+  .studio .panel-hedges {
+    grid-column: 1 / -1;
+  }
+  .studio .panel-hedges .hedge-choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+}
+@media (max-width: 600px) {
+  /* "Filtered to" bar: with the live View picker it no longer fits on one line. */
+  .studio .filter-breadcrumb {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .studio .filter-breadcrumb .breadcrumb-actions {
+    flex: 1 1 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .studio .filter-breadcrumb .breadcrumb-actions select {
+    flex: 1 1 140px;
+    min-width: 0;
+  }
 }

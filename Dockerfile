@@ -10,6 +10,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY index.html ./
+COPY public ./public
 COPY vite.config.js ./
 COPY src ./src
 COPY server ./server

@@ -230,6 +230,7 @@ function Icon({ name = "chart", size = 18 }) {
     close: "M6 6l12 12M6 18L18 6",
     arrow: "M5 12h14M14 6l6 6-6 6",
     plus: "M12 5v14M5 12h14",
+    menu: "M4 6h16M4 12h16M4 18h16",
     check: "M5 12l5 5L20 6",
   };
   return (
@@ -829,6 +830,22 @@ function Workspace({ demo, user, logout, presentation }) {
     [expanded, setExpanded] = useState(false),
     [resultsView, setResultsView] = useState("table");
   const [view, setView] = useState(routeView);
+  // Phones and portrait tablets: the sidebar is a drawer opened from the header (see the 1023px rules in builder.css).
+  const [navOpen, setNavOpen] = useState(false);
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e) => e.key === "Escape" && setNavOpen(false);
+    const wide = window.matchMedia("(min-width: 1024px)");
+    const onWide = () => wide.matches && setNavOpen(false);
+    document.body.classList.add("studio-nav-open");
+    window.addEventListener("keydown", onKey);
+    wide.addEventListener("change", onWide);
+    return () => {
+      document.body.classList.remove("studio-nav-open");
+      window.removeEventListener("keydown", onKey);
+      wide.removeEventListener("change", onWide);
+    };
+  }, [navOpen]);
   const [agentFilter, setAgentFilter] = useState("All"),
     [showResolved, setShowResolved] = useState(true),
     [trackerFolders, setTrackerFolders] = useState(readTrackerFolders),
@@ -1182,6 +1199,7 @@ function Workspace({ demo, user, logout, presentation }) {
     const p = next === "workspace" ? basePath : `${basePath}/${next}`;
     window.history.pushState({}, "", p + (demo ? "?demo=1" : ""));
     setView(next);
+    setNavOpen(false);
   }
   useEffect(() => {
     const pop = () => setView(routeView());
@@ -3350,6 +3368,15 @@ function Workspace({ demo, user, logout, presentation }) {
       ) : (
         <>
           <header className="studio-nav">
+            <button
+              className="nav-toggle"
+              aria-label={navOpen ? "Close menu" : "Open menu"}
+              aria-expanded={navOpen}
+              aria-controls="studio-sidebar"
+              onClick={() => setNavOpen((open) => !open)}
+            >
+              <Icon name={navOpen ? "close" : "menu"} size={20} />
+            </button>
             <a
               className="studio-brand"
               href={demo ? "/builder?demo=1" : "/builder"}
@@ -3409,7 +3436,8 @@ function Workspace({ demo, user, logout, presentation }) {
                 } catch {}
               }}
             />
-            <aside className="studio-sidebar">
+            {navOpen ? <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} /> : null}
+            <aside id="studio-sidebar" className={`studio-sidebar ${navOpen ? "open" : ""}`}>
               <MonitoredStocksPanel
                 demo={demo}
                 selectedStock={selectedMonitoredStock}
@@ -3490,6 +3518,21 @@ function Workspace({ demo, user, logout, presentation }) {
                   <br />
                   Add metrics, rearrange panels, save your workspace.
                 </p>
+                <nav className="sidebar-links">
+                  <a href="/">Classic UI ↗</a>
+                  {!demo && user?.role === "admin" ? <a href="/admin/users">Admin ↗</a> : null}
+                  {!demo && user?.role === "admin" ? <a href="/admin/analysis-tasks">Analysis tasks ↗</a> : null}
+                  <a
+                    href={demo ? "/builder" : "#sign-out"}
+                    onClick={(e) => {
+                      if (demo) return;
+                      e.preventDefault();
+                      logout();
+                    }}
+                  >
+                    {demo ? "Use live data" : `Sign out (${user.username})`}
+                  </a>
+                </nav>
               </div>
             </aside>
             <main className="studio-main">
