@@ -1135,7 +1135,17 @@ app.get("/api/health", (_request, response) => {
 const researchStore = createResearchStore();
 const researchService = createResearchService(researchStore);
 registerResearchRoutes(app, researchStore, researchService);
-const builderService = registerBuilderRoutes(app, { researchService, captureChainOnScan: true });
+const builderService = registerBuilderRoutes(app, {
+  researchService,
+  captureChainOnScan: true,
+  // Scan each user's monitored stocks once an hour, one after another (BUILDER_AUTO_SCAN=off turns it off).
+  // Only the web process does it: manual scans run there too, so both share one queue (the scanner role loads
+  // these routes as well and must not start a second round).
+  autoScan:
+    process.env.BUILDER_AUTO_SCAN === "off" || !runtimeConfig.enableHttp
+      ? null
+      : { hedgeScan: (body) => withRateLimitWaiting(() => runHedgeScan(body)) },
+});
 const researchTimer = setInterval(() => { researchService.tick().catch(() => {}); }, 15 * 60_000);
 researchTimer.unref();
 

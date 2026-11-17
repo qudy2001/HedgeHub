@@ -232,6 +232,7 @@ function Icon({ name = "chart", size = 18 }) {
     plus: "M12 5v14M5 12h14",
     menu: "M4 6h16M4 12h16M4 18h16",
     check: "M5 12l5 5L20 6",
+    home: "M3 11l9-8 9 8M5 9.5V21h5v-6h4v6h5V9.5",
   };
   return (
     <svg
@@ -683,6 +684,17 @@ function snapshotLabel(s) {
   });
   return `${when} · ${s.rows} result${s.rows === 1 ? "" : "s"}${s.parts.includes("distribution") ? "" : " · no option chain"}`;
 }
+const clock = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+// One line for the toolbar: what the hourly auto-scan is doing, and which scan of the selected stock is on screen.
+function autoScanStatus(a, symbol, shown) {
+  const parts = [];
+  if (!a.configured) parts.push("Auto-scan starts after your first scan");
+  else if (a.current) parts.push(`Auto-scan: scanning ${a.current.symbol}${a.queue.length ? ` · ${a.queue.length} waiting` : ""}`);
+  else parts.push(`Auto-scan hourly${a.nextRoundAt ? ` · next ${clock(a.nextRoundAt)}` : ""}`);
+  if (symbol && shown?.symbol === symbol)
+    parts.push(`${symbol} as scanned ${clock(shown.capturedAt)}${shown.source === "auto" ? " (auto)" : ""}`);
+  return parts.join(" · ");
+}
 function daysAgo(iso) {
   const days = Math.round((Date.now() - Date.parse(iso)) / 86400000);
   return days <= 0 ? "today" : days === 1 ? "1 day ago" : `${days} days ago`;
@@ -869,6 +881,22 @@ function Workspace({ demo, user, logout, presentation }) {
   });
   const [liveHedgeScan, setHedgeScan] = useState({ busy: false, error: "", results: {}, at: null, waitingUntil: null });
   const [selectedMonitoredStock, setSelectedMonitoredStock] = useState(null);
+  // The server scans the monitored stocks hourly, one at a time; this is that queue as the server last reported it.
+  const [autoScan, setAutoScan] = useState(null);
+  useEffect(() => {
+    if (demo) return;
+    let live = true;
+    const load = () =>
+      api("/builder/auto-scan")
+        .then((s) => live && setAutoScan(s))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 20000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [demo]);
   // Historical snapshots: a saved scan of the selected stock replaces the live rows, datasets and panel data
   // below. While `history` is set, nothing here requests live market data.
   const [snapshotList, setSnapshotList] = useState([]),
@@ -998,6 +1026,8 @@ function Workspace({ demo, user, logout, presentation }) {
     takeProfit: 25,
   });
   const poll = useRef(null),
+    // When the scan data held in the live state for each symbol was captured (ms), so a newer saved scan replaces it.
+    loadedScanAt = useRef({}),
     selectionRequest = useRef(0),
     symbolPolls = useRef({});
   useEffect(
@@ -1158,7 +1188,32 @@ function Workspace({ demo, user, logout, presentation }) {
     return () => {
       live = false;
     };
-  }, [demo, selectedMonitoredStock, liveAsOf]);
+  }, [demo, selectedMonitoredStock, liveAsOf, autoScan?.finished?.[selectedMonitoredStock]?.at]);
+  // Selecting a stock shows its most recent scan (hourly auto-scan or manual) when that is newer than what is loaded.
+  const [shownScan, setShownScan] = useState(null);
+  useEffect(() => {
+    const top = snapshotList[0];
+    if (demo || history || !top || top.symbol !== selectedMonitoredStock) return;
+    const at = Date.parse(top.capturedAt);
+    if (at <= (loadedScanAt.current[top.symbol] ?? 0)) return;
+    let live = true;
+    api(`/builder/snapshots/${top.id}`)
+      .then((s) => {
+        if (!live || !s.scan?.dataset) return;
+        loadedScanAt.current[s.symbol] = at;
+        setRows((prev) => [...prev.filter((r) => r.symbol !== s.symbol), ...(s.scan.rows ?? [])]);
+        setDatasets((prev) => ({ ...prev, [s.symbol]: s.scan.dataset }));
+        if (s.hedges?.results)
+          setHedgeScan((h) =>
+            h.busy ? h : { ...h, results: { ...h.results, ...s.hedges.results }, at: s.hedges.generatedAt ?? h.at },
+          );
+        setShownScan({ symbol: s.symbol, capturedAt: s.capturedAt, source: top.source ?? "manual" });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [demo, history, snapshotList, selectedMonitoredStock]);
   async function openSnapshot(id) {
     setError("");
     if (!id) {
@@ -1380,10 +1435,10 @@ function Workspace({ demo, user, logout, presentation }) {
     if (kind === "scan" && !demo && hedgeScan.busy) return; // a scan (possibly waiting out a rate limit) is already running
     const runStrategy = only ? { ...strategy, symbols: [only] } : strategy;
     const templates = templatesForHedgeChoices(enabledScans);
+    // Every ticked hedge choice scans. Vanilla / Cash-Covered Put fill the options table below;
+    // the others (Polymarket Hedge, Probability Mismatch, ...) return their own results.
+    const otherChoices = enabledScans.filter((id) => !HEDGE_TEMPLATES[id]);
     if (kind === "scan" && !demo) {
-      // Every ticked hedge choice scans. Vanilla / Cash-Covered Put fill the options table below;
-      // the others (Polymarket Hedge, Probability Mismatch, ...) return their own results.
-      const otherChoices = enabledScans.filter((id) => !HEDGE_TEMPLATES[id]);
       if (!templates.length && !otherChoices.length) {
         setError("");
         setNotice("Tick at least one hedge choice to scan.");
@@ -1432,9 +1487,17 @@ function Workspace({ demo, user, logout, presentation }) {
         includeCatalysts,
         // With only non-option choices ticked, still load the stock data so the analytics panels work.
         templates: templates.length ? templates : ["stock"],
+        // The hourly auto-scan of the monitored stocks reuses these choices.
+        hedgeChoices: otherChoices,
         settings: testSettings,
       });
       setJob(j);
+      if (j.queuedBehind)
+        setNotice(
+          `${runStrategy.symbols.join(", ")} is queued: it scans as soon as ${j.queuedBehind} finishes${
+            j.queuedAhead ? ` (${j.queuedAhead} request${j.queuedAhead === 1 ? "" : "s"} ahead)` : ""
+          }.`,
+        );
       const tick = async () => {
         try {
           const next = await api(`/builder/jobs/${j.id}`);
@@ -1446,6 +1509,8 @@ function Workspace({ demo, user, logout, presentation }) {
           setBusy(false);
           if (next.status === "completed") {
             if (kind === "scan") {
+              for (const sym of Object.keys(next.result.datasets ?? {})) loadedScanAt.current[sym] = Date.now();
+              if (only) setShownScan({ symbol: only, capturedAt: new Date().toISOString(), source: "manual" });
               setRows((prev) => mergeRows(prev, next.result.rows));
               setPage(0);
               setDatasets((prev) =>
@@ -2179,7 +2244,7 @@ function Workspace({ demo, user, logout, presentation }) {
                             <b className={l.quantity > 0 ? "positive" : "negative"}>
                               {l.quantity > 0 ? "Buy" : "Sell"} {Math.abs(l.quantity)}×
                             </b>{" "}
-                            {r.symbol} {r.expiry} {num(l.strike, 2)}
+                            {r.symbol} {l.expiry ?? r.expiry} {num(l.strike, 2)}
                             {l.type === "put" ? "P" : "C"} @{" "}
                           <span className={l.quantity > 0 ? "leg-price ask" : "leg-price bid"}>{money(l.price, 2)}</span>
                           </span>
@@ -2200,7 +2265,7 @@ function Workspace({ demo, user, logout, presentation }) {
                           <b className={l.quantity > 0 ? "positive" : "negative"}>
                             {l.quantity > 0 ? "Buy" : "Sell"} {Math.abs(l.quantity)}×
                           </b>{" "}
-                          {r.symbol} {r.expiry} {num(l.strike, 2)}
+                          {r.symbol} {l.expiry ?? r.expiry} {num(l.strike, 2)}
                           {l.type === "put" ? "P" : "C"} @{" "}
                           <span className={l.quantity > 0 ? "leg-price ask" : "leg-price bid"}>{money(l.price, 2)}</span>
                         </span>
@@ -2538,7 +2603,7 @@ function Workspace({ demo, user, logout, presentation }) {
                       >
                         {l.quantity > 0 ? "↗ Buy" : "↘ Sell"}
                       </span>{" "}
-                      {Math.abs(l.quantity)} × {row.symbol} {row.expiry}{" "}
+                      {Math.abs(l.quantity)} × {row.symbol} {l.expiry ?? row.expiry}{" "}
                       {num(l.strike, 2)} {l.type} @ {money(l.price, 2)}
                       {l.contract && !l.contract.startsWith("MODEL:") && (
                         <small className="subtle"> · {l.contract}</small>
@@ -3116,6 +3181,8 @@ function Workspace({ demo, user, logout, presentation }) {
                     </button>
                   </div>
                 </header>
+                <div className="stock-analysis-body">
+                <div className="stock-analysis-research">
                 {v ? (
                   <>
                     <div className="target">
@@ -3132,6 +3199,7 @@ function Workspace({ demo, user, logout, presentation }) {
                     this stock.
                   </p>
                 )}
+                </div>
                 {evidence.length > 0 && (
                   <div className="stock-analysis-evidence">
                     <h3>Supporting evidence</h3>
@@ -3161,6 +3229,7 @@ function Workspace({ demo, user, logout, presentation }) {
                     </div>
                   </div>
                 )}
+                </div>
               </section>
             );
           })}
@@ -3469,37 +3538,24 @@ function Workspace({ demo, user, logout, presentation }) {
                 Economy
               </button>
               <span className="eyebrow">YOUR WORKSPACE</span>
-              {PANELS.filter(([id]) => !layout.hidden.includes(id)).map(
-                ([id, title, icon]) => (
-                  <button
-                    key={id}
-                    onClick={() => {
-                      if (id === "tracking") {
-                        navigate("tracker");
-                        return;
-                      }
-                      if (id === "ai-stock-analysis") {
-                        navigate("stock-analysis");
-                        return;
-                      }
-                      navigate("workspace");
-                      setTimeout(
-                        () =>
-                          document
-                            .getElementById("studio-" + id)
-                            ?.scrollIntoView({
-                              behavior: "smooth",
-                              block: "center",
-                            }),
-                        30,
-                      );
-                    }}
-                  >
-                    <Icon name={icon} />
-                    {title}
-                  </button>
-                ),
-              )}
+              {/* Only items that switch page; panels on the workspace page are reached by scrolling. */}
+              {[
+                ["workspace", "Workspace", "home"],
+                ["tracker", "AI tracking", "target"],
+                ["stock-analysis", "AI Stock Analysis", "chip"],
+              ].map(([id, title, icon]) => (
+                <button
+                  key={id}
+                  className={view === id ? "active" : ""}
+                  onClick={() => {
+                    navigate(id);
+                    if (id === "workspace") window.scrollTo({ top: 0 });
+                  }}
+                >
+                  <Icon name={icon} />
+                  {title}
+                </button>
+              ))}
               <div className="sidebar-bottom">
                 <button onClick={() => setModal({ type: "layout" })}>
                   <Icon name="plus" />
@@ -3544,6 +3600,11 @@ function Workspace({ demo, user, logout, presentation }) {
                 >
                   {strategy.name} <span>⌄</span>
                 </button>
+                {autoScan?.enabled && (
+                  <span className="auto-scan-status" title="Monitored stocks are scanned once an hour, one after another, with the settings of your last manual scan. A scan you start while another stock is scanning runs right after it.">
+                    {autoScanStatus(autoScan, selectedMonitoredStock, shownScan)}
+                  </span>
+                )}
                 <span className="spacer" />
                 <button onClick={() => setModal({ type: "layout" })}>
                   <Icon name="settings" />
@@ -3581,7 +3642,7 @@ function Workspace({ demo, user, logout, presentation }) {
                     {!demo && (
                       <label
                         className="snapshot-picker"
-                        title="Each scan is saved (the latest per market day) and kept for 30 days."
+                        title="Each scan is saved (up to 5 per market day) and kept for 30 days."
                       >
                         View
                         <select
@@ -4447,7 +4508,9 @@ function ItemForm({ item, onSave, onRemove }) {
 // drive the payoff heatmap, position panel and risk boxes like any option row.
 function polymarketTableRow(r, scannedAt) {
   const asOf = scannedAt ?? new Date().toISOString();
-  const optionExpiry = r.optionExpiry ?? "";
+  // A calendar's legs expire on different days; the row is modeled at the earliest one.
+  const legExpiries = r.legs.map((l) => l.expiry).filter(Boolean).sort();
+  const optionExpiry = legExpiries[0] ?? r.optionExpiry ?? "";
   const iv = r.avgIv ?? 0.4;
   const row = {
     id: `pm:${r.id}`,
@@ -4470,6 +4533,7 @@ function polymarketTableRow(r, scannedAt) {
       quantity: l.action === "Buy" ? (l.quantity ?? 0) : -(l.quantity ?? 0),
       strike: l.strike,
       type: l.optionType,
+      expiry: l.expiry ?? optionExpiry,
       price: l.price,
       iv: l.iv ?? iv,
       contract: l.contract,

@@ -29,7 +29,8 @@ import {
   fetchEconomicCalendarWindow,
 } from "../providers/tradingViewCalendars.js";
 import { curatedCatalysts } from "../researchCatalysts.js";
-import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily, listMarketTopics, listMarketTopicHistory } from "../db.js";
+import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily, listMarketTopics, listMarketTopicHistory, listMonitoredStocks } from "../db.js";
+import { createScanQueue } from "./scanQueue.js";
 import { TOPIC_ITEM_KEY, refreshItemFromTopic } from "../../shared/marketTopics.js";
 const defaultData = async (symbol, s, { needsChain = true } = {}) => {
   const from = addDays(dateOnly(Date.now()), Math.max(1, s.dte - 21)),
@@ -195,6 +196,9 @@ export function registerBuilderRoutes(
     loadDistribution = createDistributionLoader(),
     // Fetch the full option chain as part of a single-stock scan, so its snapshot does not depend on the browser.
     captureChainOnScan = false,
+    // Hourly rotating scan of each user's monitored stocks: { hedgeScan?(body), intervalMs?, firstRoundMs?,
+    // monitored?(owner) }. Off unless given (tests and scripts never scan on their own).
+    autoScan = null,
   } = {},
 ) {
   const store = injectedStore ?? createBuilderStore();
@@ -274,7 +278,10 @@ export function registerBuilderRoutes(
       language: (owner) => preferences(owner).contentLanguage,
     }),
     active = new Map(),
-    cache = new Map();
+    cache = new Map(),
+    scanQueue = createScanQueue({
+      onError: (e, entry) => console.warn(`[builder] ${entry.source} scan of ${entry.symbol} failed: ${e.message}`),
+    });
   let running = 0;
   const route = (fn) => async (req, res) => {
     try {
@@ -475,6 +482,7 @@ export function registerBuilderRoutes(
         control.cancelled = true;
         control.worker?.terminate();
       }
+      scanQueue.remove((e) => e.jobId === j.id);
       res.json(
         ["running", "queued"].includes(j.status)
           ? store.job(req.user.id, { ...j, status: "cancelled" })
@@ -578,7 +586,7 @@ export function registerBuilderRoutes(
                 (v) => v.symbol === symbol && (!v.status || v.status === "completed"),
               ) ?? null,
           },
-          { spot: dataset.spot ?? null, strategy: strategy.name ?? null },
+          { spot: dataset.spot ?? null, strategy: strategy.name ?? null, source: job.source ?? "manual" },
         ),
       );
     }
@@ -645,6 +653,7 @@ export function registerBuilderRoutes(
     }),
   );
   async function runJob(owner, job, strategy, kind) {
+    if (store.getJob(owner, job.id)?.status === "cancelled") return; // cancelled while it waited in the queue
     const control = { cancelled: false, worker: null };
     active.set(job.id, control);
     running++;
@@ -757,7 +766,7 @@ export function registerBuilderRoutes(
     app.post(
       `/api/builder/${kind}`,
       route((req, res) => {
-        if (running >= 2)
+        if (kind === "backtest" && running >= 2)
           return res.status(429).json({
             error: "Two scans/tests are already running. Try again shortly.",
           });
@@ -782,8 +791,39 @@ export function registerBuilderRoutes(
           settings: req.body.settings ?? {},
           createdAt: new Date().toISOString(),
         });
-        res.status(202).json(job);
-        void withRateLimitWaiting(() => runJob(req.user.id, job, strategy, kind));
+        if (kind === "backtest") {
+          res.status(202).json(job);
+          void withRateLimitWaiting(() => runJob(req.user.id, job, strategy, kind));
+          return;
+        }
+        // These settings are what the hourly auto-scan uses for this user's monitored stocks.
+        capture(() =>
+          store.savePrefs(req.user.id, {
+            ...store.prefs(req.user.id),
+            autoScan: {
+              strategyId: job.strategyId,
+              templates: job.templates ?? null,
+              includeCatalysts: job.includeCatalysts,
+              hedgeChoices: Array.isArray(req.body.hedgeChoices)
+                ? req.body.hedgeChoices.filter((h) => typeof h === "string").slice(0, 20)
+                : [],
+              savedAt: new Date().toISOString(),
+            },
+          }),
+        );
+        // Scans run one at a time; a request made while another stock is scanning goes next in line.
+        const placed = scanQueue.add({
+          owner: req.user.id,
+          symbol: strategy.symbols.length === 1 ? strategy.symbols[0] : strategy.symbols.join(", "),
+          source: "manual",
+          jobId: job.id,
+          run: () => withRateLimitWaiting(() => runJob(req.user.id, job, strategy, kind)),
+        });
+        res.status(202).json({
+          ...job,
+          queuedBehind: placed.behind?.symbol ?? null,
+          queuedAhead: placed.ahead,
+        });
       }),
     );
   app.get(
@@ -939,6 +979,81 @@ export function registerBuilderRoutes(
   );
   const timer = setInterval(() => agents.tick().catch(() => {}), 60000);
   timer.unref();
+  // Hourly auto-scan: every round queues each monitored stock of every user who has scanned before (their last
+  // manual scan settings are reused). A stock scanned within the last ~48 minutes is skipped that round.
+  const autoInterval = autoScan?.intervalMs ?? 3600000;
+  let nextRoundAt = autoScan ? Date.now() + (autoScan.firstRoundMs ?? 120000) : null;
+  async function autoScanSymbol(owner, symbol, profile) {
+    const base =
+      (profile.strategyId && store.strategy(owner, profile.strategyId)) || store.strategies(owner)[0];
+    if (!base) return;
+    const strategy = validateStrategy({ ...base, symbols: [symbol] });
+    const job = store.job(owner, {
+      kind: "scan",
+      source: "auto",
+      status: "queued",
+      progress: 0,
+      strategy,
+      strategyId: profile.strategyId ?? null,
+      items: profile.strategyId ? store.items(owner, profile.strategyId) : [],
+      includeCatalysts: profile.includeCatalysts !== false,
+      templates: Array.isArray(profile.templates) ? profile.templates.filter((t) => TEMPLATES[t]) : undefined,
+      settings: {},
+      createdAt: new Date().toISOString(),
+    });
+    try {
+      await withRateLimitWaiting(() => runJob(owner, job, strategy, "scan"));
+    } finally {
+      // The result lives on in the snapshot; hourly jobs would otherwise pile up in the jobs table.
+      capture(() => store.deleteJob(owner, job.id));
+    }
+    if (autoScan.hedgeScan && profile.hedgeChoices?.length) {
+      const result = await autoScan.hedgeScan({ strategies: profile.hedgeChoices, symbols: [symbol] });
+      attachHedgeScan(owner, [symbol], result);
+    }
+  }
+  async function startAutoRound() {
+    const cutoff = Date.now() - autoInterval * 0.8;
+    for (const { owner, prefs } of store.allPrefs()) {
+      const profile = prefs.autoScan;
+      if (!profile) continue;
+      let symbols;
+      try {
+        symbols = (await (autoScan.monitored ?? listMonitoredStocks)(owner)).map((r) =>
+          String(r.symbol ?? r).toUpperCase(),
+        );
+      } catch (e) {
+        console.warn(`[builder] auto-scan: monitored stocks unavailable for ${owner}: ${e.message}`);
+        continue;
+      }
+      for (const symbol of symbols) {
+        if (scanQueue.has(owner, symbol)) continue;
+        const latest = capture(() => snapshots.list(owner, symbol)[0]);
+        if (latest && Date.parse(latest.capturedAt) > cutoff) continue;
+        scanQueue.add({ owner, symbol, source: "auto", run: () => autoScanSymbol(owner, symbol, profile) });
+      }
+    }
+  }
+  const autoTimer = autoScan
+    ? setInterval(() => {
+        if (Date.now() < nextRoundAt) return;
+        nextRoundAt = Date.now() + autoInterval;
+        startAutoRound().catch((e) => console.warn(`[builder] auto-scan round failed: ${e.message}`));
+      }, Math.min(60000, autoInterval))
+    : null;
+  autoTimer?.unref();
+  app.get(
+    "/api/builder/auto-scan",
+    route((req, res) =>
+      res.json({
+        enabled: Boolean(autoScan),
+        configured: Boolean(store.prefs(req.user.id).autoScan),
+        intervalMinutes: Math.round(autoInterval / 60000),
+        nextRoundAt: nextRoundAt ? new Date(nextRoundAt).toISOString() : null,
+        ...scanQueue.state(req.user.id),
+      }),
+    ),
+  );
   // Snapshots older than the retention window go at start-up, every six hours, and whenever one is saved.
   capture(() => snapshots.prune());
   const pruneTimer = setInterval(() => capture(() => snapshots.prune()), 6 * 3600000);
@@ -967,11 +1082,14 @@ export function registerBuilderRoutes(
     store,
     snapshots,
     attachHedgeScan,
+    scanQueue,
+    runAutoScanRound: () => (autoScan ? startAutoRound() : Promise.resolve()),
     agents,
     syncMarketTopics,
     close: () => {
       clearInterval(timer);
       clearInterval(pruneTimer);
+      if (autoTimer) clearInterval(autoTimer);
       snapshots.close();
       stockVolume?.close();
       for (const c of active.values()) {

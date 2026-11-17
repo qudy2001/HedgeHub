@@ -104,6 +104,9 @@ export function createBuilderStore(
       );
       return job;
     },
+    deleteJob(owner, id) {
+      db.prepare("DELETE FROM studio_jobs WHERE owner=? AND id=?").run(owner, id);
+    },
     getJob(owner, id) {
       return parse(
         db
@@ -141,6 +144,13 @@ export function createBuilderStore(
     // Per-user preferences that apply across strategies (for example the research language).
     prefs(owner) {
       return parse(db.prepare("SELECT * FROM studio_prefs WHERE owner=?").get(owner)) ?? {};
+    },
+    // Everyone with saved preferences, with them (the hourly auto-scan reads each user's scan settings from here).
+    allPrefs() {
+      return db
+        .prepare("SELECT * FROM studio_prefs")
+        .all()
+        .map((r) => ({ owner: r.owner, prefs: parse(r) ?? {} }));
     },
     savePrefs(owner, p) {
       db.prepare("INSERT OR REPLACE INTO studio_prefs VALUES (?,?)").run(owner, JSON.stringify(p));

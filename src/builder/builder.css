@@ -1612,8 +1612,29 @@ body.studio-body:before {
 }
 .stock-analysis-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  grid-template-columns: 1fr;
   gap: 16px;
+}
+.stock-analysis-body {
+  display: grid;
+  grid-template-columns: minmax(320px, 2fr) minmax(0, 3fr);
+  gap: 20px;
+  align-items: start;
+}
+.stock-analysis-research {
+  min-width: 0;
+}
+.stock-analysis-body .stock-analysis-evidence {
+  margin-top: 10px;
+  min-width: 0;
+}
+.stock-analysis-body .report-text {
+  max-height: 420px;
+}
+@media (max-width: 1100px) {
+  .stock-analysis-body {
+    grid-template-columns: 1fr;
+  }
 }
 .stock-analysis-card-actions {
   display: flex;
@@ -3205,5 +3226,22 @@ body.studio-body:before {
   .studio .filter-breadcrumb .breadcrumb-actions select {
     flex: 1 1 140px;
     min-width: 0;
+  }
+}
+
+/* Hourly auto-scan status in the workspace toolbar */
+.auto-scan-status {
+  font-size: 12px;
+  color: var(--s-muted, #788791);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .auto-scan-status {
+    order: 10;
+    flex-basis: 100%;
+    white-space: normal;
   }
 }
