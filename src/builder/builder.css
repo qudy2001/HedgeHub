@@ -3245,3 +3245,106 @@ body.studio-body:before {
     white-space: normal;
   }
 }
+.hedge-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 10px;
+  background: var(--s-bg);
+  border: 1px solid var(--s-line);
+  border-radius: 8px;
+}
+.studio .hedge-tabs button {
+  flex: 1;
+  justify-content: center;
+  padding: 5px 0;
+  font-size: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--s-muted);
+  border-radius: 6px;
+}
+.studio .hedge-tabs button.active {
+  background: var(--s-panel);
+  border-color: var(--s-line);
+  color: var(--s-text);
+  font-weight: 600;
+}
+.hedge-slider {
+  font-size: 11px;
+}
+.hedge-slider .hs-row {
+  display: block;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--s-line);
+}
+.hedge-slider .hs-head,
+.hedge-slider .hs-ends {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.hedge-slider .hs-head small {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--s-muted);
+  font-size: 9px;
+}
+.hedge-slider .hs-head strong {
+  font-size: 13px;
+}
+.hedge-slider .hs-ends small {
+  color: var(--s-muted);
+  font-size: 9px;
+}
+.hedge-slider input[type="range"] {
+  width: 100%;
+  margin: 6px 0 2px;
+}
+.studio .hedge-slider .hs-num {
+  width: 90px;
+  text-align: right;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+.studio .hedge-slider .text-button {
+  font-size: 10px;
+  padding: 0;
+}
+.hedge-slider .hs-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 10px 0;
+}
+.hedge-slider .hs-metrics > div {
+  background: var(--s-bg);
+  border: 1px solid var(--s-line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+.hedge-slider .hs-metrics small {
+  display: block;
+  color: var(--s-muted);
+  font-size: 9px;
+}
+.hedge-slider .hs-metrics strong {
+  font-size: 13px;
+}
+.hedge-slider .hs-metrics .hs-total {
+  grid-column: 1 / -1;
+}
+.hedge-slider .hs-legs p {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 5px 0;
+  border-top: 1px solid var(--s-line);
+}
+.hedge-slider .hs-note {
+  font-size: 9px;
+  margin-top: 6px;
+}

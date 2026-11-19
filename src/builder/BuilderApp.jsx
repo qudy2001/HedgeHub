@@ -36,6 +36,7 @@ import {
 } from "../../shared/marketTopics.js";
 import { demoWorkspace } from "./demo.js";
 import InteractiveChart from "./InteractiveChart.jsx";
+import HedgePriceSlider from "./HedgePriceSlider.jsx";
 import "./builder.css";
 import "../styles/monitored-stocks.css";
 import "../styles/monitored-stocks-grid.css";
@@ -815,6 +816,7 @@ function Workspace({ demo, user, logout, presentation }) {
     [contentLanguage, setContentLanguage] = useState(normalizeContentLanguage());
   const [selectedId, setSelectedId] = useState(sample?.rows[0]?.id ?? ""),
     [notice, setNotice] = useState(""),
+    [hedgeTab, setHedgeTab] = useState("scans"),
     [error, setError] = useState(""),
     [job, setJob] = useState(null),
     [busy, setBusy] = useState(false),
@@ -2513,6 +2515,31 @@ function Workspace({ demo, user, logout, presentation }) {
       case "hedges":
         return (
           <>
+            <div className="hedge-tabs" role="tablist">
+              {[
+                ["scans", "Scans"],
+                ["slider", "Price slider"],
+              ].map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={hedgeTab === id}
+                  className={hedgeTab === id ? "active" : ""}
+                  onClick={() => setHedgeTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {hedgeTab === "slider" ? (
+              row ? (
+                <HedgePriceSlider key={row.id} row={row} />
+              ) : (
+                <p className="subtle">Select a position from a scan to try prices on it.</p>
+              )
+            ) : (
+          <>
             <div className="hedge-choices">
               {HEDGE_SCAN_STRATEGIES.map((st) => {
                 const planned = st.status === "planned";
@@ -2621,6 +2648,8 @@ function Workspace({ demo, user, logout, presentation }) {
                 Edit strategy parameters →
               </button>
             </div>
+          </>
+            )}
           </>
         );
       case "technicals":
