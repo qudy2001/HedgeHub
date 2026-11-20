@@ -1,6 +1,5 @@
 import { createStockVolumeService } from "./stockVolume.js";
 import { createDistributionLoader } from "./distributions.js";
-import { createDistributionSnapshotStore } from "./distributionSnapshots.js";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { createBuilderStore } from "./store.js";
@@ -154,14 +153,9 @@ export function registerBuilderRoutes(
     store = createBuilderStore(),
     loadData = defaultData,
     researchService = null,
-    distributionSnapshots = null,
-    loadDistribution: loadDistributionOverride = null,
   } = {},
 ) {
   let stockVolume;
-  // Opened on first use so registering the routes does not create a database.
-  const snapshotStore = () =>
-    (distributionSnapshots ??= createDistributionSnapshotStore());
   app.post("/api/builder/stock-volume", (req, res) => {
     try {
       stockVolume ??= createStockVolumeService();
@@ -182,31 +176,15 @@ export function registerBuilderRoutes(
       .status(job ? 200 : 404)
       .json(job ?? { error: "History request not found" });
   });
-  const loadDistribution =
-    loadDistributionOverride ??
-    createDistributionLoader({
-      snapshots: { save: (...args) => snapshotStore().save(...args) },
-    });
-  // Without `date` this fetches the live chain, which also stores it as the
-  // current session's snapshot. With `date` it reads a stored session.
+  const loadDistribution = createDistributionLoader();
   app.get("/api/builder/distributions/:symbol", async (req, res) => {
     try {
       const symbol = validateStrategy({ symbols: [req.params.symbol] })
           .symbols[0],
-        days = Number(req.query.days ?? 365),
-        date = req.query.date;
+        days = Number(req.query.days ?? 365);
       if (![365, 730].includes(days))
         throw new Error("Unsupported expiry horizon");
-      if (date != null && !/^\d{4}-\d{2}-\d{2}$/.test(date))
-        throw new Error("Invalid session date");
-      const data = date
-        ? snapshotStore().load(symbol, date, days)
-        : await loadDistribution(symbol, days);
-      if (!data)
-        return res
-          .status(404)
-          .json({ error: "No stored snapshot for that session" });
-      res.json({ ...data, sessions: snapshotStore().sessions(symbol) });
+      res.json(await loadDistribution(symbol, days));
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
@@ -559,7 +537,6 @@ export function registerBuilderRoutes(
     close: () => {
       clearInterval(timer);
       stockVolume?.close();
-      distributionSnapshots?.close();
       for (const c of active.values()) {
         c.cancelled = true;
         c.worker?.terminate();
