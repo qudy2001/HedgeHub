@@ -13,7 +13,8 @@ export function createBuilderStore(
   db.exec(`CREATE TABLE IF NOT EXISTS studio_strategies(owner TEXT,id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,id));
     CREATE TABLE IF NOT EXISTS studio_items(owner TEXT,strategy_id TEXT,id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,strategy_id,id));
     CREATE TABLE IF NOT EXISTS studio_jobs(owner TEXT,id TEXT PRIMARY KEY,payload TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS studio_agent(owner TEXT,strategy_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,strategy_id));`);
+    CREATE TABLE IF NOT EXISTS studio_agent(owner TEXT,strategy_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(owner,strategy_id));
+    CREATE TABLE IF NOT EXISTS studio_prefs(owner TEXT PRIMARY KEY,payload TEXT NOT NULL);`);
   const parse = (r) => (r ? JSON.parse(r.payload) : null);
   for (const r of db.prepare("SELECT * FROM studio_jobs").all()) {
     const j = parse(r);
@@ -61,6 +62,12 @@ export function createBuilderStore(
         .all(owner, id)
         .map(parse);
     },
+    allItems() {
+      return db
+        .prepare("SELECT owner, strategy_id, payload FROM studio_items")
+        .all()
+        .map((r) => ({ owner: r.owner, strategy: r.strategy_id, item: JSON.parse(r.payload) }));
+    },
     item(owner, strategy, id) {
       return parse(
         db
@@ -97,6 +104,9 @@ export function createBuilderStore(
       );
       return job;
     },
+    deleteJob(owner, id) {
+      db.prepare("DELETE FROM studio_jobs WHERE owner=? AND id=?").run(owner, id);
+    },
     getJob(owner, id) {
       return parse(
         db
@@ -113,11 +123,15 @@ export function createBuilderStore(
         .map(parse);
     },
     agent(owner, id) {
-      return parse(
+      const state = parse(
         db
           .prepare("SELECT * FROM studio_agent WHERE owner=? AND strategy_id=?")
           .get(owner, id),
       );
+      // Technical-analysis suggestions (market_report) are not tracked; hide any saved before that change.
+      if (Array.isArray(state?.suggestions))
+        state.suggestions = state.suggestions.filter((x) => x.sourceSection !== "market_report");
+      return state;
     },
     saveAgent(owner, id, p) {
       db.prepare("INSERT OR REPLACE INTO studio_agent VALUES (?,?,?)").run(
@@ -125,6 +139,21 @@ export function createBuilderStore(
         id,
         JSON.stringify(p),
       );
+      return p;
+    },
+    // Per-user preferences that apply across strategies (for example the research language).
+    prefs(owner) {
+      return parse(db.prepare("SELECT * FROM studio_prefs WHERE owner=?").get(owner)) ?? {};
+    },
+    // Everyone with saved preferences, with them (the hourly auto-scan reads each user's scan settings from here).
+    allPrefs() {
+      return db
+        .prepare("SELECT * FROM studio_prefs")
+        .all()
+        .map((r) => ({ owner: r.owner, prefs: parse(r) ?? {} }));
+    },
+    savePrefs(owner, p) {
+      db.prepare("INSERT OR REPLACE INTO studio_prefs VALUES (?,?)").run(owner, JSON.stringify(p));
       return p;
     },
     close() {

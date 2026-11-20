@@ -1,4 +1,5 @@
 import { tigerEnabled, tigerFundamentals } from "./providers/tiger.js";
+import { fetchYahooFundamentals } from "./providers/yahooFinance.js";
 import { finiteNumber } from "./quoteQuality.js";
 
 const TRADING_VIEW_STOCK_SCAN_URL = "https://scanner.tradingview.com/america/scan";
@@ -62,13 +63,7 @@ function toNumber(value, fallback = null) {
   return finiteNumber(value, fallback);
 }
 
-export async function fetchStockFundamentals({ symbol } = {}) {
-  if (tigerEnabled()) return tigerFundamentals(arguments[0]);
-  const normalizedSymbol = normalizeTicker(symbol);
-  if (!normalizedSymbol) {
-    throw new Error("symbol is required");
-  }
-
+async function fetchTradingViewFundamentals(normalizedSymbol) {
   const payload = {
     columns: FUNDAMENTAL_COLUMNS,
     filter: [
@@ -143,3 +138,13 @@ export async function fetchStockFundamentals({ symbol } = {}) {
   };
 }
 
+export async function fetchStockFundamentals({ symbol } = {}) {
+  if (tigerEnabled()) return tigerFundamentals(arguments[0]);
+  const normalizedSymbol = normalizeTicker(symbol);
+  if (!normalizedSymbol) throw new Error("symbol is required");
+  try {
+    return await fetchTradingViewFundamentals(normalizedSymbol);
+  } catch {
+    return fetchYahooFundamentals({ symbol: normalizedSymbol });
+  }
+}

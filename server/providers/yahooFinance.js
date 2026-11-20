@@ -1,6 +1,7 @@
 import { normalCdf, optionPrice as blackScholesOptionPrice } from "../../shared/optionMath.js";
 const STOOQ_BASE_URL = "https://stooq.com/q/l/?f=sd2t2ohlcvn&e=csv&s=";
 const YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
+const YAHOO_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary";
 const COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3/simple/price";
 
 async function fetchText(url) {
@@ -648,4 +649,115 @@ export async function fetchNearestCalls(symbol, targetStrike, desiredExpiry, lim
       isLive: false,
     hasRealBidAsk: false
     }));
+}
+
+// quoteSummary needs a session cookie plus a crumb token; chart endpoints do not.
+const YAHOO_BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const YAHOO_SESSION_TTL_MS = 60 * 60 * 1000;
+let yahooSession = null;
+let yahooSessionPending = null;
+
+async function createYahooSession() {
+  const cookieResponse = await fetch("https://fc.yahoo.com", {
+    headers: { "user-agent": YAHOO_BROWSER_UA },
+    redirect: "manual",
+    signal: AbortSignal.timeout(15000)
+  });
+  // fc.yahoo.com answers 404 on purpose; only its Set-Cookie matters.
+  const cookie = (cookieResponse.headers.getSetCookie?.() ?? []).map((value) => value.split(";")[0]).join("; ");
+  if (!cookie) throw new Error("Yahoo Finance did not issue a session cookie");
+  const crumbResponse = await fetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
+    headers: { "user-agent": YAHOO_BROWSER_UA, cookie },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!crumbResponse.ok) throw new Error(`Yahoo Finance crumb request failed with ${crumbResponse.status}`);
+  const crumb = (await crumbResponse.text()).trim();
+  if (!crumb || crumb.includes("<") || crumb.includes(" ")) throw new Error("Yahoo Finance returned an invalid crumb");
+  return { cookie, crumb, createdAt: Date.now() };
+}
+
+async function getYahooSession(forceRefresh = false) {
+  if (!forceRefresh && yahooSession && Date.now() - yahooSession.createdAt < YAHOO_SESSION_TTL_MS) return yahooSession;
+  yahooSessionPending ??= createYahooSession()
+    .then((session) => (yahooSession = session))
+    .finally(() => {
+      yahooSessionPending = null;
+    });
+  return yahooSessionPending;
+}
+
+async function fetchYahooSummary(symbol, modules, retry = true) {
+  const session = await getYahooSession(!retry);
+  const url = new URL(`${YAHOO_SUMMARY_URL}/${encodeURIComponent(symbol)}`);
+  url.searchParams.set("modules", modules.join(","));
+  url.searchParams.set("corsDomain", "finance.yahoo.com");
+  url.searchParams.set("crumb", session.crumb);
+  const response = await fetch(url, {
+    headers: { "user-agent": YAHOO_BROWSER_UA, cookie: session.cookie },
+    signal: AbortSignal.timeout(15000)
+  });
+  if ((response.status === 401 || response.status === 403) && retry) {
+    yahooSession = null;
+    return fetchYahooSummary(symbol, modules, false);
+  }
+  if (!response.ok) throw new Error(`Request failed with ${response.status}`);
+  const result = (await response.json())?.quoteSummary?.result?.[0];
+  if (!result) throw new Error(`Yahoo Finance returned no data for ${symbol}`);
+  return result;
+}
+
+export async function fetchYahooFundamentals({ symbol } = {}) {
+  const normalized = String(symbol ?? "").trim().toUpperCase();
+  if (!normalized) throw new Error("symbol is required");
+  const data = await fetchYahooSummary(normalized, ["summaryDetail", "assetProfile", "price"]);
+  const sd = data.summaryDetail ?? {};
+  const ap = data.assetProfile ?? {};
+  const pr = data.price ?? {};
+  const toNum = (v) => { const n = Number(v?.raw ?? v); return Number.isFinite(n) ? n : null; };
+  const dividendYield = toNum(sd.dividendYield);
+  return {
+    generatedAt: new Date().toISOString(),
+    requestedSymbol: normalized,
+    resolvedSymbol: pr.symbol ?? normalized,
+    ticker: pr.symbol ?? normalized,
+    description: pr.longName ?? pr.shortName ?? null,
+    marketCapUsd: toNum(pr.marketCap),
+    peTtm: toNum(sd.trailingPE),
+    dividendYield: dividendYield != null ? dividendYield * 100 : null,
+    beta1y: toNum(sd.beta),
+    volume: toNum(sd.volume),
+    averageVolume10d: toNum(sd.averageVolume10days ?? sd.averageDailyVolume10Day),
+    averageVolume30d: toNum(sd.averageVolume),
+    high52w: toNum(sd.fiftyTwoWeekHigh),
+    low52w: toNum(sd.fiftyTwoWeekLow),
+    sector: ap.sector ?? null,
+    industry: ap.industry ?? null,
+    currency: pr.currency ?? sd.currency ?? null,
+    exchange: pr.exchangeName ?? null,
+    type: pr.quoteType ?? null,
+    source: "yahoo"
+  };
+}
+
+export async function fetchYahooEarningsDate(symbol) {
+  const normalized = String(symbol ?? "").trim().toUpperCase();
+  if (!normalized) throw new Error("symbol is required");
+  const data = await fetchYahooSummary(normalized, ["calendarEvents"]);
+  const dates = (data.calendarEvents?.earnings?.earningsDate ?? [])
+    .map(d => { const n = Number(d?.raw ?? d); return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 10) : null; })
+    .filter(Boolean)
+    .sort();
+  if (!dates.length) throw new Error(`No earnings date found on Yahoo Finance for ${normalized}`);
+  const now = new Date().toISOString().slice(0, 10);
+  const next = dates.find(d => d >= now) ?? dates.at(-1);
+  return {
+    source: "yahoo",
+    fetchedAt: new Date().toISOString(),
+    events: dates.map(date => ({ date, type: "earnings", symbol: normalized })),
+    complete: Boolean(dates.find(d => d >= now)),
+    from: now,
+    to: next,
+    status: "event-found"
+  };
 }

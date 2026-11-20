@@ -7,6 +7,8 @@ import TradingViewWidget from "./components/TradingViewWidget.jsx";
 import { createMarketTimerContext } from "./marketTimers.js";
 import { getInitialTheme, THEME_STORAGE_KEY } from "./theme.js";
 
+const AdminAnalysisTasksWorkspace = lazy(() => import("./components/AdminAnalysisTasksWorkspace.jsx"));
+const AdminCatalystsWorkspace = lazy(() => import("./components/AdminCatalystsWorkspace.jsx"));
 const AdminUsersWorkspace = lazy(() => import("./components/AdminUsersWorkspace.jsx"));
 const DeltaHedgeScannerWorkspace = lazy(() => import("./components/DeltaHedgeScannerWorkspace.jsx"));
 const MacroHeatmapDashboard = lazy(() => import("./components/MacroHeatmapDashboard.jsx"));
@@ -58,6 +60,20 @@ function readRoute() {
     };
   }
 
+  if (pathname === "/admin/analysis-tasks") {
+    return {
+      activeView: "admin-analysis-tasks",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
+  if (pathname === "/admin/catalysts") {
+    return {
+      activeView: "admin-catalysts",
+      selectedStrategyId: "strategy-1"
+    };
+  }
+
   if (strategyMatch) {
     return {
       activeView: "strategy",
@@ -90,6 +106,14 @@ function buildPath(activeView, strategyId) {
 
   if (activeView === "admin-users") {
     return "/admin/users";
+  }
+
+  if (activeView === "admin-analysis-tasks") {
+    return "/admin/analysis-tasks";
+  }
+
+  if (activeView === "admin-catalysts") {
+    return "/admin/catalysts";
   }
 
   if (activeView === "strategy" && strategyId) {
@@ -1077,6 +1101,8 @@ export default function App() {
   const heroStats = dashboard?.heroStats ?? [];
   const showSettings = activeView === "settings";
   const showAdminUsers = activeView === "admin-users";
+  const showAdminAnalysisTasks = activeView === "admin-analysis-tasks";
+  const showAdminCatalysts = activeView === "admin-catalysts";
   const showScreening = activeView === "screening";
   const showWatchlist = activeView === "watchlist";
   const showStrategyFinder = activeView === "strategy" && selectedStrategyId === "strategy-1";
@@ -1167,6 +1193,8 @@ export default function App() {
 	            onOpenWatchlist={() => navigateTo("watchlist")}
 	            onOpenSettings={() => navigateTo("settings")}
 	            onOpenAdminUsers={() => navigateTo("admin-users")}
+            onOpenAdminAnalysisTasks={() => navigateTo("admin-analysis-tasks")}
+            onOpenAdminCatalysts={() => navigateTo("admin-catalysts")}
 	            onOpenScreening={() => navigateTo("screening")}
 	            onOpenPaperTrading={() => navigateTo("paper")}
 	            onSelect={(strategyId) => navigateTo("strategy", strategyId)}
@@ -1230,6 +1258,34 @@ export default function App() {
 	              <AdminUsersWorkspace onAuthRequired={handleAuthRequired} />
 	            ) : (
 	              <main className="workspace workspace--admin-users">
+	                <header className="topbar">
+	                  <div>
+	                    <span className="brand__eyebrow">Admin</span>
+	                    <h2>Access denied</h2>
+	                  </div>
+	                </header>
+	                <div className="app-state app-state--inline">Admin access is required.</div>
+	              </main>
+	            )
+	          ) : showAdminAnalysisTasks ? (
+	            authUser?.role === "admin" ? (
+	              <AdminAnalysisTasksWorkspace onAuthRequired={handleAuthRequired} />
+	            ) : (
+	              <main className="workspace workspace--admin-analysis-tasks">
+	                <header className="topbar">
+	                  <div>
+	                    <span className="brand__eyebrow">Admin</span>
+	                    <h2>Access denied</h2>
+	                  </div>
+	                </header>
+	                <div className="app-state app-state--inline">Admin access is required.</div>
+	              </main>
+	            )
+	          ) : showAdminCatalysts ? (
+	            authUser?.role === "admin" ? (
+	              <AdminCatalystsWorkspace onAuthRequired={handleAuthRequired} />
+	            ) : (
+	              <main className="workspace workspace--admin-catalysts">
 	                <header className="topbar">
 	                  <div>
 	                    <span className="brand__eyebrow">Admin</span>

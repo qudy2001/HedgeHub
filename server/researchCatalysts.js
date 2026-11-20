@@ -1,7 +1,13 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { timestampIso } from './quoteQuality.js';
 
 const DAY = 86400_000;
+export const CATALYST_CATEGORIES = ['operating-update', 'announcement', 'regulatory'];
+export const CATALYST_DATE_STATUSES = ['confirmed', 'estimated', 'unconfirmed'];
+// Maintained from the admin "Catalysts" tab. RESEARCH_CATALYST_FILE overrides the location; the default sits in
+// data/, the volume that is mounted into the Docker containers.
+export const catalystFilePath = () => process.env.RESEARCH_CATALYST_FILE || path.join(process.cwd(), 'data', 'catalysts.json');
 const day = value => timestampIso(value)?.slice(0, 10) ?? null;
 export const addDays = (date, count) => new Date(Date.parse(`${date}T00:00:00Z`) + count * DAY).toISOString().slice(0, 10);
 export function researchWindow(expiry, lookbackDays = 30, now = new Date().toISOString()) {
@@ -20,12 +26,17 @@ export function safeSourceUrl(value) {
 // cannot know every product announcement, operating update or regulatory deadline.
 // Never infer a confirmed schedule from a recurring historical release pattern.
 export async function curatedCatalysts(symbol, window) {
-  if (!process.env.RESEARCH_CATALYST_FILE) throw new Error('Company/industry announcement feed not configured; source review required');
-  const payload = JSON.parse(await fs.readFile(process.env.RESEARCH_CATALYST_FILE, 'utf8'));
+  let text;
+  try { text = await fs.readFile(catalystFilePath(), 'utf8'); } catch (error) {
+    // No file at the default location means nobody has configured the feed yet.
+    if (error.code === 'ENOENT' && !process.env.RESEARCH_CATALYST_FILE) throw new Error('Company/industry announcement feed not configured; source review required');
+    throw error;
+  }
+  const payload = JSON.parse(text);
   if (!Array.isArray(payload.events)) throw new Error('Catalyst file must contain an events array');
   const events = payload.events.filter(e => Array.isArray(e.symbols) && e.symbols.includes(symbol)).map(e => ({
-    id: String(e.id ?? ''), title: String(e.title ?? '').slice(0, 500), category: ['operating-update', 'announcement', 'regulatory'].includes(e.category) ? e.category : 'announcement',
-    date: day(e.date), dateStatus: ['confirmed', 'estimated', 'unconfirmed'].includes(e.dateStatus) ? e.dateStatus : 'unconfirmed',
+    id: String(e.id ?? ''), title: String(e.title ?? '').slice(0, 500), category: CATALYST_CATEGORIES.includes(e.category) ? e.category : 'announcement',
+    date: day(e.date), dateStatus: CATALYST_DATE_STATUSES.includes(e.dateStatus) ? e.dateStatus : 'unconfirmed',
     source: String(e.source ?? ''), sourceUrl: safeSourceUrl(e.sourceUrl), verifiedAt: timestampIso(e.verifiedAt),
     note: String(e.note ?? '').slice(0, 1000)
   })).filter(e => e.title && e.sourceUrl && (!e.date || e.date >= window.from && e.date <= window.to));

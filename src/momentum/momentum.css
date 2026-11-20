@@ -862,3 +862,73 @@ body:has(.momentum-ui) .studio-dialog button {
 .momentum-ui .results-table th:last-child, .momentum-ui .results-table td:last-child { position:sticky; right:0; background:var(--s-panel); box-shadow:-5px 0 8px -7px #0006; z-index:1; }
 .momentum-ui .results-table th:last-child { background:var(--s-bg); }
 .momentum-ui .results-table tr.selected td:last-child { background:var(--s-tint); }
+
+/* Momentum UI Monitored Stocks Integration */
+.m-monitored-stocks-container {
+  padding: 12px 0;
+  width: 100%;
+}
+
+.m-monitored-stocks-container .monitored-stocks-panel {
+  background: transparent;
+  border-radius: 8px;
+  margin-bottom: 0;
+  border: 1px solid #30353b;
+}
+
+.m-monitored-stocks-container .panel-header {
+  background: transparent;
+  border-bottom: 1px solid #30353b;
+  padding: 12px 12px;
+}
+
+.m-monitored-stocks-container .panel-header h3 {
+  font-size: 12px;
+}
+
+.m-monitored-stocks-container .panel-content {
+  padding: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.m-monitored-stocks-container .stocks-list {
+  gap: 4px;
+}
+
+.m-monitored-stocks-container .stock-item {
+  padding: 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: #2e3338;
+  border: 1px solid #30353b;
+}
+
+.m-monitored-stocks-container .stock-item:hover {
+  background: #353a40;
+  border-color: #484f57;
+}
+
+.m-monitored-stocks-container .stock-item.selected {
+  background: #1469c5;
+  border-color: #1469c5;
+}
+
+.m-monitored-stocks-container .symbol {
+  font-size: 12px;
+}
+
+.m-monitored-stocks-container .price {
+  font-size: 11px;
+}
+
+.m-monitored-stocks-container .change {
+  font-size: 10px;
+  padding: 1px 4px;
+}
+
+.m-rail-divider {
+  height: 1px;
+  background: #30353b;
+  margin: 4px 0;
+}

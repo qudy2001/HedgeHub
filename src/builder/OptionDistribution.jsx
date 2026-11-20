@@ -30,6 +30,7 @@ export default function OptionDistribution({
   demo,
   stockSettings = { visible: true, interval: "60min", days: 30, preset: "30" },
   onStockSettings = () => {},
+  savedStock = null,
 }) {
   const [axis, setAxis] = useState("strike"),
     [grouping, setGrouping] = useState("auto"),
@@ -56,6 +57,7 @@ export default function OptionDistribution({
     demo,
     dailyBars: stockBars,
     refresh: stockRefresh,
+    saved: savedStock,
   });
   const stockResult = stock.result,
     stockMax = Math.max(1, ...(stockResult?.bins ?? []).map((b) => b.volume));
@@ -220,7 +222,8 @@ export default function OptionDistribution({
                 </>
               )}
               <button
-                disabled={stock.loading || axis !== "strike"}
+                disabled={stock.loading || axis !== "strike" || Boolean(savedStock)}
+                title={savedStock ? "Saved snapshot: go back to live to refresh" : undefined}
                 onClick={() => setStockRefresh((v) => v + 1)}
               >
                 Refresh

@@ -49,6 +49,8 @@ export default function StrategyRail({
   onOpenScreening,
   onOpenPaperTrading,
   onOpenAdminUsers,
+  onOpenAdminAnalysisTasks,
+  onOpenAdminCatalysts,
   onSelect,
   paperPortfolio,
   screeningSummary,
@@ -240,6 +242,24 @@ export default function StrategyRail({
               onClick={onOpenAdminUsers}
             >
               User admin
+            </button>
+          ) : null}
+          {isAdmin ? (
+            <button
+              type="button"
+              className={`dashboard-button ${activeView === "admin-analysis-tasks" ? "dashboard-button--active" : ""}`}
+              onClick={onOpenAdminAnalysisTasks}
+            >
+              Analysis tasks
+            </button>
+          ) : null}
+          {isAdmin ? (
+            <button
+              type="button"
+              className={`dashboard-button ${activeView === "admin-catalysts" ? "dashboard-button--active" : ""}`}
+              onClick={onOpenAdminCatalysts}
+            >
+              Catalysts
             </button>
           ) : null}
         </div>

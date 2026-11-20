@@ -417,7 +417,7 @@ export const strategyAssetUniverse = [
   {
     id: "btc",
     label: "Bitcoin",
-    polymarketQueries: ["bitcoin above", "bitcoin march", "btc above"],
+    polymarketQueries: ["bitcoin above", "bitcoin hit", "btc above"],
     optionSymbol: "IBIT",
     underlyingSymbol: "BTC-USD",
     referenceSymbol: "NASDAQ:IBIT",
@@ -426,7 +426,7 @@ export const strategyAssetUniverse = [
   {
     id: "eth",
     label: "Ethereum",
-    polymarketQueries: ["ethereum above", "eth march", "ethereum march"],
+    polymarketQueries: ["ethereum above", "eth hit", "ethereum hit"],
     optionSymbol: "ETHA",
     underlyingSymbol: "ETH-USD",
     referenceSymbol: "NASDAQ:ETHA",
@@ -435,7 +435,7 @@ export const strategyAssetUniverse = [
   {
     id: "gold",
     label: "Gold",
-    polymarketQueries: ["gold above", "gold march", "gold price"],
+    polymarketQueries: ["gold above", "gold hit", "gold price"],
     optionSymbol: "GLD",
     underlyingSymbol: "XAU-USD",
     referenceSymbol: "AMEX:GLD",
@@ -444,7 +444,7 @@ export const strategyAssetUniverse = [
   {
     id: "oil",
     label: "Oil",
-    polymarketQueries: ["oil above", "wti march", "brent march"],
+    polymarketQueries: ["oil above", "wti hit", "brent hit"],
     optionSymbol: "USO",
     underlyingSymbol: "WTI-USD",
     referenceSymbol: "AMEX:USO",
@@ -483,7 +483,7 @@ export const strategyScreenerV2AssetUniverse = [
   {
     id: "btc-v2",
     label: "Bitcoin",
-    polymarketQueries: ["bitcoin above", "bitcoin march", "btc above"],
+    polymarketQueries: ["bitcoin above", "bitcoin hit", "btc above"],
     optionSymbol: "IBIT",
     underlyingSymbol: "BTC-USD",
     referenceSymbol: "NASDAQ:IBIT",
@@ -495,7 +495,7 @@ export const strategyScreenerV2AssetUniverse = [
   {
     id: "eth-v2",
     label: "Ethereum",
-    polymarketQueries: ["ethereum above", "eth march", "ethereum march"],
+    polymarketQueries: ["ethereum above", "eth hit", "ethereum hit"],
     optionSymbol: "ETHA",
     underlyingSymbol: "ETH-USD",
     referenceSymbol: "NASDAQ:ETHA",
@@ -507,7 +507,7 @@ export const strategyScreenerV2AssetUniverse = [
   {
     id: "gold-v2",
     label: "Gold",
-    polymarketQueries: ["gold above", "gold march", "gold price"],
+    polymarketQueries: ["gold above", "gold hit", "gold price"],
     optionSymbol: "GLD",
     underlyingSymbol: "XAU-USD",
     referenceSymbol: "AMEX:GLD",
@@ -519,7 +519,7 @@ export const strategyScreenerV2AssetUniverse = [
   {
     id: "oil-v2",
     label: "Oil",
-    polymarketQueries: ["oil above", "wti march", "brent march"],
+    polymarketQueries: ["oil above", "wti hit", "brent hit"],
     optionSymbol: "USO",
     underlyingSymbol: "WTI-USD",
     referenceSymbol: "AMEX:USO",

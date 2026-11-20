@@ -3,7 +3,7 @@ import {
   strategyAssetUniverse as baseStrategyAssetUniverse,
   strategyScreenerV2AssetUniverse as baseStrategyScreenerV2AssetUniverse
 } from "./marketCatalog.js";
-import { getPolymarketEventUrl } from "./providers/polymarket.js";
+import { canonicalPolymarketEventUrl, getPolymarketEventUrl } from "./providers/polymarket.js";
 
 export const STRATEGY_COMPARE_MODES = ["price"];
 const DEFAULT_QUOTE_GROUP = "Strategy Assets";
@@ -52,8 +52,17 @@ function normalizeText(value, fallback = "") {
 }
 
 function normalizePolymarketEventUrl(value, fallback = "") {
-  const normalizedValue = String(value ?? fallback).trim();
-  return normalizedValue.startsWith("https://polymarket.com/event/") ? normalizedValue : "";
+  return canonicalPolymarketEventUrl(value ?? fallback);
+}
+
+// All event URLs an asset should track: a manual override or auto-resolved events (see polymarketResolver).
+function assetEventUrls(asset) {
+  const urls = Array.isArray(asset?.polymarketEventUrls) ? asset.polymarketEventUrls : [];
+  return [...new Set([normalizePolymarketEventUrl(asset?.polymarketEventUrl), ...urls.map((url) => normalizePolymarketEventUrl(url))].filter(Boolean))];
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeQueryList(value, fallback = []) {
@@ -452,7 +461,7 @@ export function buildStrategyQuoteWatchlist(settingsAssets = []) {
 export function collectStrategyPolymarketQueries(assets = []) {
   return [...new Set(
     assets.flatMap((asset) =>
-      normalizePolymarketEventUrl(asset?.polymarketEventUrl)
+      assetEventUrls(asset).length
         ? []
         : normalizeQueryList(asset.polymarketQueries)
     )
@@ -460,22 +469,39 @@ export function collectStrategyPolymarketQueries(assets = []) {
 }
 
 export function collectStrategyPolymarketEventUrls(assets = []) {
-  return [...new Set(
-    assets
-      .map((asset) => normalizePolymarketEventUrl(asset.polymarketEventUrl))
-      .filter(Boolean)
-  )];
+  return [...new Set(assets.flatMap((asset) => assetEventUrls(asset)))];
+}
+
+// "Will S&P 500 (SPY) hit $790?" belongs to SPY; its dollar target must not be read as an SPX level.
+function questionNamesAnotherTicker(question, asset) {
+  const tickers = [...String(question).matchAll(/\(([A-Za-z][A-Za-z0-9.\-]{0,9})\)/g)]
+    .map((match) => match[1].toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .filter((ticker) => ticker && !["HIGH", "LOW"].includes(ticker));
+  if (!tickers.length) {
+    return false;
+  }
+
+  const own = [asset?.optionSymbol, asset?.underlyingSymbol, asset?.referenceSymbol]
+    .map((symbol) => String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .filter(Boolean);
+  return !tickers.some((ticker) => own.some((symbol) => symbol.startsWith(ticker) || ticker.startsWith(symbol)));
 }
 
 export function strategyAssetMatchesMarket(asset, market) {
-  const eventUrl = normalizePolymarketEventUrl(asset?.polymarketEventUrl);
+  const eventUrls = assetEventUrls(asset);
   const marketEventUrl = normalizePolymarketEventUrl(getPolymarketEventUrl(market));
-  if (eventUrl) {
-    return Boolean(marketEventUrl) && eventUrl === marketEventUrl;
+  if (eventUrls.length) {
+    return Boolean(marketEventUrl) && eventUrls.includes(marketEventUrl);
   }
 
-  const question = String(market?.question ?? "").toLowerCase();
-  return normalizeQueryList(asset?.polymarketQueries).some((query) =>
-    question.includes(String(query).toLowerCase().split(" ")[0])
-  );
+  // Whole-word match on the query's leading term, so "eth" does not match "Netherlands".
+  const question = String(market?.question ?? "");
+  if (questionNamesAnotherTicker(question, asset)) {
+    return false;
+  }
+
+  return normalizeQueryList(asset?.polymarketQueries).some((query) => {
+    const term = String(query).trim().split(/\s+/)[0];
+    return term && new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}([^a-z0-9]|$)`, "i").test(question);
+  });
 }

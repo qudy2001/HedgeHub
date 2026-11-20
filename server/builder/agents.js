@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { DAY, dateOnly } from "../../shared/builderEngine.js";
-export const agentConfigured = () =>
-  Boolean(process.env.TRADINGAGENTS_URL && process.env.TRADINGAGENTS_TOKEN);
+import { agentOutputLanguage, normalizeContentLanguage } from "../../shared/contentLanguage.js";
+export const agentConfigured = () => Boolean(process.env.TRADINGAGENTS_URL);
 const ratings = {
   Buy: "Strong bullish",
   Overweight: "Bullish",
@@ -21,13 +21,39 @@ const safeUrl = (v) => {
     return null;
   }
 };
+// Technical-analysis findings (the Market Analyst's indicator/price-level report) are not tracked as topics.
+const EXCLUDED_SUGGESTION_SECTIONS = new Set(["market_report"]);
+// How many of a job's report sections TradingAgents has written so far.
+const sectionProgress = (job) => {
+  const sections = Object.values(job.report_sections ?? {});
+  return { done: sections.filter(Boolean).length, total: sections.length };
+};
+// Per-stock state of a run (status, failure reason, progress), kept apart from
+// the saved research so an unfinished or failed run can be shown without
+// replacing the last good result.
+export const jobStates = (extracted) =>
+  Object.fromEntries(
+    extracted.valuations.map((v) => [
+      v.symbol,
+      { status: v.status, error: v.error, progress: v.progress, at: v.asOf },
+    ]),
+  );
+// What identifies a suggestion across runs. Labels written in Chinese keep their characters (width variants folded);
+// every other label keeps the letters-and-digits key it always had, so ids already saved do not change.
+export function suggestionKey(label) {
+  const text = String(label ?? "");
+  return /\p{Script=Han}/u.test(text)
+    ? text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+    : text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
 export function extractAgent(run) {
   const suggestions = [],
     valuations = [];
   for (const [symbol, job] of Object.entries(run.jobs ?? {})) {
     const report = job.report_sections?.final_trade_decision ?? "";
+    // The label stays English in both languages; the Chinese form is a safety net for a free-text fallback report.
     const priceTarget = report.match(
-      /\*?\*?Price Target\*?\*?\s*:\s*\$?([\d,]+(?:\.\d+)?)/i,
+      /\*{0,2}(?:Price Target|目标价格?)\*{0,2}\s*[:：]\s*\*{0,2}\s*(?:US)?\$?([\d,]+(?:\.\d+)?)/i,
     );
     valuations.push({
       symbol,
@@ -39,10 +65,13 @@ export function extractAgent(run) {
       asOf: job.finished_at ?? run.requested_at,
       sourceRun: run.id,
       status: job.status,
+      error: job.error ? String(job.error) : null,
+      progress: sectionProgress(job),
     });
     for (const [section, summary] of Object.entries(
       job.section_summaries ?? {},
     ))
+      if (!EXCLUDED_SUGGESTION_SECTIONS.has(section))
       for (const [category, group] of Object.entries(summary.categories ?? {}))
         for (const item of group.items ?? []) {
           const text = job.report_sections?.[section] ?? "";
@@ -53,10 +82,7 @@ export function extractAgent(run) {
                 .filter(Boolean),
             ),
           ].slice(0, 8);
-          const key = String(item.label ?? "")
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, " ")
-            .trim();
+          const key = suggestionKey(item.label);
           if (!key) continue;
           const id = crypto
             .createHash("sha256")
@@ -88,6 +114,8 @@ export function extractAgent(run) {
             agentStatus: item.status,
             agentResolved: item.completed === true,
             rationale: group.rationale ?? "",
+            // How strongly the agents hold this stance for the section (0-100); ranks the company summary.
+            confidence: Number.isFinite(group.confidence) ? group.confidence : null,
             history: [],
             impactUntil: null,
           });
@@ -101,14 +129,16 @@ export function extractAgent(run) {
 async function request(route, body) {
   if (!agentConfigured())
     throw new Error(
-      "Configure TRADINGAGENTS_URL and TRADINGAGENTS_TOKEN on the HedgeHub server to enable AI research.",
+      "Configure TRADINGAGENTS_URL on the HedgeHub server to enable AI research.",
     );
   const response = await fetch(
     `${process.env.TRADINGAGENTS_URL.replace(/\/$/, "")}/api${route}`,
     {
       method: body ? "POST" : "GET",
       headers: {
-        authorization: `Bearer ${process.env.TRADINGAGENTS_TOKEN}`,
+        ...(process.env.TRADINGAGENTS_TOKEN
+          ? { authorization: `Bearer ${process.env.TRADINGAGENTS_TOKEN}` }
+          : {}),
         "content-type": "application/json",
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -119,8 +149,83 @@ async function request(route, body) {
     throw new Error(`TradingAgents returned HTTP ${response.status}`);
   return response.json();
 }
-export function createAgentService(store) {
+function applyTrackedItemEvidence(store, owner, strategyId, extracted, checkedAt) {
+  // Never replace a user's tracked condition or silently convert AI completion to verification.
+  for (const tracked of store.items(owner, strategyId)) {
+    const match = extracted.suggestions.find(
+      (i) => i.eventKey === tracked.eventKey && i.symbol === tracked.symbol,
+    );
+    if (match && match.sourceRun !== tracked.latestAgentRun)
+      store.putItem(owner, strategyId, {
+        ...tracked,
+        latestAgentRun: match.sourceRun,
+        agentUpdate: {
+          status: match.agentStatus,
+          completed: match.agentResolved,
+          sources: match.sources,
+          checkedAt,
+        },
+        history: [
+          ...(tracked.history ?? []),
+          { at: checkedAt, note: "New agent evidence available for review" },
+        ].slice(-100),
+      });
+  }
+}
+// Merge a run's extracted results into aggregate state. Only stocks whose job
+// completed replace their saved research; a running or failed job leaves the
+// previous result in place, as does every stock the run did not cover.
+export function mergeExtracted(state, extracted) {
+  const done = new Set(
+    extracted.valuations
+      .filter((v) => v.status === "completed")
+      .map((v) => v.symbol),
+  );
+  const keep = (arr) => (arr ?? []).filter((x) => !done.has(x.symbol));
+  const fresh = (arr) => arr.filter((x) => done.has(x.symbol));
+  return {
+    ...state,
+    valuations: [...keep(state.valuations), ...fresh(extracted.valuations)],
+    suggestions: [
+      ...keep(state.suggestions),
+      ...fresh(extracted.suggestions),
+    ].filter((x) => !EXCLUDED_SUGGESTION_SECTIONS.has(x.sourceSection)),
+  };
+}
+// `optionContext(owner, symbol, language)` returns { text, meta } built from cached option data, or null. It is
+// optional and best-effort: a run starts without it when nothing is cached or the lookup fails.
+// `language(owner)` returns the owner's research language ("en" or "zh"); every run is started in it, so the agents
+// write in that language from their first prompt (TradingAgents `output_language`, which overrides its saved setting
+// for the run).
+export function createAgentService(store, { optionContext = null, language = null } = {}) {
   const locks = new Set();
+  const researchLanguage = (owner) => {
+    try {
+      return normalizeContentLanguage(language?.(owner));
+    } catch {
+      return normalizeContentLanguage();
+    }
+  };
+  // The cached option briefs for a run's tickers: the request field TradingAgents reads, plus what was sent.
+  function optionBriefs(owner, tickers, lang) {
+    const text = {},
+      meta = {};
+    for (const ticker of tickers) {
+      let brief = null;
+      try {
+        brief = optionContext?.(owner, ticker, lang) ?? null;
+      } catch (e) {
+        console.warn(`[builder] option context for ${ticker} skipped: ${e.message}`);
+      }
+      if (!brief?.text) continue;
+      text[ticker] = brief.text;
+      meta[ticker] = brief.meta ?? {};
+    }
+    return {
+      body: Object.keys(text).length ? { options_context: text } : {},
+      meta,
+    };
+  }
   async function refresh(owner, strategy, force = false) {
     const key = owner + ":" + strategy.id;
     if (locks.has(key)) return store.agent(owner, strategy.id);
@@ -139,52 +244,42 @@ export function createAgentService(store) {
         const run = await request(`/runs/${encodeURIComponent(state.runId)}`);
         const extracted = extractAgent(run);
         state = {
-          ...state,
-          ...extracted,
+          ...mergeExtracted(state, extracted),
+          jobs: jobStates(extracted),
           status: run.status,
           lastChecked: new Date().toISOString(),
           error: null,
         };
-        // Never replace a user's tracked condition or silently convert AI completion to verification.
-        for (const tracked of store.items(owner, strategy.id)) {
-          const match = extracted.suggestions.find(
-            (i) =>
-              i.eventKey === tracked.eventKey && i.symbol === tracked.symbol,
-          );
-          if (match && match.sourceRun !== tracked.latestAgentRun)
-            store.putItem(owner, strategy.id, {
-              ...tracked,
-              latestAgentRun: match.sourceRun,
-              agentUpdate: {
-                status: match.agentStatus,
-                completed: match.agentResolved,
-                sources: match.sources,
-                checkedAt: state.lastChecked,
-              },
-              history: [
-                ...(tracked.history ?? []),
-                {
-                  at: state.lastChecked,
-                  note: "New agent evidence available for review",
-                },
-              ].slice(-100),
-            });
-        }
+        applyTrackedItemEvidence(
+          store,
+          owner,
+          strategy.id,
+          extracted,
+          state.lastChecked,
+        );
       } else if (
         force ||
         !state.lastStarted ||
         Date.now() - Date.parse(state.lastStarted) >= DAY
       ) {
+        const tickers = strategy.definition.symbols.slice(0, 10),
+          lang = researchLanguage(owner),
+          briefs = optionBriefs(owner, tickers, lang);
         const run = await request("/runs", {
-          tickers: strategy.definition.symbols.slice(0, 10),
+          tickers,
           analysis_date: dateOnly(Date.now()),
           look_back_days: 365,
           look_forward_days: 365,
+          output_language: agentOutputLanguage(lang),
+          ...briefs.body,
         });
         state = {
           ...state,
           runId: run.id,
           status: run.status,
+          jobs: {},
+          language: lang,
+          optionContext: briefs.meta,
           lastStarted: new Date().toISOString(),
           error: null,
         };
@@ -198,6 +293,75 @@ export function createAgentService(store) {
     } finally {
       locks.delete(key);
     }
+    return store.saveAgent(owner, strategy.id, state);
+  }
+  // Same lifecycle as refresh(), but scoped to a single stock: starts (or
+  // polls) its own TradingAgents run and merges the result into the shared
+  // valuations/suggestions without touching other stocks' saved research.
+  async function refreshSymbol(owner, strategy, symbol, force = false) {
+    const key = owner + ":" + strategy.id + ":" + symbol;
+    if (locks.has(key)) return store.agent(owner, strategy.id);
+    locks.add(key);
+    let state = store.agent(owner, strategy.id) || {
+      suggestions: [],
+      valuations: [],
+    };
+    const runs = { ...(state.runsBySymbol ?? {}) };
+    let symState = runs[symbol] ?? {};
+    try {
+      if (
+        symState.runId &&
+        !["completed", "completed_with_errors", "failed", "stopped"].includes(
+          symState.status,
+        )
+      ) {
+        const run = await request(
+          `/runs/${encodeURIComponent(symState.runId)}`,
+        );
+        const extracted = extractAgent(run);
+        const checkedAt = new Date().toISOString();
+        symState = {
+          ...symState,
+          status: run.status,
+          job: jobStates(extracted)[symbol] ?? null,
+          lastChecked: checkedAt,
+          error: null,
+        };
+        state = mergeExtracted(state, extracted);
+        applyTrackedItemEvidence(store, owner, strategy.id, extracted, checkedAt);
+      } else if (
+        force ||
+        !symState.lastStarted ||
+        Date.now() - Date.parse(symState.lastStarted) >= DAY
+      ) {
+        const lang = researchLanguage(owner),
+          briefs = optionBriefs(owner, [symbol], lang);
+        const run = await request("/runs", {
+          tickers: [symbol],
+          analysis_date: dateOnly(Date.now()),
+          look_back_days: 365,
+          look_forward_days: 365,
+          output_language: agentOutputLanguage(lang),
+          ...briefs.body,
+        });
+        symState = {
+          ...symState,
+          runId: run.id,
+          status: run.status,
+          job: null,
+          language: lang,
+          optionContext: briefs.meta[symbol] ?? null,
+          lastStarted: new Date().toISOString(),
+          error: null,
+        };
+      }
+    } catch (e) {
+      symState = { ...symState, error: e.message, lastChecked: new Date().toISOString() };
+    } finally {
+      locks.delete(key);
+    }
+    runs[symbol] = symState;
+    state = { ...state, runsBySymbol: runs };
     return store.saveAgent(owner, strategy.id, state);
   }
   let ticking = false;
@@ -220,5 +384,5 @@ export function createAgentService(store) {
       ticking = false;
     }
   }
-  return { refresh, tick };
+  return { refresh, refreshSymbol, tick };
 }

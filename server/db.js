@@ -71,5 +71,42 @@ export const createGptApiRequestLog = (...args) => backend.createGptApiRequestLo
 export const listGptApiRequestLogs = (...args) => backend.listGptApiRequestLogs(...args);
 export const summarizeGptApiRequestLogs = (...args) => backend.summarizeGptApiRequestLogs(...args);
 export const claimLegacyUserData = (...args) => backend.claimLegacyUserData(...args);
+export const listMarketTopics = (...args) => backend.listMarketTopics(...args);
+export const findMarketTopicByTitle = (...args) => backend.findMarketTopicByTitle(...args);
+export const createMarketTopic = (...args) => backend.createMarketTopic(...args);
+export const updateMarketTopic = (...args) => backend.updateMarketTopic(...args);
+export const recordMarketTopicHistory = (...args) => backend.recordMarketTopicHistory(...args);
+export const listMarketTopicHistory = (...args) => backend.listMarketTopicHistory(...args);
+export const maintainMarketTopics = (...args) => backend.maintainMarketTopics(...args);
+export const listAnalysisTaskDefinitions = (...args) => backend.listAnalysisTaskDefinitions(...args);
+export const createAnalysisTaskDefinition = (...args) => backend.createAnalysisTaskDefinition(...args);
+export const updateAnalysisTaskDefinition = (...args) => backend.updateAnalysisTaskDefinition(...args);
+export const deleteAnalysisTaskDefinition = (...args) => backend.deleteAnalysisTaskDefinition(...args);
+export const createAnalysisTask = (...args) => backend.createAnalysisTask(...args);
+export const claimNextPendingTask = (...args) => backend.claimNextPendingTask(...args);
+export const completeAnalysisTask = (...args) => backend.completeAnalysisTask(...args);
+export const listAnalysisTasks = (...args) => backend.listAnalysisTasks(...args);
+export const listDueAnalysisTaskDefinitions = (...args) => backend.listDueAnalysisTaskDefinitions(...args);
+export const advanceAnalysisTaskDefinitionNextRun = (...args) =>
+  backend.advanceAnalysisTaskDefinitionNextRun(...args);
+
+// ── Monitored stocks ────────────────────────────────────────────────────────
+export const listMonitoredStocks = (...args) => backend.listMonitoredStocks(...args);
+export const insertMonitoredStock = (...args) => backend.insertMonitoredStock(...args);
+export const deleteMonitoredStock = (...args) => backend.deleteMonitoredStock(...args);
+export const countMonitoredStocks = (...args) => backend.countMonitoredStocks(...args);
+export const getMaxMonitoredStocks = (...args) => backend.getMaxMonitoredStocks(...args);
+export const setMaxMonitoredStocks = (...args) => backend.setMaxMonitoredStocks(...args);
+
+// ── Tiger IV history (shared) ───────────────────────────────────────────────
+export const listAllMonitoredSymbols = (...args) => backend.listAllMonitoredSymbols(...args);
+export const upsertTigerIvHistory = (...args) => backend.upsertTigerIvHistory(...args);
+export const listTigerIvHistory = (...args) => backend.listTigerIvHistory(...args);
+export const getIvRefreshRun = (...args) => backend.getIvRefreshRun(...args);
+export const saveIvRefreshRun = (...args) => backend.saveIvRefreshRun(...args);
+
+// ── Calendar cache ───────────────────────────────────────────────────────────
+export const getCalendarCache = (...args) => backend.getCalendarCache(...args);
+export const upsertCalendarCache = (...args) => backend.upsertCalendarCache(...args);
 
 export default backend.default ?? null;

@@ -2131,7 +2131,491 @@ export function claimLegacyUserData(userId) {
   ]);
 }
 
+// Columns returned for a market topic wherever it is read or written.
+const MARKET_TOPIC_COLUMNS = `
+  id,
+  title,
+  weight,
+  bullish_score AS "bullishScore",
+  bearish_score AS "bearishScore",
+  summary,
+  category,
+  symbols,
+  status,
+  created_by AS "createdBy",
+  created_at AS "createdAt",
+  updated_at AS "updatedAt"`;
+
+// text[] literal; an empty list becomes an empty array rather than NULL.
+function textArrayLiteral(values) {
+  const items = (values ?? []).map((value) => quoteLiteral(String(value)));
+  return items.length ? `ARRAY[${items.join(", ")}]::text[]` : "'{}'::text[]";
+}
+
+export function listMarketTopics() {
+  return queryJson(`
+    SELECT ${MARKET_TOPIC_COLUMNS}
+    FROM market_topics
+    ORDER BY weight DESC, updated_at DESC
+  `);
+}
+
+// Titles are compared case-insensitively with width variants folded and spaces ignored (shared/marketTopics.js
+// topicTitleKey is the same rule): a title typed with a full-width colon, or with or without a space between Chinese
+// and Latin text, is the same topic. When several rows fold to one key, the one spelled exactly as asked wins, then an
+// active one, then the most recently updated.
+const topicTitleKeySql = (expression) => `lower(regexp_replace(normalize(${expression}, NFKC), '\\s+', '', 'g'))`;
+
+export function findMarketTopicByTitle(title) {
+  const wanted = quoteLiteral(String(title ?? "").trim());
+  return queryJson(
+    `
+      SELECT ${MARKET_TOPIC_COLUMNS}
+      FROM market_topics
+      WHERE ${topicTitleKeySql("title")} = ${topicTitleKeySql(wanted)}
+      ORDER BY (lower(title) = lower(${wanted})) DESC, (status = 'active') DESC, updated_at DESC, id
+      LIMIT 1
+    `,
+    false
+  );
+}
+
+export function createMarketTopic(data) {
+  return mutateJson(
+    `
+      INSERT INTO market_topics (
+        title, weight, bullish_score, bearish_score, summary, category, symbols, status, created_by
+      ) VALUES (
+        ${quoteLiteral(data.title)},
+        ${Number(data.weight)},
+        ${Number(data.bullishScore)},
+        ${Number(data.bearishScore)},
+        ${quoteLiteral(data.summary)},
+        ${quoteLiteral(data.category ?? "general")},
+        ${textArrayLiteral(data.symbols)},
+        ${quoteLiteral(data.status ?? "active")},
+        ${quoteLiteral(data.createdBy ?? "agent")}
+      )
+      RETURNING ${MARKET_TOPIC_COLUMNS}
+    `,
+    false
+  );
+}
+
+// Appends the topic's current analysis to its history unless it is identical to the latest entry.
+export function recordMarketTopicHistory(topic) {
+  return mutateJson(
+    `
+      INSERT INTO market_topic_history (topic_id, weight, bullish_score, bearish_score, summary, category, symbols)
+      SELECT t.id, t.weight, t.bullish_score, t.bearish_score, t.summary, t.category, t.symbols
+      FROM market_topics t
+      WHERE t.id = ${Number(topic.id)}
+        AND NOT EXISTS (
+          SELECT 1 FROM (
+            SELECT * FROM market_topic_history WHERE topic_id = t.id ORDER BY recorded_at DESC, id DESC LIMIT 1
+          ) h
+          WHERE h.summary = t.summary AND h.weight = t.weight
+            AND h.bullish_score = t.bullish_score AND h.bearish_score = t.bearish_score
+        )
+      RETURNING id
+    `,
+    false
+  );
+}
+
+export function listMarketTopicHistory(topicId, limit = 60) {
+  return queryJson(`
+    SELECT
+      id,
+      recorded_at AS "recordedAt",
+      weight,
+      bullish_score AS "bullishScore",
+      bearish_score AS "bearishScore",
+      summary,
+      category,
+      symbols
+    FROM market_topic_history
+    WHERE topic_id = ${Number(topicId)}
+    ORDER BY recorded_at DESC, id DESC
+    LIMIT ${Math.min(Math.max(Number(limit) || 60, 1), 500)}
+  `);
+}
+
+// Lifecycle: 30 days without an update -> archived (hidden from suggestions); 180 days archived -> deleted.
+export function maintainMarketTopics() {
+  const archived = mutateJson(
+    `UPDATE market_topics SET status = 'archived', archived_at = NOW()
+     WHERE status = 'active' AND updated_at < NOW() - INTERVAL '30 days' RETURNING id`,
+    true
+  );
+  const removed = mutateJson(
+    `DELETE FROM market_topics
+     WHERE status = 'archived' AND archived_at < NOW() - INTERVAL '180 days' RETURNING id`,
+    true
+  );
+  return { archived: archived.length, removed: removed.length };
+}
+
+// category / symbols are only written when provided, so callers that predate them cannot reset them.
+export function updateMarketTopic(id, data) {
+  return mutateJson(
+    `
+      UPDATE market_topics SET
+        weight = ${Number(data.weight)},
+        bullish_score = ${Number(data.bullishScore)},
+        bearish_score = ${Number(data.bearishScore)},
+        summary = ${quoteLiteral(data.summary)},
+        ${data.category ? `category = ${quoteLiteral(data.category)},` : ""}
+        ${data.symbols ? `symbols = ${textArrayLiteral(data.symbols)},` : ""}
+        status = ${quoteLiteral(data.status ?? "active")},
+        archived_at = NULL,
+        updated_at = NOW()
+      WHERE id = ${Number(id)}
+      RETURNING ${MARKET_TOPIC_COLUMNS}
+    `,
+    false
+  );
+}
+
+export function listAnalysisTaskDefinitions() {
+  return queryJson(`
+    SELECT
+      d.id,
+      d.topic_id AS "topicId",
+      t.title AS "topicTitle",
+      d.prompt,
+      d.source,
+      d.cadence,
+      d.next_run_at AS "nextRunAt",
+      d.active,
+      d.created_at AS "createdAt",
+      d.updated_at AS "updatedAt"
+    FROM analysis_task_definitions d
+    LEFT JOIN market_topics t ON t.id = d.topic_id
+    ORDER BY d.created_at DESC
+  `);
+}
+
+export function createAnalysisTaskDefinition(data) {
+  return mutateJson(
+    `
+      INSERT INTO analysis_task_definitions (
+        topic_id, prompt, source, cadence, next_run_at, active
+      ) VALUES (
+        ${data.topicId == null ? "NULL" : Number(data.topicId)},
+        ${quoteLiteral(data.prompt)},
+        ${quoteLiteral(data.source ?? "agent")},
+        ${data.cadence ? quoteLiteral(data.cadence) : "NULL"},
+        ${data.nextRunAt ? quoteLiteral(data.nextRunAt) : "NOW()"},
+        ${data.active === false ? "FALSE" : "TRUE"}
+      )
+      RETURNING
+        id,
+        topic_id AS "topicId",
+        prompt,
+        source,
+        cadence,
+        next_run_at AS "nextRunAt",
+        active,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+    `,
+    false
+  );
+}
+
+export function updateAnalysisTaskDefinition(id, data) {
+  const fields = [];
+  if (data.prompt !== undefined) fields.push(`prompt = ${quoteLiteral(data.prompt)}`);
+  if (data.cadence !== undefined) fields.push(`cadence = ${data.cadence ? quoteLiteral(data.cadence) : "NULL"}`);
+  if (data.active !== undefined) fields.push(`active = ${data.active ? "TRUE" : "FALSE"}`);
+  if (data.nextRunAt !== undefined) fields.push(`next_run_at = ${quoteLiteral(data.nextRunAt)}`);
+  fields.push("updated_at = NOW()");
+
+  return mutateJson(
+    `
+      UPDATE analysis_task_definitions SET ${fields.join(", ")}
+      WHERE id = ${Number(id)}
+      RETURNING
+        id,
+        topic_id AS "topicId",
+        prompt,
+        source,
+        cadence,
+        next_run_at AS "nextRunAt",
+        active,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+    `,
+    false
+  );
+}
+
+export function deleteAnalysisTaskDefinition(id) {
+  return executeReturning(`
+    DELETE FROM analysis_task_definitions WHERE id = ${Number(id)} RETURNING id
+  `);
+}
+
+export function createAnalysisTask(data) {
+  return mutateJson(
+    `
+      INSERT INTO analysis_tasks (
+        definition_id, topic_id, prompt, scheduled_for
+      ) VALUES (
+        ${data.definitionId == null ? "NULL" : Number(data.definitionId)},
+        ${data.topicId == null ? "NULL" : Number(data.topicId)},
+        ${quoteLiteral(data.prompt)},
+        ${data.scheduledFor ? quoteLiteral(data.scheduledFor) : "NOW()"}
+      )
+      RETURNING
+        id,
+        definition_id AS "definitionId",
+        topic_id AS "topicId",
+        prompt,
+        status,
+        scheduled_for AS "scheduledFor",
+        claimed_at AS "claimedAt",
+        completed_at AS "completedAt",
+        result,
+        created_at AS "createdAt"
+    `,
+    false
+  );
+}
+
+// A claimed task that never gets completed (chat closed, client crashed) is handed out again after this long.
+export const ANALYSIS_TASK_CLAIM_TIMEOUT_MINUTES = 30;
+
+export function claimNextPendingTask() {
+  return mutateJson(
+    `
+      UPDATE analysis_tasks SET status = 'claimed', claimed_at = NOW()
+      WHERE id = (
+        SELECT id FROM analysis_tasks
+        WHERE status = 'pending'
+          OR (status = 'claimed' AND claimed_at < NOW() - INTERVAL '${ANALYSIS_TASK_CLAIM_TIMEOUT_MINUTES} minutes')
+        ORDER BY scheduled_for ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING
+        id,
+        definition_id AS "definitionId",
+        topic_id AS "topicId",
+        prompt,
+        status,
+        scheduled_for AS "scheduledFor",
+        claimed_at AS "claimedAt",
+        completed_at AS "completedAt",
+        result,
+        created_at AS "createdAt"
+    `,
+    false
+  );
+}
+
+export function completeAnalysisTask(id, result) {
+  return mutateJson(
+    `
+      UPDATE analysis_tasks SET
+        status = 'done',
+        completed_at = NOW(),
+        result = ${quoteLiteral(result)}
+      WHERE id = ${Number(id)}
+      RETURNING
+        id,
+        definition_id AS "definitionId",
+        topic_id AS "topicId",
+        prompt,
+        status,
+        scheduled_for AS "scheduledFor",
+        claimed_at AS "claimedAt",
+        completed_at AS "completedAt",
+        result,
+        created_at AS "createdAt"
+    `,
+    false
+  );
+}
+
+// Newest first, for the Admin "Recent runs" list. `prompt` is the copy the task was created with, so it stays
+// accurate after its definition is edited or deleted; `result` is the write-up the AI submitted.
+export function listAnalysisTasks(limit = 50) {
+  return queryJson(`
+    SELECT
+      k.id,
+      k.definition_id AS "definitionId",
+      k.topic_id AS "topicId",
+      t.title AS "topicTitle",
+      k.prompt,
+      k.status,
+      k.scheduled_for AS "scheduledFor",
+      k.claimed_at AS "claimedAt",
+      k.completed_at AS "completedAt",
+      k.result,
+      k.created_at AS "createdAt"
+    FROM analysis_tasks k
+    LEFT JOIN market_topics t ON t.id = k.topic_id
+    ORDER BY k.scheduled_for DESC, k.id DESC
+    LIMIT ${Math.min(Math.max(Math.trunc(Number(limit)) || 50, 1), 200)}
+  `);
+}
+
+export function listDueAnalysisTaskDefinitions() {
+  return queryJson(`
+    SELECT
+      id,
+      topic_id AS "topicId",
+      prompt,
+      cadence,
+      next_run_at AS "nextRunAt"
+    FROM analysis_task_definitions
+    WHERE active = TRUE AND next_run_at <= NOW()
+  `);
+}
+
+export function advanceAnalysisTaskDefinitionNextRun(id, nextRunAt) {
+  execute(`
+    UPDATE analysis_task_definitions SET next_run_at = ${quoteLiteral(nextRunAt)}, updated_at = NOW()
+    WHERE id = ${Number(id)}
+  `);
+}
+
+// ── Monitored stocks ────────────────────────────────────────────────────────
+
+export function listMonitoredStocks(userId) {
+  return queryJson(
+    `SELECT symbol, added_at AS "addedAt"
+     FROM monitored_stocks
+     WHERE user_id = ${quoteLiteral(String(userId))}
+     ORDER BY added_at DESC`
+  );
+}
+
+export function insertMonitoredStock(userId, symbol) {
+  mutateJson(
+    `INSERT INTO monitored_stocks (user_id, symbol)
+     VALUES (${quoteLiteral(String(userId))}, ${quoteLiteral(symbol.toUpperCase())})
+     ON CONFLICT DO NOTHING
+     RETURNING symbol`,
+    false
+  );
+}
+
+export function deleteMonitoredStock(userId, symbol) {
+  execute(
+    `DELETE FROM monitored_stocks
+     WHERE user_id = ${quoteLiteral(String(userId))}
+       AND symbol = ${quoteLiteral(symbol.toUpperCase())}`
+  );
+}
+
+export function countMonitoredStocks(userId) {
+  const row = queryJson(
+    `SELECT COUNT(*)::int AS count FROM monitored_stocks WHERE user_id = ${quoteLiteral(String(userId))}`,
+    false
+  );
+  return row?.count ?? 0;
+}
+
+export function getMaxMonitoredStocks(userId) {
+  const row = queryJson(
+    `SELECT max_monitored_stocks AS "maxSlots" FROM users WHERE id = ${quoteLiteral(String(userId))}`,
+    false
+  );
+  return row?.maxSlots ?? 5;
+}
+
+export function setMaxMonitoredStocks(userId, limit) {
+  execute(
+    `UPDATE users SET max_monitored_stocks = ${Number(limit)}, updated_at = NOW()
+     WHERE id = ${quoteLiteral(String(userId))}`
+  );
+}
+
+export function getCalendarCache(key) {
+  return queryJson(
+    `SELECT payload_json AS payload, fetched_date AS "fetchedDate"
+     FROM calendar_cache
+     WHERE cache_key = ${quoteLiteral(String(key))}
+       AND fetched_date = CURRENT_DATE`,
+    false
+  );
+}
+
+export function upsertCalendarCache(key, payload) {
+  mutateJson(
+    `INSERT INTO calendar_cache (cache_key, payload_json, fetched_date)
+     VALUES (${quoteLiteral(String(key))}, ${quoteJson(payload)}, CURRENT_DATE)
+     ON CONFLICT (cache_key) DO UPDATE
+       SET payload_json = EXCLUDED.payload_json,
+           fetched_date = CURRENT_DATE`,
+    false
+  );
+}
+
 export default {
   type: "postgres",
   databaseUrl
 };
+
+// ── Tiger IV history (shared across users) ───────────────────────────────────
+
+export function listAllMonitoredSymbols() {
+  return queryJson(`SELECT DISTINCT symbol FROM monitored_stocks ORDER BY symbol`).map((row) => row.symbol);
+}
+
+export function upsertTigerIvHistory(symbol, rows = []) {
+  const normalized = String(symbol).trim().toUpperCase();
+  for (let i = 0; i < rows.length; i += 500) {
+    const values = rows
+      .slice(i, i + 500)
+      .map(
+        (r) =>
+          `(${quoteLiteral(normalized)}, ${quoteLiteral(r.date)}, ${quoteLiteral(r.impliedVol ?? null)}, ${quoteLiteral(r.hisVolatility ?? null)}, ${quoteLiteral(r.providerRank ?? null)}, ${quoteLiteral(r.providerPercentile ?? null)}, NOW())`
+      )
+      .join(",\n");
+    execute(`
+      INSERT INTO tiger_iv_history (symbol, date, implied_vol, his_volatility, provider_rank, provider_percentile, fetched_at)
+      VALUES ${values}
+      ON CONFLICT (symbol, date) DO UPDATE SET
+        implied_vol = EXCLUDED.implied_vol,
+        his_volatility = EXCLUDED.his_volatility,
+        provider_rank = EXCLUDED.provider_rank,
+        provider_percentile = EXCLUDED.provider_percentile,
+        fetched_at = NOW()
+    `);
+  }
+}
+
+export function listTigerIvHistory(symbol, limit = 800) {
+  return queryJson(`
+    SELECT date, implied_vol AS "impliedVol", his_volatility AS "hisVolatility",
+           provider_rank AS "providerRank", provider_percentile AS "providerPercentile"
+    FROM tiger_iv_history
+    WHERE symbol = ${quoteLiteral(String(symbol).trim().toUpperCase())}
+    ORDER BY date DESC
+    LIMIT ${Math.max(Number(limit) || 0, 0)}
+  `);
+}
+
+export function getIvRefreshRun(runDate) {
+  return queryJson(
+    `SELECT run_date AS "runDate", status, symbols_total AS "symbolsTotal", symbols_ok AS "symbolsOk",
+            failed_symbols AS "failedSymbols", attempts, error, finished_at AS "finishedAt"
+     FROM iv_refresh_runs WHERE run_date = ${quoteLiteral(runDate)}`,
+    false
+  );
+}
+
+export function saveIvRefreshRun(run) {
+  execute(`
+    INSERT INTO iv_refresh_runs (run_date, status, symbols_total, symbols_ok, failed_symbols, attempts, error, finished_at)
+    VALUES (${quoteLiteral(run.runDate)}, ${quoteLiteral(run.status)}, ${quoteLiteral(run.symbolsTotal)}, ${quoteLiteral(run.symbolsOk)},
+            ${quoteLiteral(run.failedSymbols ?? null)}, ${quoteLiteral(run.attempts)}, ${quoteLiteral(run.error ?? null)}, NOW())
+    ON CONFLICT (run_date) DO UPDATE SET
+      status = EXCLUDED.status, symbols_total = EXCLUDED.symbols_total, symbols_ok = EXCLUDED.symbols_ok,
+      failed_symbols = EXCLUDED.failed_symbols, attempts = EXCLUDED.attempts, error = EXCLUDED.error, finished_at = NOW()
+  `);
+}

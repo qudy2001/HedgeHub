@@ -31,10 +31,17 @@ function buildSignal(match, direction, triggerType) {
 }
 
 const CLOSE_UP_PATTERNS = [
+  /\b(?:finish(?:es)?|close(?:s)?|end(?:s)?)\b[^$]*?\b(?:above|over)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i,
+  /\babove\s*\$?\s*([\d,.]+)\s*([kKmM])?\s+on\b/i,
+  // "Will X be above $N on <date>?" resolves on the terminal price, not on a touch.
+  /\b(?:be|is)\s+(?:above|over|at least)\s*\$?\s*([\d,.]+)\s*([kKmM])?\s+on\b/i,
   /(?:close(?:s|d)?|settle(?:s|d)?|finish(?:es|ed)?|end(?:s|ed)?(?:\s+the\s+(?:final\s+)?trading\s+day)?)\s+(?:above|over|at least)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i
 ];
 
 const CLOSE_DOWN_PATTERNS = [
+  /\b(?:finish(?:es)?|close(?:s)?|end(?:s)?)\b[^$]*?\b(?:below|under)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i,
+  /\bbelow\s*\$?\s*([\d,.]+)\s*([kKmM])?\s+on\b/i,
+  /\b(?:be|is)\s+(?:below|under|at most|no more than)\s*\$?\s*([\d,.]+)\s*([kKmM])?\s+on\b/i,
   /(?:close(?:s|d)?|settle(?:s|d)?|finish(?:es|ed)?|end(?:s|ed)?(?:\s+the\s+(?:final\s+)?trading\s+day)?)\s+(?:below|under|at most|no more than)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i
 ];
 
@@ -66,6 +73,15 @@ export function parsePolymarketQuestionSignal(question) {
     if (match) {
       return buildSignal(match, "down", "close");
     }
+  }
+
+  // Polymarket hit events mark the side with (HIGH)/(LOW), either before or after the price.
+  const priceMatch = normalizedQuestion.match(/\$\s*([\d,.]+)\s*([kKmM])?/);
+  if (priceMatch && /\(\s*low\s*\)/i.test(normalizedQuestion)) {
+    return buildSignal(priceMatch, "down", "touch");
+  }
+  if (priceMatch && /\(\s*high\s*\)/i.test(normalizedQuestion)) {
+    return buildSignal(priceMatch, "up", "touch");
   }
 
   for (const pattern of TOUCH_UP_PATTERNS) {

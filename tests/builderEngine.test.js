@@ -256,3 +256,45 @@ test("TradingAgents extraction preserves missing targets and does not verify or 
   delete run.jobs.AAPL.report_sections.final_trade_decision;
   assert.equal(extractAgent(run).valuations[0].priceTarget, null);
 });
+
+test("a failed or unfinished agent run keeps the last saved research", async () => {
+  const { mergeExtracted, jobStates } = await import("../server/builder/agents.js");
+  const saved = {
+    valuations: [
+      { symbol: "NVDA", rating: "Bullish", status: "completed" },
+      { symbol: "TSLA", rating: "Neutral", status: "completed" },
+    ],
+    suggestions: [{ id: "n1", symbol: "NVDA", sourceSection: "news_report" }],
+  };
+  const failed = extractAgent({
+    id: "r2",
+    jobs: {
+      NVDA: {
+        status: "failed",
+        error: "Error code: 402 - {'error': {'message': 'Insufficient Balance'}}",
+        report_sections: { news_report: "", final_trade_decision: "" },
+      },
+    },
+  });
+  const afterFailure = mergeExtracted(saved, failed);
+  assert.deepEqual(afterFailure.valuations, saved.valuations);
+  assert.deepEqual(afterFailure.suggestions, saved.suggestions);
+  assert.equal(jobStates(failed).NVDA.status, "failed");
+  assert.match(jobStates(failed).NVDA.error, /Insufficient Balance/);
+  assert.deepEqual(jobStates(failed).NVDA.progress, { done: 0, total: 2 });
+
+  const completed = extractAgent({
+    id: "r3",
+    jobs: {
+      NVDA: {
+        status: "completed",
+        decision: "Sell",
+        report_sections: { news_report: "x", final_trade_decision: "y" },
+      },
+    },
+  });
+  const afterSuccess = mergeExtracted(saved, completed);
+  assert.equal(afterSuccess.valuations.find((v) => v.symbol === "NVDA").rating, "Strong bearish");
+  assert.equal(afterSuccess.valuations.find((v) => v.symbol === "TSLA").rating, "Neutral");
+  assert.equal(afterSuccess.suggestions.length, 0);
+});

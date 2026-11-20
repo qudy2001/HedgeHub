@@ -111,9 +111,12 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("user");
+  const [maxMonitoredStocks, setMaxMonitoredStocks] = useState(5);
 
   const [selectedUserId, setSelectedUserId] = useState("");
   const [apiKeyLabel, setApiKeyLabel] = useState("GPT access");
+  const [editingStockLimitId, setEditingStockLimitId] = useState(null);
+  const [stockLimitValues, setStockLimitValues] = useState({});
 
   const userCountLabel = useMemo(() => {
     const count = users.length;
@@ -225,7 +228,8 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
           body: JSON.stringify({
             username: trimmedUsername,
             password,
-            role: normalizedRole
+            role: normalizedRole,
+            maxMonitoredStocks
           })
         });
         handleAuthError(response);
@@ -238,6 +242,7 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
         setUsername("");
         setPassword("");
         setRole("user");
+        setMaxMonitoredStocks(5);
         if (!selectedUserId && payload?.user?.id) {
           setSelectedUserId(payload.user.id);
         }
@@ -254,7 +259,7 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
         setBusy(false);
       }
     },
-    [handleAuthError, password, role, selectedUserId, username]
+    [handleAuthError, password, role, selectedUserId, username, maxMonitoredStocks]
   );
 
   const handleCreateApiKey = useCallback(
@@ -359,6 +364,58 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
     [handleAuthError]
   );
 
+  const handleUpdateMonitoredStockLimit = useCallback(
+    async (userId, newLimit) => {
+      const limitValue = Number(newLimit);
+      if (!Number.isFinite(limitValue) || limitValue < 1 || limitValue > 20) {
+        setError("Monitored stocks limit must be between 1 and 20");
+        return;
+      }
+
+      setBusy(true);
+      setError("");
+      setNotice(null);
+
+      try {
+        const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/monitored-stocks-limit`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            maxMonitoredStocks: limitValue
+          })
+        });
+        handleAuthError(response);
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload?.error || `Failed to update limit (${response.status})`);
+        }
+
+        setUsers((current) =>
+          (current ?? []).map((user) =>
+            user.id === userId
+              ? { ...user, maxMonitoredStocks: limitValue }
+              : user
+          )
+        );
+        setEditingStockLimitId(null);
+        setNotice({
+          tone: "success",
+          message: `Monitored stocks limit updated to ${limitValue}.`
+        });
+      } catch (updateError) {
+        if (String(updateError?.code ?? "") !== "AUTH_REQUIRED") {
+          setError(updateError.message);
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [handleAuthError]
+  );
+
   return (
     <main className="workspace workspace--admin-users">
       <header className="topbar">
@@ -411,6 +468,18 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
                   <option value="user">User</option>
                   <option value="admin">Admin</option>
                 </select>
+              </label>
+              <label>
+                <span>Monitored stocks limit</span>
+                <input
+                  type="number"
+                  value={maxMonitoredStocks}
+                  onChange={(event) => setMaxMonitoredStocks(Math.max(1, Math.min(20, Number(event.target.value) || 5)))}
+                  min="1"
+                  max="20"
+                  placeholder="5"
+                  disabled={busy}
+                />
               </label>
 
               <div className="admin-users__actions">
@@ -485,6 +554,46 @@ export default function AdminUsersWorkspace({ onAuthRequired = null } = {}) {
                       <span className={`pill ${user.disabled ? "pill--short" : "pill--live"}`}>
                         {user.disabled ? "disabled" : "active"}
                       </span>
+                      {editingStockLimitId === user.id ? (
+                        <div className="admin-users__edit-limit">
+                          <input
+                            type="number"
+                            value={stockLimitValues[user.id] ?? user.maxMonitoredStocks ?? 5}
+                            onChange={(e) => setStockLimitValues({ ...stockLimitValues, [user.id]: Number(e.target.value) })}
+                            min="1"
+                            max="20"
+                            disabled={busy}
+                          />
+                          <button
+                            type="button"
+                            className="macro-layout-button"
+                            onClick={() => handleUpdateMonitoredStockLimit(user.id, stockLimitValues[user.id] ?? user.maxMonitoredStocks ?? 5)}
+                            disabled={busy}
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            className="macro-layout-button"
+                            onClick={() => setEditingStockLimitId(null)}
+                            disabled={busy}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="macro-layout-button"
+                          onClick={() => {
+                            setEditingStockLimitId(user.id);
+                            setStockLimitValues({ ...stockLimitValues, [user.id]: user.maxMonitoredStocks ?? 5 });
+                          }}
+                          disabled={busy}
+                        >
+                          Stock limit: {user.maxMonitoredStocks ?? 5}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}

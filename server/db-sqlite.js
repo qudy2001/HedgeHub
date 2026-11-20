@@ -2501,4 +2501,195 @@ export function claimLegacyUserData(userId) {
   })();
 }
 
+function postgresOnlyFeature() {
+  throw new Error(
+    "Market topics and analysis tasks require DB_TYPE=postgres; this feature is not available on the SQLite backend."
+  );
+}
+
+export const listMarketTopics = postgresOnlyFeature;
+export const findMarketTopicByTitle = postgresOnlyFeature;
+export const createMarketTopic = postgresOnlyFeature;
+export const updateMarketTopic = postgresOnlyFeature;
+export const recordMarketTopicHistory = postgresOnlyFeature;
+export const listMarketTopicHistory = postgresOnlyFeature;
+export const maintainMarketTopics = postgresOnlyFeature;
+export const listAnalysisTaskDefinitions = postgresOnlyFeature;
+export const createAnalysisTaskDefinition = postgresOnlyFeature;
+export const updateAnalysisTaskDefinition = postgresOnlyFeature;
+export const deleteAnalysisTaskDefinition = postgresOnlyFeature;
+export const createAnalysisTask = postgresOnlyFeature;
+export const claimNextPendingTask = postgresOnlyFeature;
+export const completeAnalysisTask = postgresOnlyFeature;
+export const listDueAnalysisTaskDefinitions = postgresOnlyFeature;
+export const advanceAnalysisTaskDefinitionNextRun = postgresOnlyFeature;
+
+// Admin "Recent runs": SQLite has no analysis tasks, so the list is simply empty.
+export function listAnalysisTasks() {
+  return [];
+}
+
+// ── Monitored stocks ────────────────────────────────────────────────────────
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS monitored_stocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL,
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, symbol)
+  );
+  CREATE INDEX IF NOT EXISTS idx_monitored_stocks_user_id ON monitored_stocks(user_id);
+`);
+migrateAddColumn("users", "max_monitored_stocks INTEGER DEFAULT 5");
+
+const _listMonitoredStocks = db.prepare(
+  `SELECT symbol, added_at AS addedAt FROM monitored_stocks WHERE user_id = ? ORDER BY added_at DESC`
+);
+export function listMonitoredStocks(userId) {
+  return _listMonitoredStocks.all(String(userId));
+}
+
+const _insertMonitoredStock = db.prepare(
+  `INSERT OR IGNORE INTO monitored_stocks (user_id, symbol) VALUES (?, ?)`
+);
+export function insertMonitoredStock(userId, symbol) {
+  _insertMonitoredStock.run(String(userId), symbol.toUpperCase());
+}
+
+const _deleteMonitoredStock = db.prepare(
+  `DELETE FROM monitored_stocks WHERE user_id = ? AND symbol = ?`
+);
+export function deleteMonitoredStock(userId, symbol) {
+  _deleteMonitoredStock.run(String(userId), symbol.toUpperCase());
+}
+
+const _countMonitoredStocks = db.prepare(
+  `SELECT COUNT(*) AS count FROM monitored_stocks WHERE user_id = ?`
+);
+export function countMonitoredStocks(userId) {
+  return _countMonitoredStocks.get(String(userId))?.count ?? 0;
+}
+
+const _getMaxMonitoredStocks = db.prepare(
+  `SELECT max_monitored_stocks AS maxSlots FROM users WHERE id = ?`
+);
+export function getMaxMonitoredStocks(userId) {
+  return _getMaxMonitoredStocks.get(String(userId))?.maxSlots ?? 5;
+}
+
+const _setMaxMonitoredStocks = db.prepare(
+  `UPDATE users SET max_monitored_stocks = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+);
+export function setMaxMonitoredStocks(userId, limit) {
+  _setMaxMonitoredStocks.run(Number(limit), String(userId));
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS calendar_cache (
+    cache_key    TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    fetched_date TEXT NOT NULL DEFAULT (date('now'))
+  );
+`);
+
+const _getCalendarCache = db.prepare(
+  `SELECT payload_json AS payload FROM calendar_cache WHERE cache_key = ? AND fetched_date = date('now')`
+);
+export function getCalendarCache(key) {
+  const row = _getCalendarCache.get(String(key));
+  if (!row) return null;
+  try { return { payload: JSON.parse(row.payload) }; } catch { return null; }
+}
+
+const _upsertCalendarCache = db.prepare(
+  `INSERT INTO calendar_cache (cache_key, payload_json, fetched_date)
+   VALUES (?, ?, date('now'))
+   ON CONFLICT (cache_key) DO UPDATE SET payload_json = excluded.payload_json, fetched_date = date('now')`
+);
+export function upsertCalendarCache(key, payload) {
+  _upsertCalendarCache.run(String(key), JSON.stringify(payload));
+}
+
 export default db;
+
+// ── Tiger IV history (shared across users) ───────────────────────────────────
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tiger_iv_history (
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,
+    implied_vol REAL,
+    his_volatility REAL,
+    provider_rank REAL,
+    provider_percentile REAL,
+    fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, date)
+  );
+  CREATE TABLE IF NOT EXISTS iv_refresh_runs (
+    run_date TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    symbols_total INTEGER NOT NULL DEFAULT 0,
+    symbols_ok INTEGER NOT NULL DEFAULT 0,
+    failed_symbols TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    finished_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+export function listAllMonitoredSymbols() {
+  return db.prepare(`SELECT DISTINCT symbol FROM monitored_stocks ORDER BY symbol`).all().map((row) => row.symbol);
+}
+
+export function upsertTigerIvHistory(symbol, rows = []) {
+  const statement = db.prepare(`
+    INSERT INTO tiger_iv_history (symbol, date, implied_vol, his_volatility, provider_rank, provider_percentile, fetched_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(symbol, date) DO UPDATE SET
+      implied_vol = excluded.implied_vol,
+      his_volatility = excluded.his_volatility,
+      provider_rank = excluded.provider_rank,
+      provider_percentile = excluded.provider_percentile,
+      fetched_at = CURRENT_TIMESTAMP
+  `);
+  const normalized = String(symbol).trim().toUpperCase();
+  db.transaction(() => {
+    for (const r of rows) {
+      statement.run(normalized, r.date, r.impliedVol ?? null, r.hisVolatility ?? null, r.providerRank ?? null, r.providerPercentile ?? null);
+    }
+  })();
+}
+
+export function listTigerIvHistory(symbol, limit = 800) {
+  return db
+    .prepare(
+      `SELECT date, implied_vol AS impliedVol, his_volatility AS hisVolatility,
+              provider_rank AS providerRank, provider_percentile AS providerPercentile
+       FROM tiger_iv_history WHERE symbol = ? ORDER BY date DESC LIMIT ?`
+    )
+    .all(String(symbol).trim().toUpperCase(), Math.max(Number(limit) || 0, 0));
+}
+
+export function getIvRefreshRun(runDate) {
+  return (
+    db
+      .prepare(
+        `SELECT run_date AS runDate, status, symbols_total AS symbolsTotal, symbols_ok AS symbolsOk,
+                failed_symbols AS failedSymbols, attempts, error, finished_at AS finishedAt
+         FROM iv_refresh_runs WHERE run_date = ?`
+      )
+      .get(runDate) ?? null
+  );
+}
+
+export function saveIvRefreshRun(run) {
+  db.prepare(
+    `INSERT INTO iv_refresh_runs (run_date, status, symbols_total, symbols_ok, failed_symbols, attempts, error, finished_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(run_date) DO UPDATE SET
+       status = excluded.status, symbols_total = excluded.symbols_total, symbols_ok = excluded.symbols_ok,
+       failed_symbols = excluded.failed_symbols, attempts = excluded.attempts, error = excluded.error,
+       finished_at = CURRENT_TIMESTAMP`
+  ).run(run.runDate, run.status, run.symbolsTotal, run.symbolsOk, run.failedSymbols ?? null, run.attempts, run.error ?? null);
+}

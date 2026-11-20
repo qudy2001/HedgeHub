@@ -46,6 +46,7 @@ services:
       MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
       TIGER_BRIDGE_URL: ${TIGER_BRIDGE_URL:-http://tiger-bridge:8788}
       TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:-}
+      TIGER_OPTION_DEPTH: ${TIGER_OPTION_DEPTH:-false}
       TRADINGAGENTS_URL: ${TRADINGAGENTS_URL:-http://tradingagents:8000}
       TRADINGAGENTS_TOKEN: ${TRADINGAGENTS_TOKEN:-}
     volumes:
@@ -90,6 +91,7 @@ services:
       MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
       TIGER_BRIDGE_URL: ${TIGER_BRIDGE_URL:-http://tiger-bridge:8788}
       TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:-}
+      TIGER_OPTION_DEPTH: ${TIGER_OPTION_DEPTH:-false}
     volumes:
       - ${HEDGEHUB_DATA_DIR:-./data}:/app/data
       - ${HEDGEHUB_DASHBOARDS_DIR:-./dashboards}:/app/dashboards
@@ -133,6 +135,69 @@ services:
       TRADINGAGENTS_WEB_COOKIE_SECURE: ${TRADINGAGENTS_WEB_COOKIE_SECURE:-false}
     ports:
       - "${TRADINGAGENTS_PORT:-8000}:8000"
+    volumes:
+      # Settings, saved API keys, run history and logs. Without this they live in
+      # the container and are lost whenever it is recreated.
+      - tradingagents_data:/home/appuser/.tradingagents
+
+  # Optional: only starts with `docker compose --profile mcp up -d`.
+  # MCP server (see mcp-server/) that exposes market topics / analysis tasks to
+  # ChatGPT, Claude and Grok connectors. It is never published on a host port;
+  # the cloudflared service below reaches it as http://mcp:8790 on this network.
+  # Requires HEDGEHUB_API_KEY (admin UI -> API keys) and MCP_ACCESS_TOKEN
+  # (`openssl rand -hex 24`) in .env.
+  mcp:
+    container_name: ${MCP_CONTAINER_NAME:-hedgehub-mcp}
+    image: ${MCP_IMAGE:-hedgehub-mcp-server:local}
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    profiles:
+      - mcp
+    init: true
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      HEDGEHUB_API_URL: ${MCP_HEDGEHUB_API_URL:-http://web:8787}
+      HEDGEHUB_API_KEY: ${HEDGEHUB_API_KEY:-}
+      MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-}
+    expose:
+      - "8790"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8790/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  # Optional: starts together with mcp under `--profile mcp`.
+  # Remotely-managed Cloudflare tunnel. Create it in Cloudflare Zero Trust ->
+  # Networks -> Tunnels, copy its token into CLOUDFLARE_TUNNEL_TOKEN, and add a
+  # public hostname whose service is HTTP `mcp:8790`. No inbound ports needed.
+  cloudflared:
+    container_name: ${CLOUDFLARED_CONTAINER_NAME:-hedgehub-cloudflared}
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    profiles:
+      - mcp
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    depends_on:
+      mcp:
+        condition: service_healthy
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+      # auto | quic | http2. Use http2 if UDP/7844 is blocked on your network.
+      TUNNEL_TRANSPORT_PROTOCOL: ${CLOUDFLARED_PROTOCOL:-auto}
 
 volumes:
   postgres_data:
+  tradingagents_data:

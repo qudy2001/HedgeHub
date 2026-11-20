@@ -3,26 +3,36 @@ import { createDistributionLoader } from "./distributions.js";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { createBuilderStore } from "./store.js";
+import { createSnapshotStore } from "./snapshotStore.js";
 import { createAgentService, agentConfigured } from "./agents.js";
+import { CONTENT_LANGUAGES, normalizeContentLanguage } from "../../shared/contentLanguage.js";
+import { createOptionContext } from "./optionContext.js";
 import {
   DEFAULT_STRATEGY,
   TEMPLATES,
   validateStrategy,
   buildCandidates,
   applyCatalysts,
+  riskAdjustment,
   DAY,
   dateOnly,
   addDays,
   number,
 } from "../../shared/builderEngine.js";
 import { fetchQuotes, fetchOptionChain } from "../providers/marketData.js";
+import { getTigerRateLimitState, withRateLimitWaiting } from "../providers/tiger.js";
 import { fetchStockDailyOhlcHistory } from "../stockOhlcHistory.js";
+import { buildPriceZones } from "../coveredIncomeScanner.js";
 import {
   fetchCompanyEventsCalendar,
+  fetchEconomicCalendar,
   fetchEconomicCalendarWindow,
 } from "../providers/tradingViewCalendars.js";
 import { curatedCatalysts } from "../researchCatalysts.js";
-const defaultData = async (symbol, s) => {
+import { getCalendarCache, upsertCalendarCache, getLatestIvRankDaily, listMarketTopics, listMarketTopicHistory, listMonitoredStocks } from "../db.js";
+import { createScanQueue } from "./scanQueue.js";
+import { TOPIC_ITEM_KEY, refreshItemFromTopic } from "../../shared/marketTopics.js";
+const defaultData = async (symbol, s, { needsChain = true } = {}) => {
   const from = addDays(dateOnly(Date.now()), Math.max(1, s.dte - 21)),
     to = addDays(dateOnly(Date.now()), s.dte + 21);
   const [q, h] = await Promise.allSettled([
@@ -39,7 +49,7 @@ const defaultData = async (symbol, s) => {
     .filter((r) => r.status === "rejected")
     .map((r) => r.reason.message);
   let chain = [];
-  if (s.pricingMode === "market")
+  if (s.pricingMode === "market" && needsChain)
     for (const type of ["put", "call"]) {
       try {
         const c = await fetchOptionChain({
@@ -68,6 +78,36 @@ const defaultData = async (symbol, s) => {
       "Provider-adjusted series; dividends not reconstructed",
     chain,
     warnings,
+  };
+};
+// TradingView caps each economic-calendar response at about four weeks, so fetch in 14-day
+// chunks. `coveredUntil` is the end of the contiguous range that actually loaded.
+const MACRO_DAYS = 120;
+const defaultMacro = async () => {
+  const start = Date.now(),
+    events = new Map();
+  let coveredUntil = null;
+  for (let offset = 0; offset < MACRO_DAYS; offset += 14) {
+    const from = new Date(start + offset * DAY),
+      to = new Date(start + Math.min(offset + 14, MACRO_DAYS) * DAY - 1);
+    let rows;
+    for (let attempt = 0; attempt < 2 && !rows; attempt++)
+      rows = await fetchEconomicCalendar({ from, to, importance: 1 }).catch(
+        () => null,
+      );
+    if (!rows) break;
+    for (const e of rows)
+      if (e.country === "US" && e.date)
+        events.set(e.id || `${e.date}:${e.title}`, {
+          date: dateOnly(e.date),
+          title: e.title,
+        });
+    coveredUntil = dateOnly(to);
+  }
+  if (!coveredUntil) throw new Error("Macro calendar unavailable");
+  return {
+    events: [...events.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    coveredUntil,
   };
 };
 export function validateItem(input, old = {}) {
@@ -103,8 +143,6 @@ export function validateItem(input, old = {}) {
       return u.href;
     })
     .slice(0, 10);
-  if (p.verified && !sources.length)
-    throw new Error("Add supporting sources before verifying an item");
   if (p.template && !TEMPLATES[p.template])
     throw new Error("Invalid strategy scope");
   if (p.symbol && !/^[A-Z][A-Z0-9.-]{0,14}$/.test(p.symbol))
@@ -150,15 +188,58 @@ export function validateItem(input, old = {}) {
 export function registerBuilderRoutes(
   app,
   {
-    store = createBuilderStore(),
+    store: injectedStore = null,
+    snapshots: injectedSnapshots = null,
     loadData = defaultData,
     researchService = null,
+    loadMacro = defaultMacro,
+    loadDistribution = createDistributionLoader(),
+    // Fetch the full option chain as part of a single-stock scan, so its snapshot does not depend on the browser.
+    captureChainOnScan = false,
+    // Hourly rotating scan of each user's monitored stocks: { hedgeScan?(body), intervalMs?, firstRoundMs?,
+    // monitored?(owner) }. Off unless given (tests and scripts never scan on their own).
+    autoScan = null,
   } = {},
 ) {
+  const store = injectedStore ?? createBuilderStore();
+  // A caller that brings its own store (tests) gets a throwaway snapshot store, never the real data file.
+  const snapshots =
+    injectedSnapshots ?? createSnapshotStore(injectedStore ? ":memory:" : undefined);
+  // Snapshots are a by-product: a failure to save one must never fail the scan or the panel request.
+  const capture = (fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      console.warn(`[builder] snapshot not saved: ${e.message}`);
+      return null;
+    }
+  };
+  const saveDistribution = (owner, symbol, days, data) =>
+    capture(() =>
+      snapshots.attach(owner, symbol, "distribution", { ...data, days }, {
+        meta: { days, asOf: data.asOf, contracts: data.contracts?.length ?? 0 },
+        unless: (old, snapshot) =>
+          (old.meta.asOf === data.asOf && old.meta.days === days) ||
+          (old.meta.contracts > 0 && !data.contracts?.length) ||
+          // A wider chain loaded since the last scan already covers this horizon.
+          (old.meta.days > days && old.capturedAt >= snapshot.capturedAt),
+      }),
+    );
   let stockVolume;
   app.post("/api/builder/stock-volume", (req, res) => {
     try {
-      stockVolume ??= createStockVolumeService();
+      stockVolume ??= createStockVolumeService({
+        onResult: (owner, settings, result) =>
+          capture(() =>
+            snapshots.attach(
+              owner,
+              settings.symbol,
+              `stockVolume:${settings.interval}:${settings.days}`,
+              { interval: settings.interval, days: settings.days, buckets: settings.buckets, result },
+              { variants: 6 },
+            ),
+          ),
+      });
       res.status(202).json(stockVolume.start(req.user.id, req.body));
     } catch (e) {
       res.status(400).json({ error: e.message });
@@ -176,7 +257,6 @@ export function registerBuilderRoutes(
       .status(job ? 200 : 404)
       .json(job ?? { error: "History request not found" });
   });
-  const loadDistribution = createDistributionLoader();
   app.get("/api/builder/distributions/:symbol", async (req, res) => {
     try {
       const symbol = validateStrategy({ symbols: [req.params.symbol] })
@@ -184,14 +264,24 @@ export function registerBuilderRoutes(
         days = Number(req.query.days ?? 365);
       if (![365, 730].includes(days))
         throw new Error("Unsupported expiry horizon");
-      res.json(await loadDistribution(symbol, days));
+      const data = await loadDistribution(symbol, days);
+      saveDistribution(req.user.id, symbol, days, data);
+      res.json(data);
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
   });
-  const agents = createAgentService(store),
+  // Preferences that apply to everything a user does in the Builder. Unknown keys are dropped, bad values fall back.
+  const preferences = (owner) => ({ contentLanguage: normalizeContentLanguage(store.prefs(owner).contentLanguage) });
+  const agents = createAgentService(store, {
+      optionContext: createOptionContext(snapshots),
+      language: (owner) => preferences(owner).contentLanguage,
+    }),
     active = new Map(),
-    cache = new Map();
+    cache = new Map(),
+    scanQueue = createScanQueue({
+      onError: (e, entry) => console.warn(`[builder] ${entry.source} scan of ${entry.symbol} failed: ${e.message}`),
+    });
   let running = 0;
   const route = (fn) => async (req, res) => {
     try {
@@ -213,8 +303,46 @@ export function registerBuilderRoutes(
         strategies: store.strategies(req.user.id),
         defaults: DEFAULT_STRATEGY,
         agentConfigured: agentConfigured(),
+        preferences: preferences(req.user.id),
       }),
     ),
+  );
+  app.get(
+    "/api/builder/preferences",
+    route((req, res) => res.json(preferences(req.user.id))),
+  );
+  app.put(
+    "/api/builder/preferences",
+    route((req, res) => {
+      const wanted = req.body?.contentLanguage;
+      if (!CONTENT_LANGUAGES.some(([key]) => key === wanted))
+        throw Object.assign(new Error("contentLanguage must be en or zh"), { status: 400 });
+      store.savePrefs(req.user.id, { ...store.prefs(req.user.id), contentLanguage: wanted });
+      res.json(preferences(req.user.id));
+    }),
+  );
+  // AI market topics (written through the MCP connector) for the "AI suggestions" view. Postgres only.
+  app.get(
+    "/api/builder/market-topics",
+    route((req, res) => {
+      try {
+        res.json({ available: true, topics: listMarketTopics().filter((topic) => topic.status === "active") });
+      } catch (error) {
+        if (!/DB_TYPE=postgres/.test(String(error.message))) throw error;
+        res.json({ available: false, topics: [] });
+      }
+    }),
+  );
+  app.get(
+    "/api/builder/market-topics/:id/history",
+    route((req, res) => {
+      try {
+        res.json({ history: listMarketTopicHistory(Number(req.params.id)) });
+      } catch (error) {
+        if (!/DB_TYPE=postgres/.test(String(error.message))) throw error;
+        res.json({ history: [] });
+      }
+    }),
   );
   app.put(
     "/api/builder/strategies/:id",
@@ -298,12 +426,44 @@ export function registerBuilderRoutes(
       res.json({ ...data, trackedItems: store.items(req.user.id, s.id) });
     }),
   );
+  app.post(
+    "/api/builder/strategies/:id/research/:symbol",
+    route(async (req, res) => {
+      const s = getStrategy(req);
+      const symbol = String(req.params.symbol || "").toUpperCase();
+      if (!symbol) throw Object.assign(new Error("Symbol required"), { status: 400 });
+      const state = await agents.refreshSymbol(req.user.id, s, symbol, true);
+      res.json({ ...state, trackedItems: store.items(req.user.id, s.id) });
+    }),
+  );
+  app.get(
+    "/api/builder/strategies/:id/research/:symbol",
+    route(async (req, res) => {
+      const s = getStrategy(req);
+      const symbol = String(req.params.symbol || "").toUpperCase();
+      const state = store.agent(req.user.id, s.id);
+      const symState = state?.runsBySymbol?.[symbol];
+      const data =
+        symState?.runId &&
+        !["completed", "completed_with_errors", "failed", "stopped"].includes(
+          symState.status,
+        )
+          ? await agents.refreshSymbol(req.user.id, s, symbol)
+          : (state ?? { suggestions: [], valuations: [] });
+      res.json({ ...data, trackedItems: store.items(req.user.id, s.id) });
+    }),
+  );
   app.get(
     "/api/builder/jobs/:id",
     route((req, res) => {
       const j = store.getJob(req.user.id, req.params.id);
       if (!j) return res.status(404).json({ error: "Run not found" });
-      res.json(j);
+      // A running scan that is waiting out the data provider's rate limit says so (and resumes by itself).
+      res.json(
+        ["queued", "running"].includes(j.status)
+          ? { ...j, waitingUntil: getTigerRateLimitState().waitingUntil }
+          : j,
+      );
     }),
   );
   app.get(
@@ -322,6 +482,7 @@ export function registerBuilderRoutes(
         control.cancelled = true;
         control.worker?.terminate();
       }
+      scanQueue.remove((e) => e.jobId === j.id);
       res.json(
         ["running", "queued"].includes(j.status)
           ? store.job(req.user.id, { ...j, status: "cancelled" })
@@ -329,7 +490,170 @@ export function registerBuilderRoutes(
       );
     }),
   );
+  // IV rank and next earnings are best-effort context; a failure leaves the cell blank.
+  async function scanExtras(symbol, snapshot) {
+    const today = dateOnly(Date.now());
+    let ivRank = null,
+      nextEarnings = null,
+      complete = false;
+    try {
+      ivRank = number(getLatestIvRankDaily(symbol, today)?.ivRank52w);
+    } catch {}
+    try {
+      // researchService falls back Tiger -> TradingView -> Yahoo.
+      const c = (await researchService?.earningsCoverage([symbol]))?.[symbol];
+      nextEarnings = c?.events?.find((e) => e.date >= today)?.date ?? null;
+      complete = Boolean(nextEarnings);
+    } catch {}
+    let zones = null;
+    try {
+      zones = buildPriceZones(snapshot?.bars ?? [], snapshot?.spot);
+    } catch {}
+    return { ivRank, nextEarnings, complete, zones };
+  }
+  // High-importance US macro events (FOMC/CPI/NFP...) for the risk-layer event window.
+  // Market-wide, so cached and shared by concurrent scans. A failed refresh keeps the last good list.
+  let macroCache = { at: 0, data: null, failed: false },
+    macroPending = null;
+  async function macroEvents(until) {
+    const stale =
+      Date.now() - macroCache.at > (macroCache.failed ? 5 * 60_000 : 3600_000);
+    if (stale) {
+      macroPending ??= Promise.race([
+        loadMacro(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Macro calendar timed out")), 20_000).unref(),
+        ),
+      ])
+        .then((data) => {
+          if (!Array.isArray(data?.events)) throw new Error("Invalid macro data");
+          macroCache = { at: Date.now(), data, failed: false };
+        })
+        .catch(() => {
+          macroCache = { ...macroCache, at: Date.now(), failed: true };
+        })
+        .finally(() => {
+          macroPending = null;
+        });
+      await macroPending;
+    } else if (macroPending) await macroPending;
+    const data = macroCache.data;
+    if (!data) return null;
+    const events = data.events.filter((e) => e.date <= until);
+    return {
+      events: events.slice(0, 12),
+      count: events.length,
+      coveredUntil: data.coveredUntil,
+    };
+  }
+  async function riskFor(row, snapshot, extras) {
+    const macro = await macroEvents(row.expiry);
+    return riskAdjustment(row, {
+      zones: extras.zones,
+      calendar: {
+        earningsDate:
+          extras.nextEarnings && extras.nextEarnings <= row.expiry
+            ? extras.nextEarnings
+            : null,
+        macro: macro?.events ?? null,
+        macroCount: macro?.count ?? null,
+        macroCoveredUntil: macro?.coveredUntil ?? null,
+      },
+    });
+  }
+  const earningsStatus = (next, complete, row) =>
+    next && next <= row.expiry ? "Before expiry" : next || complete ? "Clear" : "Unknown";
+  function saveScanSnapshots(owner, job, strategy, rows, datasets, warnings) {
+    const valuations = job.strategyId
+      ? (capture(() => store.agent(owner, job.strategyId))?.valuations ?? [])
+      : [];
+    for (const [symbol, dataset] of Object.entries(datasets)) {
+      const own = rows.filter((r) => r.symbol === symbol);
+      capture(() =>
+        snapshots.saveScan(
+          owner,
+          symbol,
+          {
+            rows: own,
+            dataset,
+            warnings: warnings.filter((w) => w.startsWith(symbol + ": ")),
+            items: (job.items ?? []).filter((i) => !i.symbol || i.symbol === symbol),
+            includeCatalysts: job.includeCatalysts,
+            templates: job.templates ?? null,
+            strategy,
+            valuation:
+              valuations.find(
+                (v) => v.symbol === symbol && (!v.status || v.status === "completed"),
+              ) ?? null,
+          },
+          { spot: dataset.spot ?? null, strategy: strategy.name ?? null, source: job.source ?? "manual" },
+        ),
+      );
+    }
+    if (captureChainOnScan && strategy.symbols.length === 1 && datasets[strategy.symbols[0]]) {
+      const symbol = strategy.symbols[0];
+      loadDistribution(symbol, 365)
+        .then((data) => saveDistribution(owner, symbol, 365, data))
+        .catch(() => {});
+    }
+  }
+  // Hedge-choice scans (Polymarket and the like) run beside the Builder scan; their results join the snapshot.
+  function attachHedgeScan(owner, symbols, result) {
+    for (const symbol of symbols ?? [])
+      capture(() =>
+        snapshots.attach(owner, symbol, "hedges", {
+          generatedAt: result.generatedAt ?? new Date().toISOString(),
+          results: Object.fromEntries(
+            Object.entries(result.results ?? {}).map(([id, r]) => [
+              id,
+              Array.isArray(r?.rows)
+                ? { ...r, rows: r.rows.filter((x) => !x.symbol || x.symbol === symbol) }
+                : r,
+            ]),
+          ),
+        }),
+      );
+  }
+  const snapshotView = (s) => {
+    const part = (name) => s.parts[name]?.data ?? null;
+    return {
+      id: s.id,
+      symbol: s.symbol,
+      day: s.day,
+      capturedAt: s.capturedAt,
+      scan: part("scan"),
+      distribution: part("distribution"),
+      stockVolume: Object.entries(s.parts)
+        .filter(([name]) => name.startsWith("stockVolume:"))
+        .map(([, p]) => p.data),
+      research: part("research"),
+      events: { past: part("events:past"), future: part("events:future") },
+      hedges: part("hedges"),
+      savedAt: Object.fromEntries(Object.entries(s.parts).map(([name, p]) => [name, p.capturedAt])),
+    };
+  };
+  app.get(
+    "/api/builder/snapshots",
+    route((req, res) => {
+      const symbol = req.query.symbol
+        ? validateStrategy({ symbols: [req.query.symbol] }).symbols[0]
+        : null;
+      res.json({
+        retentionDays: snapshots.retentionDays,
+        snapshots: snapshots.list(req.user.id, symbol),
+      });
+    }),
+  );
+  app.get(
+    "/api/builder/snapshots/:id",
+    route((req, res) => {
+      const s = snapshots.get(req.user.id, req.params.id);
+      if (!s) throw Object.assign(new Error("Snapshot not found"), { status: 404 });
+      res.json(snapshotView(s));
+    }),
+  );
   async function runJob(owner, job, strategy, kind) {
+    if (store.getJob(owner, job.id)?.status === "cancelled") return; // cancelled while it waited in the queue
     const control = { cancelled: false, worker: null };
     active.set(job.id, control);
     running++;
@@ -344,7 +668,9 @@ export function registerBuilderRoutes(
       for (const symbol of strategy.symbols) {
         if (control.cancelled) break;
         try {
-          const snapshot = await loadData(symbol, strategy);
+          // A stock-only scan (used to load analytics when only non-option hedge choices are ticked) skips option chains.
+          const needsChain = !(Array.isArray(job.templates) && job.templates.every((t) => t === "stock"));
+          const snapshot = await loadData(symbol, strategy, { needsChain });
           if (control.cancelled) break;
           datasets[symbol] = snapshot;
           cache.set(owner + ":" + symbol, snapshot);
@@ -352,12 +678,25 @@ export function registerBuilderRoutes(
           warnings.push(
             ...(snapshot.warnings ?? []).map((w) => `${symbol}: ${w}`),
           );
-          if (kind === "scan")
-            rows.push(
-              ...buildCandidates(snapshot, strategy).map((r) =>
-                applyCatalysts(r, job.items, job.includeCatalysts),
-              ),
-            );
+          if (kind === "scan") {
+            const candidates = buildCandidates(snapshot, strategy, job.templates);
+            const extras = candidates.length
+              ? await scanExtras(symbol, snapshot)
+              : null;
+            for (const r of candidates)
+              rows.push(
+                applyCatalysts(
+                  {
+                    ...r,
+                    ivRank: extras.ivRank,
+                    earnings: earningsStatus(extras.nextEarnings, extras.complete, r),
+                    riskAdjustment: await riskFor(r, snapshot, extras),
+                  },
+                  job.items,
+                  job.includeCatalysts,
+                ),
+              );
+          }
           else {
             const result = await new Promise((resolve, reject) => {
               const worker = new Worker(
@@ -404,6 +743,7 @@ export function registerBuilderRoutes(
       }
       if (!control.cancelled) {
         rows.sort((a, b) => (b.overall ?? -1) - (a.overall ?? -1));
+        if (kind === "scan") saveScanSnapshots(owner, job, strategy, rows, datasets, warnings);
         update({
           status: "completed",
           progress: 100,
@@ -426,7 +766,7 @@ export function registerBuilderRoutes(
     app.post(
       `/api/builder/${kind}`,
       route((req, res) => {
-        if (running >= 2)
+        if (kind === "backtest" && running >= 2)
           return res.status(429).json({
             error: "Two scans/tests are already running. Try again shortly.",
           });
@@ -442,13 +782,48 @@ export function registerBuilderRoutes(
           status: "queued",
           progress: 0,
           strategy,
+          strategyId: typeof req.body.strategyId === "string" ? req.body.strategyId : null,
           items,
           includeCatalysts: req.body.includeCatalysts !== false,
+          templates: Array.isArray(req.body.templates)
+            ? req.body.templates.filter((t) => TEMPLATES[t])
+            : undefined,
           settings: req.body.settings ?? {},
           createdAt: new Date().toISOString(),
         });
-        res.status(202).json(job);
-        void runJob(req.user.id, job, strategy, kind);
+        if (kind === "backtest") {
+          res.status(202).json(job);
+          void withRateLimitWaiting(() => runJob(req.user.id, job, strategy, kind));
+          return;
+        }
+        // These settings are what the hourly auto-scan uses for this user's monitored stocks.
+        capture(() =>
+          store.savePrefs(req.user.id, {
+            ...store.prefs(req.user.id),
+            autoScan: {
+              strategyId: job.strategyId,
+              templates: job.templates ?? null,
+              includeCatalysts: job.includeCatalysts,
+              hedgeChoices: Array.isArray(req.body.hedgeChoices)
+                ? req.body.hedgeChoices.filter((h) => typeof h === "string").slice(0, 20)
+                : [],
+              savedAt: new Date().toISOString(),
+            },
+          }),
+        );
+        // Scans run one at a time; a request made while another stock is scanning goes next in line.
+        const placed = scanQueue.add({
+          owner: req.user.id,
+          symbol: strategy.symbols.length === 1 ? strategy.symbols[0] : strategy.symbols.join(", "),
+          source: "manual",
+          jobId: job.id,
+          run: () => withRateLimitWaiting(() => runJob(req.user.id, job, strategy, kind)),
+        });
+        res.status(202).json({
+          ...job,
+          queuedBehind: placed.behind?.symbol ?? null,
+          queuedAhead: placed.ahead,
+        });
       }),
     );
   app.get(
@@ -457,7 +832,9 @@ export function registerBuilderRoutes(
       const symbol = validateStrategy({ symbols: [req.params.symbol] })
         .symbols[0];
       if (!researchService) throw new Error("Research service unavailable");
-      res.json(await researchService.research(symbol, { lookbackDays: 30 }));
+      const data = await researchService.research(symbol, { lookbackDays: 30 });
+      capture(() => snapshots.attach(req.user.id, symbol, "research", data));
+      res.json(data);
     }),
   );
   app.get(
@@ -473,38 +850,105 @@ export function registerBuilderRoutes(
         from = direction === "past" ? addDays(today, -days) : today,
         to = direction === "past" ? today : addDays(today, days),
         window = { from, to, today };
-      const requests = await Promise.allSettled([
-        fetchCompanyEventsCalendar({
+
+      // Extra event categories requested via "+ Item" picks
+      const extras = new Set((req.query.extras ?? "").split(",").filter(Boolean));
+
+      // Countries included by default — US only; others added via extras
+      const CORE_COUNTRIES = new Set(["US"]);
+      const COUNTRY_EXTRAS = {
+        country_eu: ["EU", "DE", "FR", "IT", "ES", "PT", "AT", "BE", "NL"],
+        country_uk: ["GB"],
+        country_cn: ["CN", "HK"],
+        country_jp: ["JP"],
+        country_ca: ["CA"],
+        country_au: ["AU", "NZ"],
+      };
+      const allowedCountries = extras.has("mkt_global_all") ? null : new Set(CORE_COUNTRIES);
+      for (const [key, codes] of Object.entries(COUNTRY_EXTRAS)) {
+        if (extras.has(key)) codes.forEach((c) => allowedCountries?.add(c));
+      }
+
+      // Peer earnings: symbol-only by default; large-cap peers when opted in
+      const peerSymbols = extras.has("peers_largecap") ? [] : [symbol];
+      const peerMinCap = extras.has("peers_largecap") ? 100_000_000_000 : 0;
+      // For the single-symbol case, extend the search window to 180 days so the
+      // next earnings is always found even when it falls outside the display window.
+      const earningsTo = direction === "future" && peerSymbols.length === 1
+        ? addDays(today, 180) : to;
+
+      // Cache keys are date-scoped — the DB row's fetched_date column ensures one
+      // refresh per calendar day regardless of intraday calls.
+      const extrasTag = [...extras].sort().join(",");
+      const earningsKey = `earnings:${peerSymbols.join(",")}:${direction}:${days}:${extrasTag}`;
+      const economicKey = `economic:${from}:${to}:${extrasTag}`;
+
+      async function cachedFetch(key, fetcher) {
+        try {
+          const hit = getCalendarCache(key);
+          if (hit?.payload) return { status: "fulfilled", value: hit.payload };
+        } catch { /* cache miss — proceed to fetch */ }
+        const result = await fetcher().then(
+          value => { try { upsertCalendarCache(key, value); } catch { /* non-fatal */ } return { status: "fulfilled", value }; },
+          reason => ({ status: "rejected", reason })
+        );
+        return result;
+      }
+
+      const requests = await Promise.all([
+        cachedFetch(earningsKey, () => fetchCompanyEventsCalendar({
           from: new Date(from),
-          to: new Date(to),
-          minMarketCapUsd: 0,
-          symbols: [symbol],
-        }),
-        fetchEconomicCalendarWindow({ from: new Date(from), to: new Date(to) }),
-        curatedCatalysts(symbol, window),
+          to: new Date(earningsTo),
+          minMarketCapUsd: peerMinCap,
+          symbols: peerSymbols,
+        })),
+        cachedFetch(economicKey, () => fetchEconomicCalendarWindow({ from: new Date(from), to: new Date(to) })),
+        curatedCatalysts(symbol, window).then(
+          value => ({ status: "fulfilled", value }),
+          reason => ({ status: "rejected", reason })
+        ),
       ]);
       const events = [],
         warnings = [];
       requests.forEach((r, i) => {
         if (r.status === "rejected") {
-          warnings.push(r.reason.message);
+          // curatedCatalysts (i===2) fails silently when not configured — it's optional
+          if (i !== 2) warnings.push(r.reason.message);
           return;
         }
         for (const e of (i === 2 ? r.value.events : r.value) ?? []) {
           const raw = e.date ?? e.timestamp;
           const d = raw ? dateOnly(raw) : null;
-          if (d && d >= from && d <= to)
-            events.push({
-              ...e,
-              date: d,
-              title:
-                e.title ??
-                e.name ??
-                (i === 0 ? "Company earnings" : "Economic release"),
-              dateStatus: e.dateStatus ?? "provider-scheduled",
-              category:
-                i === 0 ? "earnings" : i === 1 ? "economic" : e.category,
-            });
+          // For the target symbol's earnings (i===0, single-symbol mode), always include
+          // the next event even if beyond the display window — earnings don't always fall
+          // within the selected day range.
+          const isTargetEarnings = i === 0 && peerSymbols.length === 1 &&
+            String(e.shortSymbol ?? e.symbol ?? "").toUpperCase() === symbol;
+          if (!d || d < from || (!isTargetEarnings && d > to)) continue;
+          // Economic events: filter by country and importance by default
+          if (i === 1) {
+            const countryOk = !allowedCountries || allowedCountries.has(e.country);
+            const highOnly = !extras.has("ind_medium") && !extras.has("ind_all") && !extras.has("mkt_global_all");
+            const importanceOk = !highOnly || e.importance === 1;
+            if (!countryOk || !importanceOk) continue;
+          }
+          const fmtM = (v) => v != null ? `$${(Number(v) / 1e6).toFixed(0)}M` : null;
+          events.push({
+            ...e,
+            date: d,
+            title: i === 0
+              ? `${e.description ?? e.shortSymbol ?? e.name ?? "Company"} Earnings`
+              : (e.title ?? e.name ?? "Economic release"),
+            dateStatus: e.dateStatus ?? "provider-scheduled",
+            category: i === 0 ? "earnings" : i === 1 ? "economic" : e.category,
+            // Map earnings EPS/revenue to generic display fields
+            ...(i === 0 ? {
+              actual: e.earningsActual != null ? `$${Number(e.earningsActual).toFixed(2)} EPS` : null,
+              forecast: e.earningsEstimate != null ? `$${Number(e.earningsEstimate).toFixed(2)} EPS est.` : null,
+              revenueActual: e.revenueActual != null ? fmtM(e.revenueActual) : null,
+              revenueEstimate: e.revenueEstimate != null ? fmtM(e.revenueEstimate) : null,
+            } : {}),
+          });
         }
       });
       const bars = cache.get(req.user.id + ":" + symbol)?.bars ?? [];
@@ -520,22 +964,133 @@ export function registerBuilderRoutes(
             ? "Previous-session close to next-session close; association, not causation"
             : "Scenario input required; no forecast is implied by the calendar";
       }
-      res.json({
+      const payload = {
         events: events.sort((a, b) => a.date.localeCompare(b.date)),
         warnings,
         from,
         to,
         complete: false,
-      });
+      };
+      capture(() =>
+        snapshots.attach(req.user.id, symbol, `events:${direction}`, { ...payload, days }),
+      );
+      res.json(payload);
     }),
   );
   const timer = setInterval(() => agents.tick().catch(() => {}), 60000);
   timer.unref();
+  // Hourly auto-scan: every round queues each monitored stock of every user who has scanned before (their last
+  // manual scan settings are reused). A stock scanned within the last ~48 minutes is skipped that round.
+  const autoInterval = autoScan?.intervalMs ?? 3600000;
+  let nextRoundAt = autoScan ? Date.now() + (autoScan.firstRoundMs ?? 120000) : null;
+  async function autoScanSymbol(owner, symbol, profile) {
+    const base =
+      (profile.strategyId && store.strategy(owner, profile.strategyId)) || store.strategies(owner)[0];
+    if (!base) return;
+    const strategy = validateStrategy({ ...base, symbols: [symbol] });
+    const job = store.job(owner, {
+      kind: "scan",
+      source: "auto",
+      status: "queued",
+      progress: 0,
+      strategy,
+      strategyId: profile.strategyId ?? null,
+      items: profile.strategyId ? store.items(owner, profile.strategyId) : [],
+      includeCatalysts: profile.includeCatalysts !== false,
+      templates: Array.isArray(profile.templates) ? profile.templates.filter((t) => TEMPLATES[t]) : undefined,
+      settings: {},
+      createdAt: new Date().toISOString(),
+    });
+    try {
+      await withRateLimitWaiting(() => runJob(owner, job, strategy, "scan"));
+    } finally {
+      // The result lives on in the snapshot; hourly jobs would otherwise pile up in the jobs table.
+      capture(() => store.deleteJob(owner, job.id));
+    }
+    if (autoScan.hedgeScan && profile.hedgeChoices?.length) {
+      const result = await autoScan.hedgeScan({ strategies: profile.hedgeChoices, symbols: [symbol] });
+      attachHedgeScan(owner, [symbol], result);
+    }
+  }
+  async function startAutoRound() {
+    const cutoff = Date.now() - autoInterval * 0.8;
+    for (const { owner, prefs } of store.allPrefs()) {
+      const profile = prefs.autoScan;
+      if (!profile) continue;
+      let symbols;
+      try {
+        symbols = (await (autoScan.monitored ?? listMonitoredStocks)(owner)).map((r) =>
+          String(r.symbol ?? r).toUpperCase(),
+        );
+      } catch (e) {
+        console.warn(`[builder] auto-scan: monitored stocks unavailable for ${owner}: ${e.message}`);
+        continue;
+      }
+      for (const symbol of symbols) {
+        if (scanQueue.has(owner, symbol)) continue;
+        const latest = capture(() => snapshots.list(owner, symbol)[0]);
+        if (latest && Date.parse(latest.capturedAt) > cutoff) continue;
+        scanQueue.add({ owner, symbol, source: "auto", run: () => autoScanSymbol(owner, symbol, profile) });
+      }
+    }
+  }
+  const autoTimer = autoScan
+    ? setInterval(() => {
+        if (Date.now() < nextRoundAt) return;
+        nextRoundAt = Date.now() + autoInterval;
+        startAutoRound().catch((e) => console.warn(`[builder] auto-scan round failed: ${e.message}`));
+      }, Math.min(60000, autoInterval))
+    : null;
+  autoTimer?.unref();
+  app.get(
+    "/api/builder/auto-scan",
+    route((req, res) =>
+      res.json({
+        enabled: Boolean(autoScan),
+        configured: Boolean(store.prefs(req.user.id).autoScan),
+        intervalMinutes: Math.round(autoInterval / 60000),
+        nextRoundAt: nextRoundAt ? new Date(nextRoundAt).toISOString() : null,
+        ...scanQueue.state(req.user.id),
+      }),
+    ),
+  );
+  // Snapshots older than the retention window go at start-up, every six hours, and whenever one is saved.
+  capture(() => snapshots.prune());
+  const pruneTimer = setInterval(() => capture(() => snapshots.prune()), 6 * 3600000);
+  pruneTimer.unref();
+  // Keeps tracking items that were created from AI market topics in step with those topics.
+  const syncMarketTopics = (topics) => {
+    const byId = new Map(topics.map((topic) => [String(topic.id), topic]));
+    let updated = 0;
+    for (const { owner, strategy, item } of store.allItems()) {
+      const topic = byId.get(TOPIC_ITEM_KEY.exec(item.eventKey ?? "")?.[1]);
+      if (!topic) continue;
+      store.putItem(owner, strategy, refreshItemFromTopic(item, topic));
+      updated += 1;
+    }
+    return updated;
+  };
+  // Catch up on topics that changed while the server was down (Postgres only; ignored otherwise).
+  setTimeout(() => {
+    try {
+      syncMarketTopics(listMarketTopics());
+    } catch {
+      /* no topics available */
+    }
+  }, 15000).unref();
   return {
     store,
+    snapshots,
+    attachHedgeScan,
+    scanQueue,
+    runAutoScanRound: () => (autoScan ? startAutoRound() : Promise.resolve()),
     agents,
+    syncMarketTopics,
     close: () => {
       clearInterval(timer);
+      clearInterval(pruneTimer);
+      if (autoTimer) clearInterval(autoTimer);
+      snapshots.close();
       stockVolume?.close();
       for (const c of active.values()) {
         c.cancelled = true;
