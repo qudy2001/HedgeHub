@@ -50,12 +50,16 @@ export function unusualActivity(
     else if (last < bid || (ask > bid && last <= bid + band)) lastSide = "bid";
     else lastSide = "mid";
   }
+  // Present only on a saved session with a later session saved after it:
+  // that later open interest is the first count to include this day's trades.
+  const next = c.nextOpenInterest == null ? null : Number(c.nextOpenInterest);
   return {
     volume,
     openInterest,
     ratio: openInterest > 0 ? volume / openInterest : null,
     premium,
     lastSide,
+    oiChange: Number.isFinite(next) ? next - openInterest : null,
   };
 }
 export function distribution(
@@ -116,7 +120,9 @@ export function distribution(
     mid = 0,
     far = 0,
     unusualTotal = 0,
-    unusualCount = 0;
+    unusualCount = 0,
+    unusualChecked = 0,
+    unusualRose = 0;
   for (const c of valid) {
     const value = Number(c[metric]),
       dte = (Date.parse(c.expiration) - Date.parse(asOf)) / DAY;
@@ -143,6 +149,10 @@ export function distribution(
         put: 0,
         unusualCall: 0,
         unusualPut: 0,
+        // Net next-session OI change of the flagged contracts; null until
+        // at least one of them has a later count to compare with.
+        unusualCallOiChange: null,
+        unusualPutOiChange: null,
         unusualItems: [],
         dates: new Map(),
         from: c.expiration,
@@ -164,6 +174,15 @@ export function distribution(
       unusualCount++;
       b[c.optionType === "call" ? "unusualCall" : "unusualPut"] +=
         flagged.volume;
+      if (flagged.oiChange != null) {
+        const side =
+          c.optionType === "call"
+            ? "unusualCallOiChange"
+            : "unusualPutOiChange";
+        b[side] = (b[side] ?? 0) + flagged.oiChange;
+        unusualChecked++;
+        if (flagged.oiChange > 0) unusualRose++;
+      }
       b.unusualItems.push({
         ...flagged,
         expiration: c.expiration,
@@ -201,6 +220,8 @@ export function distribution(
     missing,
     unusualTotal,
     unusualCount,
+    unusualChecked,
+    unusualRose,
     unusualRule: unusual,
     contracts: valid.length,
     grouping: resolvedGrouping,

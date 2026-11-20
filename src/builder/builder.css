@@ -2407,9 +2407,14 @@ body.studio-body:before {
   stroke: var(--s-panel);
   stroke-width: 1.5;
 }
+.unusual-volume-marker.hollow {
+  fill: var(--s-panel);
+  stroke: #a855f7;
+}
 .distribution-summary {
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 4px 20px;
   padding: 12px 0 0;
   font-size: 10px;
   color: var(--s-muted);
@@ -2417,6 +2422,7 @@ body.studio-body:before {
 .distribution-summary span {
   display: flex;
   gap: 6px;
+  white-space: nowrap;
 }
 .distribution-summary b {
   color: var(--s-text);

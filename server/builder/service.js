@@ -3,7 +3,7 @@ import { createDistributionLoader } from "./distributions.js";
 import crypto from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { createBuilderStore } from "./store.js";
-import { createSnapshotStore } from "./snapshotStore.js";
+import { createSnapshotStore, afterMarketOpen } from "./snapshotStore.js";
 import { createAgentService, agentConfigured } from "./agents.js";
 import { CONTENT_LANGUAGES, normalizeContentLanguage } from "../../shared/contentLanguage.js";
 import { createOptionContext } from "./optionContext.js";
@@ -649,7 +649,27 @@ export function registerBuilderRoutes(
     route((req, res) => {
       const s = snapshots.get(req.user.id, req.params.id);
       if (!s) throw Object.assign(new Error("Snapshot not found"), { status: 404 });
-      res.json(snapshotView(s));
+      const view = snapshotView(s);
+      // Open interest is published after the close, so the chain saved on a later market day is the first to
+      // count the positions opened on this one. Each contract gets that later figure where one is stored.
+      const next = view.distribution?.contracts?.length
+        ? capture(() =>
+            snapshots.nextPart(req.user.id, s.symbol, s.day, "distribution", afterMarketOpen),
+          )
+        : null;
+      if (next?.data?.contracts?.length) {
+        const key = (c) => c.contractSymbol || `${c.expiration}:${c.strike}:${c.optionType}`,
+          later = new Map(next.data.contracts.map((c) => [key(c), c.openInterest]));
+        view.distribution = {
+          ...view.distribution,
+          nextSession: { day: next.day, capturedAt: next.capturedAt },
+          contracts: view.distribution.contracts.map((c) => ({
+            ...c,
+            nextOpenInterest: later.get(key(c)) ?? null,
+          })),
+        };
+      }
+      res.json(view);
     }),
   );
   async function runJob(owner, job, strategy, kind) {

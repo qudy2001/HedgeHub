@@ -18,6 +18,19 @@ const nyDate = new Intl.DateTimeFormat("en-CA", {
   day: "2-digit",
 });
 export const marketDay = (ms) => nyDate.format(ms);
+const nyClock = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+// True from the 09:30 New York open on a weekday until midnight. A chain fetched in that window carries the
+// open interest published for the session before it; one fetched earlier, or at a weekend, may not yet.
+export const afterMarketOpen = (ms) => {
+  const p = Object.fromEntries(nyClock.formatToParts(ms).map((x) => [x.type, x.value]));
+  return !["Sat", "Sun"].includes(p.weekday) && Number(p.hour) * 60 + Number(p.minute) >= 570;
+};
 const pack = (value) => deflateSync(Buffer.from(JSON.stringify(value)));
 const unpack = (blob) => JSON.parse(inflateSync(blob).toString());
 
@@ -151,6 +164,23 @@ export function createSnapshotStore(
         summary: JSON.parse(s.summary),
         parts,
       };
+    },
+    // One panel's data from the earliest later market day that has it, or null. `accept(capturedAtMs)` can
+    // reject a day whose copy of the part was saved at an unsuitable time.
+    nextPart(owner, symbol, afterDay, part, accept = () => true) {
+      const hit = db
+        .prepare(
+          `SELECT s.id,s.day,p.captured_at FROM builder_snapshots s
+           JOIN builder_snapshot_parts p ON p.snapshot_id=s.id AND p.part=?
+           WHERE s.owner=? AND s.symbol=? AND s.day>? AND s.captured_at>=? ORDER BY s.day`,
+        )
+        .all(part, owner, symbol, afterDay, now() - retentionDays * DAY)
+        .find((r) => accept(r.captured_at));
+      if (!hit) return null;
+      const row = db
+        .prepare("SELECT data FROM builder_snapshot_parts WHERE snapshot_id=? AND part=?")
+        .get(hit.id, part);
+      return { id: hit.id, day: hit.day, capturedAt: iso(hit.captured_at), data: unpack(row.data) };
     },
     prune,
     close() {

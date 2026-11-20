@@ -156,7 +156,7 @@ test("unusual volume needs size, volume above open interest and, when priced, en
   );
   assert.deepEqual(
     unusualActivity({ ...base, volume: 1000, openInterest: 0 }),
-    { volume: 1000, openInterest: 0, ratio: null, premium: null, lastSide: null },
+    { volume: 1000, openInterest: 0, ratio: null, premium: null, lastSide: null, oiChange: null },
   );
   const priced = unusualActivity({
     ...base,
@@ -200,4 +200,31 @@ test("unusual volume is the same set of contracts on the volume and open-interes
     unusual: { minVolume: 10, minRatio: 1, minPremium: 0 },
   });
   assert.equal(loose.unusualCount, 3);
+});
+test("a later session's open interest shows whether unusual volume stayed open", () => {
+  const rows = [
+    { expiration: "2026-12-18", optionType: "call", strike: 100, volume: 3000, openInterest: 500, nextOpenInterest: 2900 },
+    { expiration: "2026-12-18", optionType: "call", strike: 101, volume: 2000, openInterest: 400, nextOpenInterest: 300 },
+    { expiration: "2026-12-18", optionType: "put", strike: 100, volume: 1500, openInterest: 600, nextOpenInterest: 600 },
+    { expiration: "2026-12-18", optionType: "put", strike: 101, volume: 1500, openInterest: 100 },
+    { expiration: "2026-12-18", optionType: "put", strike: 102, volume: 10, openInterest: 5000, nextOpenInterest: 9000 },
+  ];
+  const d = distribution(rows, "volume", { asOf: "2026-11-20", axis: "expiry" });
+  assert.equal(d.unusualCount, 4);
+  assert.equal(d.unusualChecked, 3, "a contract with no later count is not judged");
+  assert.equal(d.unusualRose, 1);
+  const [bar] = d.bars;
+  assert.equal(bar.unusualCallOiChange, 2300);
+  assert.equal(bar.unusualPutOiChange, 0);
+  assert.deepEqual(
+    bar.unusualTop.map((u) => u.oiChange).sort((a, b) => a - b),
+    [-100, 0, 2400],
+  );
+  const live = distribution(
+    rows.map(({ nextOpenInterest, ...c }) => c),
+    "volume",
+    { asOf: "2026-11-20", axis: "expiry" },
+  );
+  assert.equal(live.unusualChecked, 0);
+  assert.equal(live.bars[0].unusualCallOiChange, null);
 });

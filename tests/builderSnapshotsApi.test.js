@@ -132,3 +132,49 @@ test("a Builder scan saves a snapshot that the API lists and reopens with its pa
     service.close();
   }
 });
+
+test("a reopened snapshot carries each contract's open interest from the next saved market day", async () => {
+  const store = createBuilderStore(":memory:"),
+    time = clock(),
+    snapshots = createSnapshotStore(":memory:", { now: time.now }),
+    app = express();
+  app.use((req, res, next) => {
+    req.user = { id: "a" };
+    next();
+  });
+  const service = registerBuilderRoutes(app, { store, snapshots });
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  const read = async (id) =>
+    (await fetch(`http://127.0.0.1:${server.address().port}/api/builder/snapshots/${id}`)).json();
+  const contract = (contractSymbol, strike, openInterest) => ({
+    contractSymbol,
+    optionType: "call",
+    strike,
+    expiration: "2026-12-18",
+    openInterest,
+    volume: 900,
+  });
+  try {
+    const first = snapshots.saveScan("a", "AAPL", { rows: [] });
+    snapshots.attach("a", "AAPL", "distribution", {
+      contracts: [contract("A", 220, 100), contract("B", 230, 50), contract("", 240, 7)],
+    });
+    assert.equal((await read(first.id)).distribution.nextSession, undefined);
+    time.add(DAY);
+    const second = snapshots.saveScan("a", "AAPL", { rows: [] });
+    snapshots.attach("a", "AAPL", "distribution", {
+      contracts: [contract("A", 220, 940), contract("", 240, 3)],
+    });
+    const { distribution } = await read(first.id);
+    assert.equal(distribution.nextSession.day, "2026-11-11");
+    assert.deepEqual(
+      distribution.contracts.map((c) => c.nextOpenInterest),
+      [940, null, 3],
+    );
+    assert.equal((await read(second.id)).distribution.nextSession, undefined);
+  } finally {
+    await new Promise((r) => server.close(r));
+    service.close();
+  }
+});

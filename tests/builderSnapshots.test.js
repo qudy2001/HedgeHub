@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSnapshotStore, marketDay } from "../server/builder/snapshotStore.js";
+import { createSnapshotStore, marketDay, afterMarketOpen } from "../server/builder/snapshotStore.js";
 
 const DAY = 86400000;
 // 15:00 UTC is mid-morning in New York, so adding whole days moves exactly one market day at a time.
@@ -134,3 +134,33 @@ test("snapshots older than 30 days are pruned, on save and on demand", () => {
   store.close();
 });
 
+
+test("the next market day's copy of a panel can be read on its own, skipping copies saved before the open", () => {
+  const time = clock(),
+    store = createSnapshotStore(":memory:", { now: time.now });
+  assert.equal(afterMarketOpen(T0), true);
+  assert.equal(afterMarketOpen(Date.parse("2026-11-10T14:29:00Z")), false, "09:29 in New York");
+  assert.equal(afterMarketOpen(Date.parse("2026-11-14T16:00:00Z")), false, "Saturday");
+  const chain = (oi) => ({ contracts: [{ contractSymbol: "A", openInterest: oi }] });
+  store.saveScan("a", "TSLA", scan(1));
+  store.attach("a", "TSLA", "distribution", chain(10));
+  const day1 = marketDay(T0);
+  assert.equal(store.nextPart("a", "TSLA", day1, "distribution"), null);
+  // Day 2 was only scanned before the open; day 3 was scanned during the session.
+  time.set(Date.parse("2026-11-11T12:00:00Z"));
+  store.saveScan("a", "TSLA", scan(1));
+  store.attach("a", "TSLA", "distribution", chain(11));
+  time.set(T0 + 2 * DAY);
+  store.saveScan("a", "TSLA", scan(1));
+  store.attach("a", "TSLA", "distribution", chain(25));
+  store.saveScan("a", "NVDA", scan(1));
+  store.attach("a", "NVDA", "distribution", chain(99));
+  assert.equal(store.nextPart("a", "TSLA", day1, "distribution").data.contracts[0].openInterest, 11);
+  const next = store.nextPart("a", "TSLA", day1, "distribution", afterMarketOpen);
+  assert.equal(next.day, marketDay(T0 + 2 * DAY));
+  assert.equal(next.data.contracts[0].openInterest, 25);
+  assert.equal(store.nextPart("a", "TSLA", next.day, "distribution"), null);
+  assert.equal(store.nextPart("b", "TSLA", day1, "distribution"), null);
+  assert.equal(store.nextPart("a", "TSLA", day1, "research"), null);
+  store.close();
+});

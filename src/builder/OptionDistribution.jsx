@@ -10,6 +10,8 @@ const compact = (n) =>
 const full = (n) => new Intl.NumberFormat("en-US").format(n);
 const UNUSUAL_COLOR = "#a855f7";
 const LAST_SIDE_LABELS = { ask: "Near ask", bid: "Near bid", mid: "Mid" };
+const signed = (n) =>
+  `${n > 0 ? "+" : n < 0 ? "−" : ""}${compact(Math.abs(n))}`;
 const dateLabel = (date, group) =>
   group === "month"
     ? new Date(date + "-01T00:00:00Z").toLocaleDateString("en-GB", {
@@ -83,7 +85,11 @@ export default function OptionDistribution({
     barWidth = Math.max(1, step * 0.65),
     unusualWidth =
       metric === "openInterest" ? Math.max(1, barWidth * 0.5) : barWidth,
-    rule = model.unusualRule;
+    rule = model.unusualRule,
+    // Set only on a saved session that has a later session saved after it.
+    nextDay = data?.nextSession?.day
+      ? dateLabel(data.nextSession.day, "day")
+      : null;
   const title = metric === "openInterest" ? "open interest" : "session volume";
   return (
     <div className="option-distribution">
@@ -301,6 +307,14 @@ export default function OptionDistribution({
                   : "None"}
               </b>
             </span>
+            {nextDay && model.unusualChecked > 0 && (
+              <span>
+                OI higher on {nextDay}
+                <b>
+                  {full(model.unusualRose)} of {full(model.unusualChecked)}
+                </b>
+              </span>
+            )}
           </div>
           <div
             className="distribution-chart"
@@ -437,7 +451,7 @@ export default function OptionDistribution({
                         largest bar, so every flagged side also gets a dot. */}
                     {b.unusualCall > 0 && (
                       <circle
-                        className="unusual-volume-marker"
+                        className={`unusual-volume-marker${b.unusualCallOiChange != null && b.unusualCallOiChange <= 0 ? " hollow" : ""}`}
                         cx={x}
                         cy={
                           zero -
@@ -450,7 +464,7 @@ export default function OptionDistribution({
                     )}
                     {b.unusualPut > 0 && (
                       <circle
-                        className="unusual-volume-marker"
+                        className={`unusual-volume-marker${b.unusualPutOiChange != null && b.unusualPutOiChange <= 0 ? " hollow" : ""}`}
                         cx={x}
                         cy={
                           zero +
@@ -578,7 +592,7 @@ export default function OptionDistribution({
                           <th>Vol</th>
                           <th>OI</th>
                           <th>Est. $</th>
-                          <th>Last print</th>
+                          <th>{nextDay ? `OI by ${nextDay}` : "Last print"}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -597,7 +611,13 @@ export default function OptionDistribution({
                                 ? "—"
                                 : `$${compact(u.premium)}`}
                             </td>
-                            <td>{LAST_SIDE_LABELS[u.lastSide] ?? "—"}</td>
+                            <td>
+                              {nextDay
+                                ? u.oiChange == null
+                                  ? "—"
+                                  : signed(u.oiChange)
+                                : (LAST_SIDE_LABELS[u.lastSide] ?? "—")}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -625,6 +645,8 @@ export default function OptionDistribution({
               : ""}
             Size only: the chain does not say whether the volume was bought or
             sold, and OI is the prior session’s count.
+            {nextDay &&
+              ` A filled dot means those contracts’ open interest was higher on ${nextDay}, the next saved session, so positions stayed open; a hollow dot means it was not.`}
           </p>
         </>
       )}
