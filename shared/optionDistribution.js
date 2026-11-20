@@ -50,12 +50,15 @@ export function unusualActivity(
     else if (last < bid || (ask > bid && last <= bid + band)) lastSide = "bid";
     else lastSide = "mid";
   }
+  // Only present on a stored session that has a later session stored after it.
+  const next = c.nextOpenInterest == null ? null : Number(c.nextOpenInterest);
   return {
     volume,
     openInterest,
     ratio: openInterest > 0 ? volume / openInterest : null,
     premium,
     lastSide,
+    oiChange: Number.isFinite(next) ? next - openInterest : null,
   };
 }
 export function distribution(

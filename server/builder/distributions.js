@@ -10,6 +10,7 @@ export function createDistributionLoader({
   readTiger = tigerRequest,
   readChain = fetchOptionChain,
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  snapshots = null,
 } = {}) {
   const cache = new Map();
   return async function load(symbol, days = 365) {
@@ -104,7 +105,7 @@ export function createDistributionLoader({
           if (data.warning) warnings.push(data.warning);
         }
       }
-      return {
+      const result = {
         symbol,
         contracts,
         source,
@@ -114,6 +115,12 @@ export function createDistributionLoader({
         complete,
         warnings,
       };
+      try {
+        snapshots?.save(result, days);
+      } catch {
+        // History is best-effort; a storage fault must not fail the chart.
+      }
+      return result;
     })();
     cache.set(key, { at: Date.now(), promise });
     if (cache.size > 30) cache.delete(cache.keys().next().value);

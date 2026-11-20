@@ -156,7 +156,14 @@ test("unusual volume needs size, volume above open interest and, when priced, en
   );
   assert.deepEqual(
     unusualActivity({ ...base, volume: 1000, openInterest: 0 }),
-    { volume: 1000, openInterest: 0, ratio: null, premium: null, lastSide: null },
+    {
+      volume: 1000,
+      openInterest: 0,
+      ratio: null,
+      premium: null,
+      lastSide: null,
+      oiChange: null,
+    },
   );
   const priced = unusualActivity({
     ...base,
