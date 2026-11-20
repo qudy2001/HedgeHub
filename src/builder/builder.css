@@ -1760,9 +1760,37 @@ body.studio-body:before {
   background: #1abd83;
   border-radius: 2px;
 }
-.distribution-legend i:last-child {
+.distribution-legend i:nth-of-type(2) {
   background: #f15b65;
   margin-left: 7px;
+}
+.option-distribution i.unusual-key {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #a855f7;
+  border-radius: 2px;
+  margin-left: 7px;
+}
+.distribution-tooltip .unusual-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+.distribution-tooltip .unusual-heading i.unusual-key {
+  margin-left: 0;
+}
+.distribution-tooltip table.unusual-table td:nth-child(n) {
+  color: var(--s-text);
+}
+.unusual-volume-bar,
+.unusual-volume-marker {
+  pointer-events: none;
+}
+.unusual-volume-marker {
+  stroke: var(--s-panel);
+  stroke-width: 1.5;
 }
 .distribution-summary {
   display: flex;

@@ -6,6 +6,8 @@ import {
   dateOnly,
   DAY,
 } from "../../shared/builderEngine.js";
+// expiry index : strike index : option type
+const SAMPLE_UNUSUAL = new Set(["1:26:call", "2:30:call", "4:8:put"]);
 export function demoWorkspace(settings = {}) {
   const today = dateOnly(Date.now()),
     definition = { ...DEFAULT_STRATEGY, ...settings, pricingMode: "modeled" },
@@ -64,7 +66,10 @@ export function demoWorkspace(settings = {}) {
           volume: Math.round(
             (60 + 2400 * Math.exp(-((distance / 0.08) ** 2))) *
               Math.exp(-e / 5) *
-              (0.7 + 0.3 * Math.cos(i * 2 + e + t)),
+              (0.7 + 0.3 * Math.cos(i * 2 + e + t)) +
+              // A few sample contracts trade far above their open interest so
+              // the unusual-volume highlight has something to show.
+              (SAMPLE_UNUSUAL.has(`${e}:${i}:${optionType}`) ? 9000 : 0),
           ),
         }));
       }).flat(),

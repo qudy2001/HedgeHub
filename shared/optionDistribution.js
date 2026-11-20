@@ -8,6 +8,56 @@ export function expiryBucket(date, grouping) {
   }
   return date;
 }
+// A contract is "unusual" when today's volume is large in absolute terms and
+// large relative to the positions that already existed (prior-session OI).
+export const UNUSUAL_DEFAULTS = Object.freeze({
+  minVolume: 500,
+  minRatio: 1.25,
+  minPremium: 100000,
+});
+export function unusualActivity(
+  c,
+  { minVolume, minRatio, minPremium } = UNUSUAL_DEFAULTS,
+) {
+  if (c.volume == null || c.openInterest == null) return null;
+  const volume = Number(c.volume),
+    openInterest = Number(c.openInterest);
+  if (
+    !Number.isFinite(volume) ||
+    !Number.isFinite(openInterest) ||
+    openInterest < 0 ||
+    volume < minVolume ||
+    volume < openInterest * minRatio
+  )
+    return null;
+  // Last trade is preferred over the current mid; either is only an estimate
+  // of what the session's volume actually traded at.
+  const price = [c.lastPrice, c.mark].map(Number).find((p) => p > 0),
+    multiplier = Number(c.multiplier) > 0 ? Number(c.multiplier) : 100,
+    premium = price ? volume * price * multiplier : null;
+  // Without a price the premium floor cannot be applied; keep the contract.
+  if (premium != null && premium < minPremium) return null;
+  // Where the most recent print sits inside the current quote. This describes
+  // one trade against a quote that may have moved since; it is a hint, not a
+  // buy/sell split of the session's volume.
+  const bid = Number(c.bid),
+    ask = Number(c.ask),
+    last = Number(c.lastPrice);
+  let lastSide = null;
+  if (bid > 0 && ask >= bid && last > 0) {
+    const band = (ask - bid) * 0.25;
+    if (last > ask || (ask > bid && last >= ask - band)) lastSide = "ask";
+    else if (last < bid || (ask > bid && last <= bid + band)) lastSide = "bid";
+    else lastSide = "mid";
+  }
+  return {
+    volume,
+    openInterest,
+    ratio: openInterest > 0 ? volume / openInterest : null,
+    premium,
+    lastSide,
+  };
+}
 export function distribution(
   contracts,
   metric,
@@ -16,6 +66,7 @@ export function distribution(
     grouping = "auto",
     axis = "strike",
     maxBars = 48,
+    unusual = UNUSUAL_DEFAULTS,
   } = {},
 ) {
   const seen = new Set();
@@ -63,7 +114,9 @@ export function distribution(
   let total = 0,
     near = 0,
     mid = 0,
-    far = 0;
+    far = 0,
+    unusualTotal = 0,
+    unusualCount = 0;
   for (const c of valid) {
     const value = Number(c[metric]),
       dte = (Date.parse(c.expiration) - Date.parse(asOf)) / DAY;
@@ -88,6 +141,9 @@ export function distribution(
         highStrike: hi,
         call: 0,
         put: 0,
+        unusualCall: 0,
+        unusualPut: 0,
+        unusualItems: [],
         dates: new Map(),
         from: c.expiration,
         to: c.expiration,
@@ -102,6 +158,19 @@ export function distribution(
     );
     if (!b.dates.has(dk)) b.dates.set(dk, { date: dk, call: 0, put: 0 });
     b.dates.get(dk)[c.optionType] += value;
+    const flagged = unusualActivity(c, unusual);
+    if (flagged) {
+      unusualTotal += flagged.volume;
+      unusualCount++;
+      b[c.optionType === "call" ? "unusualCall" : "unusualPut"] +=
+        flagged.volume;
+      b.unusualItems.push({
+        ...flagged,
+        expiration: c.expiration,
+        strike: c.strike,
+        optionType: c.optionType,
+      });
+    }
   }
   const bars = [...buckets.values()]
     .sort((a, b) => (a.sort < b.sort ? -1 : 1))
@@ -114,6 +183,13 @@ export function distribution(
         )
         .filter((d) => d.call + d.put > 0)
         .slice(0, 5),
+      unusualTop: b.unusualItems
+        .sort(
+          (a, b) =>
+            (b.premium ?? -1) - (a.premium ?? -1) || b.volume - a.volume,
+        )
+        .slice(0, 3),
+      unusualItems: undefined,
       dates: undefined,
     }));
   return {
@@ -123,6 +199,9 @@ export function distribution(
     mid,
     far,
     missing,
+    unusualTotal,
+    unusualCount,
+    unusualRule: unusual,
     contracts: valid.length,
     grouping: resolvedGrouping,
     from: dates[0],

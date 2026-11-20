@@ -8,6 +8,8 @@ const compact = (n) =>
     maximumFractionDigits: 1,
   }).format(n);
 const full = (n) => new Intl.NumberFormat("en-US").format(n);
+const UNUSUAL_COLOR = "#a855f7";
+const LAST_SIDE_LABELS = { ask: "Near ask", bid: "Near bid", mid: "Mid" };
 const dateLabel = (date, group) =>
   group === "month"
     ? new Date(date + "-01T00:00:00Z").toLocaleDateString("en-GB", {
@@ -60,14 +62,26 @@ export default function OptionDistribution({
   const stockChange = (patch) =>
     onStockSettings({ ...stockSettings, ...patch });
   const selected = model.bars.find((b) => b.key === hover),
-    max = Math.max(1, ...model.bars.flatMap((b) => [b.call, b.put])),
+    // On the OI chart the unusual volume is drawn against the same contract
+    // scale and can be taller than the OI bar it sits in.
+    max = Math.max(
+      1,
+      ...model.bars.flatMap((b) => [
+        b.call,
+        b.put,
+        ...(metric === "openInterest" ? [b.unusualCall, b.unusualPut] : []),
+      ]),
+    ),
     width = 720,
     left = 52,
     right = stockVisible && stockResult ? 62 : 12,
     zero = 116,
     amplitude = 78,
     step = (width - left - right) / Math.max(1, model.bars.length),
-    barWidth = Math.max(1, step * 0.65);
+    barWidth = Math.max(1, step * 0.65),
+    unusualWidth =
+      metric === "openInterest" ? Math.max(1, barWidth * 0.5) : barWidth,
+    rule = model.unusualRule;
   const title = metric === "openInterest" ? "open interest" : "session volume";
   return (
     <div className="option-distribution">
@@ -123,7 +137,8 @@ export default function OptionDistribution({
         <span className="distribution-legend">
           <i />
           Calls <i />
-          Puts
+          Puts <i className="unusual-key" />
+          Unusual volume
         </span>
       </div>
       {metric === "volume" && (
@@ -275,6 +290,14 @@ export default function OptionDistribution({
             <span>
               Total<b>{compact(model.total)}</b>
             </span>
+            <span>
+              Unusual volume
+              <b>
+                {model.unusualCount
+                  ? `${compact(model.unusualTotal)} · ${full(model.unusualCount)} contract${model.unusualCount === 1 ? "" : "s"}`
+                  : "None"}
+              </b>
+            </span>
           </div>
           <div
             className="distribution-chart"
@@ -337,7 +360,7 @@ export default function OptionDistribution({
                     key={b.key}
                     tabIndex={0}
                     role="button"
-                    aria-label={`${label}: calls ${full(b.call)}, puts ${full(b.put)}. Show expiry details.`}
+                    aria-label={`${label}: calls ${full(b.call)}, puts ${full(b.put)}${b.unusualCall + b.unusualPut > 0 ? `, unusual volume calls ${full(b.unusualCall)}, puts ${full(b.unusualPut)}` : ""}. Show expiry details.`}
                     onMouseEnter={() => setHover(b.key)}
                     onFocus={() => setHover(b.key)}
                     onBlur={() => setHover(null)}
@@ -387,6 +410,54 @@ export default function OptionDistribution({
                       height={(b.put / max) * amplitude}
                       fill="#f15b65"
                     />
+                    {b.unusualCall > 0 && (
+                      <rect
+                        className="unusual-volume-bar"
+                        x={x - unusualWidth / 2}
+                        y={zero - (b.unusualCall / max) * amplitude}
+                        width={unusualWidth}
+                        height={(b.unusualCall / max) * amplitude}
+                        fill={UNUSUAL_COLOR}
+                      />
+                    )}
+                    {b.unusualPut > 0 && (
+                      <rect
+                        className="unusual-volume-bar"
+                        x={x - unusualWidth / 2}
+                        y={zero}
+                        width={unusualWidth}
+                        height={(b.unusualPut / max) * amplitude}
+                        fill={UNUSUAL_COLOR}
+                      />
+                    )}
+                    {/* The purple segment can be under a pixel next to the
+                        largest bar, so every flagged side also gets a dot. */}
+                    {b.unusualCall > 0 && (
+                      <circle
+                        className="unusual-volume-marker"
+                        cx={x}
+                        cy={
+                          zero -
+                          (Math.max(b.call, b.unusualCall) / max) * amplitude -
+                          6
+                        }
+                        r="3"
+                        fill={UNUSUAL_COLOR}
+                      />
+                    )}
+                    {b.unusualPut > 0 && (
+                      <circle
+                        className="unusual-volume-marker"
+                        cx={x}
+                        cy={
+                          zero +
+                          (Math.max(b.put, b.unusualPut) / max) * amplitude +
+                          6
+                        }
+                        r="3"
+                        fill={UNUSUAL_COLOR}
+                      />
+                    )}
                     {(i % Math.max(1, Math.ceil(model.bars.length / 5)) === 0 ||
                       i === model.bars.length - 1) && (
                       <text
@@ -490,6 +561,46 @@ export default function OptionDistribution({
                   </tbody>
                 </table>
                 {!selected.topDates.length && <p>Reported values are zero.</p>}
+                {selected.unusualTop.length > 0 && (
+                  <>
+                    <small className="unusual-heading">
+                      <i className="unusual-key" />
+                      Unusual volume · calls {full(selected.unusualCall)} ·
+                      puts {full(selected.unusualPut)}
+                    </small>
+                    <table className="unusual-table">
+                      <thead>
+                        <tr>
+                          <th>Contract</th>
+                          <th>Vol</th>
+                          <th>OI</th>
+                          <th>Est. $</th>
+                          <th>Last print</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selected.unusualTop.map((u) => (
+                          <tr
+                            key={`${u.expiration}:${u.strike}:${u.optionType}`}
+                          >
+                            <td>
+                              {dateLabel(u.expiration, "day")} ${u.strike}{" "}
+                              {u.optionType === "call" ? "C" : "P"}
+                            </td>
+                            <td>{compact(u.volume)}</td>
+                            <td>{compact(u.openInterest)}</td>
+                            <td>
+                              {u.premium == null
+                                ? "—"
+                                : `$${compact(u.premium)}`}
+                            </td>
+                            <td>{LAST_SIDE_LABELS[u.lastSide] ?? "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -499,6 +610,18 @@ export default function OptionDistribution({
               ? `${model.missing} missing values excluded · `
               : ""}
             Hover, focus or tap a bar for top expiries.
+          </p>
+          <p className="subtle">
+            Purple dots and segments mark contracts with session volume of at
+            least{" "}
+            {full(rule.minVolume)} and at least {rule.minRatio}× their open
+            interest (and an estimated premium of ${compact(rule.minPremium)}{" "}
+            or more where a price is returned).{" "}
+            {metric === "openInterest"
+              ? "It is that volume drawn on the OI scale, not a share of OI. "
+              : ""}
+            Size only: the chain does not say whether the volume was bought or
+            sold, and OI is the prior session’s count.
           </p>
         </>
       )}

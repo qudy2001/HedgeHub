@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { distribution, expiryBucket } from "../shared/optionDistribution.js";
+import {
+  distribution,
+  expiryBucket,
+  unusualActivity,
+} from "../shared/optionDistribution.js";
 import { createDistributionLoader } from "../server/builder/distributions.js";
 import { addDays, dateOnly } from "../shared/builderEngine.js";
 const contract = (expiration, optionType, openInterest, strike = 100) => ({
@@ -140,4 +144,60 @@ test("Tiger quota retry retains the affected expiry rather than omitting far-dat
   assert.equal(waited, 61000);
   assert.equal(result.complete, true);
   assert.equal(result.contracts[0].expiration, expiry);
+});
+test("unusual volume needs size, volume above open interest and, when priced, enough premium", () => {
+  const base = { expiration: "2026-12-18", optionType: "call", strike: 100 };
+  assert.equal(unusualActivity({ ...base, volume: 400, openInterest: 10 }), null);
+  assert.equal(unusualActivity({ ...base, volume: 1000, openInterest: 900 }), null);
+  assert.equal(unusualActivity({ ...base, volume: 1000, openInterest: null }), null);
+  assert.equal(
+    unusualActivity({ ...base, volume: 1000, openInterest: 100, lastPrice: 0.05 }),
+    null,
+  );
+  assert.deepEqual(
+    unusualActivity({ ...base, volume: 1000, openInterest: 0 }),
+    { volume: 1000, openInterest: 0, ratio: null, premium: null, lastSide: null },
+  );
+  const priced = unusualActivity({
+    ...base,
+    volume: 2000,
+    openInterest: 400,
+    lastPrice: 2.95,
+    bid: 2.5,
+    ask: 3,
+  });
+  assert.equal(priced.ratio, 5);
+  assert.equal(priced.premium, 590000);
+  assert.equal(priced.lastSide, "ask");
+  assert.equal(
+    unusualActivity({ ...base, volume: 2000, openInterest: 400, lastPrice: 2.55, bid: 2.5, ask: 3 }).lastSide,
+    "bid",
+  );
+  assert.equal(
+    unusualActivity({ ...base, volume: 2000, openInterest: 400, lastPrice: 2.75, bid: 2.5, ask: 3 }).lastSide,
+    "mid",
+  );
+});
+test("unusual volume is the same set of contracts on the volume and open-interest charts", () => {
+  const rows = [
+    { expiration: "2026-12-18", optionType: "call", strike: 100, volume: 3000, openInterest: 500, lastPrice: 4 },
+    { expiration: "2026-12-18", optionType: "put", strike: 100, volume: 900, openInterest: 5000, lastPrice: 4 },
+    { expiration: "2027-01-15", optionType: "put", strike: 90, volume: 800, openInterest: 100, lastPrice: 3 },
+    { expiration: "2027-01-15", optionType: "call", strike: 90, volume: 50, openInterest: 10, lastPrice: 3 },
+  ];
+  for (const metric of ["volume", "openInterest"]) {
+    const d = distribution(rows, metric, { asOf: "2026-11-20" });
+    assert.equal(d.unusualTotal, 3800);
+    assert.equal(d.unusualCount, 2);
+    const [low, high] = d.bars;
+    assert.deepEqual([low.unusualCall, low.unusualPut], [0, 800]);
+    assert.deepEqual([high.unusualCall, high.unusualPut], [3000, 0]);
+    assert.equal(high.unusualTop[0].premium, 1200000);
+    assert.equal(high.unusualItems, undefined);
+  }
+  const loose = distribution(rows, "volume", {
+    asOf: "2026-11-20",
+    unusual: { minVolume: 10, minRatio: 1, minPremium: 0 },
+  });
+  assert.equal(loose.unusualCount, 3);
 });
