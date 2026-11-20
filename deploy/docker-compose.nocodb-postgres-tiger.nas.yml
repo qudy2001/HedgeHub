@@ -1,0 +1,150 @@
+services:
+  postgres-hedgehub:
+    container_name: postgres-hedgehub
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    networks:
+      - nocodb_network
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_DB: optionsdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a Postgres password}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d optionsdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  tiger-bridge:
+    container_name: tiger-bridge
+    image: ghcr.io/qudy2001/hedgehub-tiger-bridge:latest
+    # If you want to run the local code you just changed instead of a pushed image, use:
+    # build: ./tiger-bridge
+    init: true
+    restart: unless-stopped
+    networks:
+      - nocodb_network
+    environment:
+      TIGER_BRIDGE_HOST: 0.0.0.0
+      TIGER_CONFIG_DIR: /config
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:?Set a private shared bridge token}
+      TIGER_CLAIM_DEVICE: ${TIGER_CLAIM_DEVICE:-false}
+    volumes:
+      # Host path must point at the account's .properties file directly (it's not
+      # named tiger_openapi_config.properties); it's remapped to that default name
+      # inside the container so the SDK's directory-based lookup resolves it.
+      - ${TIGER_CONFIG_FILE:?Set the path to your Tiger SDK .properties file}:/config/tiger_openapi_config.properties:ro
+    expose:
+      - "8788"
+
+  hedgehub:
+    container_name: hedgehub
+    image: ghcr.io/qudy2001/hedgehub-postgresql:latest
+    # If you want to deploy the local code you just changed instead of a pushed image, use:
+    # build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres-hedgehub:
+        condition: service_healthy
+      tiger-bridge:
+        condition: service_started
+    networks:
+      - nocodb_network
+    ports:
+      - "8788:8787"
+      - "8799:8799"
+    environment:
+      DB_TYPE: postgres
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Set a Postgres password}@postgres-hedgehub:5432/optionsdb
+      POSTGRES_HOST: postgres-hedgehub
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: optionsdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a Postgres password}
+      SQLITE_DB_PATH: /app/data/hedgehub.db
+      NODE_ENV: production
+      PORT: 8787
+      TZ: Europe/London
+      MARKET_DATA_PROVIDER: tiger
+      TIGER_BRIDGE_URL: http://tiger-bridge:8788
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:?Set a private shared bridge token}
+      HEDGEHUB_ROLE: web
+      HEDGEHUB_ENABLE_HTTP: "true"
+      HEDGEHUB_ENABLE_BACKGROUND_JOBS: "false"
+      LOG_LEVEL: info
+      HEDGEHUB_LOG_ALL_REQUESTS: "true"
+      HEDGEHUB_LOG_SLOW_REQUEST_MS: "2000"
+      PAPER_ORDER_SEED_CACHE_TTL_MS: "15000"
+      PAPER_QUOTE_SLOW_PROCESS_MS: "250"
+      EVENT_LOOP_MONITOR_INTERVAL_MS: "1000"
+      EVENT_LOOP_LAG_WARN_MS: "500"
+    volumes:
+      - ./data:/app/data
+      - ./dashboards:/app/dashboards
+      - ./db/init:/app/db/init:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/api/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  hedgehub-scanner:
+    container_name: hedgehub-scanner
+    image: ghcr.io/qudy2001/hedgehub-postgresql:latest
+    # Or:
+    # build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres-hedgehub:
+        condition: service_healthy
+      tiger-bridge:
+        condition: service_started
+    networks:
+      - nocodb_network
+    environment:
+      DB_TYPE: postgres
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Set a Postgres password}@postgres-hedgehub:5432/optionsdb
+      POSTGRES_HOST: postgres-hedgehub
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: optionsdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a Postgres password}
+      SQLITE_DB_PATH: /app/data/hedgehub.db
+      NODE_ENV: production
+      PORT: 8787
+      TZ: Europe/London
+      MARKET_DATA_PROVIDER: tiger
+      TIGER_BRIDGE_URL: http://tiger-bridge:8788
+      TIGER_BRIDGE_TOKEN: ${TIGER_BRIDGE_TOKEN:?Set a private shared bridge token}
+      HEDGEHUB_ROLE: scanner
+      HEDGEHUB_ENABLE_HTTP: "false"
+      HEDGEHUB_ENABLE_BACKGROUND_JOBS: "true"
+      LOG_LEVEL: info
+      HEDGEHUB_LOG_ALL_REQUESTS: "true"
+      HEDGEHUB_LOG_SLOW_REQUEST_MS: "2000"
+      PAPER_ORDER_SEED_CACHE_TTL_MS: "15000"
+      PAPER_QUOTE_SLOW_PROCESS_MS: "250"
+      EVENT_LOOP_MONITOR_INTERVAL_MS: "1000"
+      EVENT_LOOP_LAG_WARN_MS: "500"
+    volumes:
+      - ./data:/app/data
+      - ./dashboards:/app/dashboards
+      - ./db/init:/app/db/init:ro
+
+networks:
+  nocodb_network:
+    external: true

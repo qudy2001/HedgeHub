@@ -10,7 +10,9 @@ export const quoteWatchlist = [
   { symbol: "EWU", sourceSymbol: "ewu.us", label: "UK Equity ETF", group: "UK Stocks", provider: "stooq" },
   { symbol: "VGK", sourceSymbol: "vgk.us", label: "Europe ETF", group: "EU Stocks", provider: "stooq" },
   { symbol: "GLD", sourceSymbol: "gld.us", label: "Gold ETF", group: "Commodities", provider: "stooq" },
+  { symbol: "XAU-USD", sourceSymbol: "xauusd", label: "Gold Spot (XAU/USD)", group: "Commodities", provider: "stooq" },
   { symbol: "USO", sourceSymbol: "uso.us", label: "Oil ETF", group: "Commodities", provider: "stooq" },
+  { symbol: "WTI-USD", sourceSymbol: "cl.f", label: "WTI Crude Oil (Futures)", group: "Commodities", provider: "stooq" },
   { symbol: "TLT", sourceSymbol: "tlt.us", label: "US Treasury ETF", group: "Bonds", provider: "stooq" },
   { symbol: "BTC-USD", sourceSymbol: "bitcoin", label: "Bitcoin", group: "Crypto", provider: "coingecko" },
   { symbol: "ETH-USD", sourceSymbol: "ethereum", label: "Ethereum", group: "Crypto", provider: "coingecko" },
@@ -18,7 +20,8 @@ export const quoteWatchlist = [
   { symbol: "FXB", sourceSymbol: "fxb.us", label: "Pound FX ETF", group: "Forex", provider: "stooq" },
   { symbol: "UUP", sourceSymbol: "uup.us", label: "Dollar Index ETF", group: "Global Trade", provider: "stooq" },
   { symbol: "SEA", sourceSymbol: "sea.us", label: "Shipping ETF", group: "Global Trade", provider: "stooq" },
-  { symbol: "IBIT", sourceSymbol: "ibit.us", label: "iShares Bitcoin Trust", group: "Strategy Proxy", provider: "stooq" }
+  { symbol: "IBIT", sourceSymbol: "ibit.us", label: "iShares Bitcoin Trust", group: "Strategy Proxy", provider: "stooq" },
+  { symbol: "ETHA", sourceSymbol: "etha.us", label: "iShares Ethereum Trust", group: "Strategy Proxy", provider: "stooq" }
 ];
 
 export const marketSections = [
@@ -343,17 +346,17 @@ export const calendarWidgets = {
 export const sidebarStrategies = [
   {
     id: "strategy-1",
-    name: "BTC Threshold Hedge",
+    name: "Threshold Hedge",
     status: "ready",
-    assetLabel: "BTC / IBIT",
-    description: "Buy a Bitcoin Polymarket contract and offset the cost with an IBIT call overlay."
+    assetLabel: "",
+    description: "Buy a Polymarket contract and place an options strategy to offset losses or maximize profit."
   },
   {
     id: "strategy-2",
     name: "Vol Crush Earnings",
-    status: "planned",
-    assetLabel: "Single-name stocks",
-    description: "Pair event contracts with short premium around earnings and statement dates."
+    status: "ready",
+    assetLabel: "Large-cap earnings",
+    description: "Sell defined-risk premium into earnings and rank setups by implied move, liquidity, and risk."
   },
   {
     id: "strategy-3",
@@ -361,6 +364,27 @@ export const sidebarStrategies = [
     status: "planned",
     assetLabel: "Gold / Oil / FX",
     description: "Use binary macro views to finance short-dated optionality."
+  },
+  {
+    id: "strategy-4",
+    name: "Delta Hedge Scanner",
+    status: "ready",
+    assetLabel: "AMD / NVDA / AAPL + 22",
+    description: "Rank screenshot watchlist names by ATM straddle liquidity, gamma response, and hedgeability."
+  },
+  {
+    id: "strategy-5",
+    name: "Covered Income Scanner",
+    status: "ready",
+    assetLabel: "TSLA / AAPL / NVDA / SPY",
+    description: "Scan support and resistance anchored short puts, covered calls, and covered strangles by return and risk."
+  },
+  {
+    id: "strategy-tv-finder",
+    name: "TradingView Finder",
+    status: "ready",
+    assetLabel: "SPY first",
+    description: "Use TradingView to screen option strategies, then open them in HedgeHub's own detail view."
   }
 ];
 
@@ -393,7 +417,7 @@ export const strategyAssetUniverse = [
   {
     id: "btc",
     label: "Bitcoin",
-    polymarketQueries: ["bitcoin above", "bitcoin march", "btc above"],
+    polymarketQueries: ["bitcoin above", "bitcoin hit", "btc above"],
     optionSymbol: "IBIT",
     underlyingSymbol: "BTC-USD",
     referenceSymbol: "NASDAQ:IBIT",
@@ -402,7 +426,7 @@ export const strategyAssetUniverse = [
   {
     id: "eth",
     label: "Ethereum",
-    polymarketQueries: ["ethereum above", "eth march", "ethereum march"],
+    polymarketQueries: ["ethereum above", "eth hit", "ethereum hit"],
     optionSymbol: "ETHA",
     underlyingSymbol: "ETH-USD",
     referenceSymbol: "NASDAQ:ETHA",
@@ -411,7 +435,7 @@ export const strategyAssetUniverse = [
   {
     id: "gold",
     label: "Gold",
-    polymarketQueries: ["gold above", "gold march", "gold price"],
+    polymarketQueries: ["gold above", "gold hit", "gold price"],
     optionSymbol: "GLD",
     underlyingSymbol: "XAU-USD",
     referenceSymbol: "AMEX:GLD",
@@ -420,7 +444,7 @@ export const strategyAssetUniverse = [
   {
     id: "oil",
     label: "Oil",
-    polymarketQueries: ["oil above", "wti march", "brent march"],
+    polymarketQueries: ["oil above", "wti hit", "brent hit"],
     optionSymbol: "USO",
     underlyingSymbol: "WTI-USD",
     referenceSymbol: "AMEX:USO",
@@ -428,12 +452,105 @@ export const strategyAssetUniverse = [
   },
   {
     id: "stocks",
-    label: "US Stocks",
+    label: "US Stocks(VOO)",
     polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
     optionSymbol: "VOO",
     underlyingSymbol: "SPX-INDEX",
     referenceSymbol: "AMEX:VOO",
     conversionFallback: 0.091
+  },
+  {
+    id: "stocks-spy",
+    label: "US Stocks(SPY)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "SPY",
+    underlyingSymbol: "SPX-INDEX",
+    referenceSymbol: "AMEX:SPY",
+    conversionFallback: 0.1
+  },
+  {
+    id: "stocks-spx",
+    label: "US Stocks (SPX)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "SPX",
+    underlyingSymbol: "SPX",
+    referenceSymbol: "SP:SPX",
+    conversionFallback: 1
+  }
+];
+
+export const strategyScreenerV2AssetUniverse = [
+  {
+    id: "btc-v2",
+    label: "Bitcoin",
+    polymarketQueries: ["bitcoin above", "bitcoin hit", "btc above"],
+    optionSymbol: "IBIT",
+    underlyingSymbol: "BTC-USD",
+    referenceSymbol: "NASDAQ:IBIT",
+    conversionFallback: 0.00057,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "eth-v2",
+    label: "Ethereum",
+    polymarketQueries: ["ethereum above", "eth hit", "ethereum hit"],
+    optionSymbol: "ETHA",
+    underlyingSymbol: "ETH-USD",
+    referenceSymbol: "NASDAQ:ETHA",
+    conversionFallback: 0.01,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "gold-v2",
+    label: "Gold",
+    polymarketQueries: ["gold above", "gold hit", "gold price"],
+    optionSymbol: "GLD",
+    underlyingSymbol: "XAU-USD",
+    referenceSymbol: "AMEX:GLD",
+    conversionFallback: 0.1,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "oil-v2",
+    label: "Oil",
+    polymarketQueries: ["oil above", "wti hit", "brent hit"],
+    optionSymbol: "USO",
+    underlyingSymbol: "WTI-USD",
+    referenceSymbol: "AMEX:USO",
+    conversionFallback: 1,
+    settlementType: "physical",
+    exerciseStyle: "american",
+    preferenceRank: 2
+  },
+  {
+    id: "stocks-xsp-v2",
+    label: "US Stocks (XSP)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "XSP",
+    underlyingSymbol: "SPX",
+    referenceSymbol: "CBOE:XSP",
+    conversionFallback: 0.1,
+    settlementType: "cash",
+    exerciseStyle: "european",
+    preferenceRank: 1
+  },
+  {
+    id: "stocks-spx-v2",
+    label: "US Stocks (SPX)",
+    polymarketQueries: ["spx above", "s&p 500 above", "s&p 500 close"],
+    optionSymbol: "SPX",
+    underlyingSymbol: "SPX",
+    referenceSymbol: "SP:SPX",
+    conversionFallback: 1,
+    settlementType: "cash",
+    exerciseStyle: "european",
+    preferenceRank: 2
   }
 ];
 
@@ -449,6 +566,8 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-03-31T12:00:00Z",
     active: true,
     source: "seed",
+    slug: "what-price-will-bitcoin-hit-in-march-2026",
+    eventSlug: "what-price-will-bitcoin-hit-in-march-2026",
     url: "https://polymarket.com/event/what-price-will-bitcoin-hit-in-march-2026"
   },
   {
@@ -462,7 +581,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-eth-mar-31",
@@ -475,6 +594,8 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-03-31T12:00:00Z",
     active: true,
     source: "seed",
+    slug: "what-price-will-ethereum-hit-in-march-2026",
+    eventSlug: "what-price-will-ethereum-hit-in-march-2026",
     url: "https://polymarket.com/event/what-price-will-ethereum-hit-in-march-2026"
   },
   {
@@ -488,7 +609,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-gold-apr-30",
@@ -501,7 +622,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-oil-apr-30",
@@ -514,7 +635,7 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-04-30T12:00:00Z",
     active: true,
     source: "seed",
-    url: "https://polymarket.com/"
+    url: ""
   },
   {
     id: "seed-stocks-mar-31",
@@ -527,6 +648,21 @@ export const fallbackPolymarketMarkets = [
     endDate: "2026-03-31T20:00:00Z",
     active: true,
     source: "seed",
+    slug: "sp-500-spx-above-end-of-march",
+    eventSlug: "sp-500-spx-above-end-of-march",
     url: "https://polymarket.com/event/sp-500-spx-above-end-of-march"
+  },
+  {
+    id: "seed-stocks-apr-30",
+    assetId: "stocks",
+    question: "Will the S&P 500 (SPX) be above 6,700 on April 30, 2026?",
+    yesPrice: 0.41,
+    noPrice: 0.59,
+    volume: 0,
+    liquidity: 0,
+    endDate: "2026-04-30T20:00:00Z",
+    active: true,
+    source: "seed",
+    url: ""
   }
 ];

@@ -1,0 +1,3 @@
+The browser 'hedge-studio' is not open, please run open first
+
+  playwright-cli -s=hedge-studio open [params]

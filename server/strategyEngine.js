@@ -1,9 +1,14 @@
+import { defaultStrategyConfig, strategyAssetUniverse as baseStrategyAssetUniverse } from "./marketCatalog.js";
+import { summarizeOptionStrategyLiquidity } from "./liquidityMetrics.js";
+import { pickOptionReferencePrice } from "./optionPricing.js";
+import { hasPublicPolymarketEvent, isTradablePolymarketMarket } from "./providers/polymarket.js";
+import { strategyAssetMatchesMarket } from "./strategyAssets.js";
 import {
-  defaultStrategyConfig,
-  fallbackPolymarketMarkets,
-  strategyAssetUniverse
-} from "./marketCatalog.js";
-import { isTradablePolymarketMarket } from "./providers/polymarket.js";
+  evaluatePolymarketSignalHit,
+  parsePolymarketQuestionSignal,
+  parseTargetFromQuestion as parsePolymarketTargetFromQuestion,
+  projectPolymarketTargetProxySpot
+} from "../shared/polymarketSignals.js";
 
 function erf(x) {
   const sign = x >= 0 ? 1 : -1;
@@ -74,10 +79,13 @@ function startOfMonthIso(dateIso) {
 
 function getOptionSearchWindowForMarket(market, fallbackExpiry = defaultStrategyConfig.optionLeg.expiry) {
   const referenceExpiry = market.endDate?.slice(0, 10) || fallbackExpiry;
+  const referenceExpiryDate = new Date(`${referenceExpiry}T00:00:00.000Z`);
+  const monthStart = startOfMonthIso(referenceExpiry);
+  const calendarLookback = toIsoDate(addDays(referenceExpiryDate, -14));
   return {
     referenceExpiry,
-    from: startOfMonthIso(referenceExpiry),
-    to: toIsoDate(addDays(new Date(`${referenceExpiry}T00:00:00.000Z`), 5))
+    from: minIsoDate([monthStart, calendarLookback]),
+    to: toIsoDate(addDays(referenceExpiryDate, 5))
   };
 }
 
@@ -85,19 +93,26 @@ function isIsoDateWithinRange(dateIso, from, to) {
   return Boolean(dateIso) && (!from || dateIso >= from) && (!to || dateIso <= to);
 }
 
-export function parseTargetFromQuestion(question) {
-  const match = question.match(
-    /(?:above|over|reach(?:es)?|hits?|at least)\s*\$?\s*([\d,.]+)\s*([kKmM])?/i
-  );
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  if (!match) {
-    return null;
+function marketQuestionMentionsSymbol(question, symbol) {
+  const normalizedSymbol = String(symbol ?? "").trim();
+  const normalizedQuestion = String(question ?? "").trim();
+  if (!normalizedSymbol || !normalizedQuestion) {
+    return false;
   }
 
-  const rawValue = Number(match[1].replace(/,/g, ""));
-  const scale = match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
+  try {
+    return new RegExp(`\\b${escapeRegExp(normalizedSymbol)}\\b`, "i").test(normalizedQuestion);
+  } catch (_error) {
+    return normalizedQuestion.toUpperCase().includes(normalizedSymbol.toUpperCase());
+  }
+}
 
-  return rawValue * scale;
+export function parseTargetFromQuestion(question) {
+  return parsePolymarketTargetFromQuestion(question);
 }
 
 export function blackScholesCall({
@@ -165,6 +180,25 @@ export function binaryCallPrice({
     (volatility * sqrtT);
 
   return Math.exp(-riskFreeRate * timeToExpiryYears) * normalCdf(d2);
+}
+
+export function binaryPutPrice({
+  spot,
+  strike,
+  timeToExpiryYears,
+  volatility,
+  riskFreeRate
+}) {
+  if (timeToExpiryYears <= 0 || spot <= 0 || strike <= 0 || volatility <= 0) {
+    return spot <= strike ? 1 : 0;
+  }
+
+  const sqrtT = Math.sqrt(timeToExpiryYears);
+  const d2 =
+    (Math.log(spot / strike) + (riskFreeRate - 0.5 * volatility * volatility) * timeToExpiryYears) /
+    (volatility * sqrtT);
+
+  return Math.exp(-riskFreeRate * timeToExpiryYears) * normalCdf(-d2);
 }
 
 export function computeCallGreeks({
@@ -245,6 +279,39 @@ function formatNumber(value, digits = 2) {
   }
 
   return Number(value.toFixed(digits));
+}
+
+const TARGET_OPTION_QUOTE_SIZE_THRESHOLDS = [10, 25, 50];
+const DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD = TARGET_OPTION_QUOTE_SIZE_THRESHOLDS[0];
+
+function hasUsableQuoteSize(option) {
+  const bidSize = Number(option?.bidSize);
+  const askSize = Number(option?.askSize);
+
+  return Number.isFinite(bidSize) && bidSize > 0 && Number.isFinite(askSize) && askSize > 0;
+}
+
+function quoteSizeMeetsThreshold(option, threshold = DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD) {
+  if (!hasUsableQuoteSize(option)) {
+    return false;
+  }
+
+  const bidSize = Number(option?.bidSize);
+  const askSize = Number(option?.askSize);
+  return bidSize > threshold && askSize > threshold;
+}
+
+function getMinimumQuoteSize(optionLegBlueprints, side) {
+  const sizeKey = side === "ask" ? "marketAskSize" : "marketBidSize";
+  const sizes = optionLegBlueprints
+    .map((leg) => Number(leg?.[sizeKey]))
+    .filter((size) => Number.isFinite(size) && size > 0);
+
+  if (!sizes.length) {
+    return null;
+  }
+
+  return Math.min(...sizes);
 }
 
 function roundContracts(value, minimum = 1) {
@@ -393,23 +460,58 @@ function daysUntil(isoDate) {
   return Math.max(differenceInDays(today, new Date(`${isoDate}T00:00:00.000Z`)), 0);
 }
 
+function scoreResolvedStrategyMarket(market) {
+  const volume = Number(market?.volume ?? 0);
+  const liquidity = Number(market?.liquidity ?? 0);
+  const yesPrice = Number(market?.yesPrice ?? 0.5);
+  const endDate = String(market?.endDate ?? "");
+  const source = String(market?.source ?? "").toLowerCase();
+
+  return {
+    volume: Number.isFinite(volume) ? volume : 0,
+    liquidity: Number.isFinite(liquidity) ? liquidity : 0,
+    centerDistance: Number.isFinite(yesPrice) ? Math.abs(yesPrice - 0.5) : 1,
+    endDate,
+    sourceRank: source === "event-page" ? 2 : source === "live" ? 1 : 0
+  };
+}
+
+export function getResolvedStrategyMarketsForAsset(asset, polymarketMarkets = []) {
+  return (polymarketMarkets ?? [])
+    .filter((market) => {
+      return (
+        isTradablePolymarketMarket(market) &&
+        (hasPublicPolymarketEvent(market) || market.source === "seed") &&
+        strategyAssetMatchesMarket(asset, market) &&
+        parsePolymarketQuestionSignal(market.question)
+      );
+    })
+    .sort((left, right) => {
+      const leftScore = scoreResolvedStrategyMarket(left);
+      const rightScore = scoreResolvedStrategyMarket(right);
+
+      if (rightScore.sourceRank !== leftScore.sourceRank) {
+        return rightScore.sourceRank - leftScore.sourceRank;
+      }
+
+      if (leftScore.centerDistance !== rightScore.centerDistance) {
+        return leftScore.centerDistance - rightScore.centerDistance;
+      }
+
+      if (rightScore.volume !== leftScore.volume) {
+        return rightScore.volume - leftScore.volume;
+      }
+
+      if (rightScore.liquidity !== leftScore.liquidity) {
+        return rightScore.liquidity - leftScore.liquidity;
+      }
+
+      return leftScore.endDate.localeCompare(rightScore.endDate);
+    });
+}
+
 function getAssetMarkets(asset, polymarketMarkets) {
-  const liveMatches = polymarketMarkets.filter((market) => {
-    const question = market.question.toLowerCase();
-    return (
-      isTradablePolymarketMarket(market) &&
-      asset.polymarketQueries.some((query) => question.includes(query.split(" ")[0])) &&
-      parseTargetFromQuestion(market.question)
-    );
-  });
-
-  if (liveMatches.length) {
-    return liveMatches;
-  }
-
-  return fallbackPolymarketMarkets.filter(
-    (market) => market.assetId === asset.id && isTradablePolymarketMarket(market)
-  );
+  return getResolvedStrategyMarketsForAsset(asset, polymarketMarkets);
 }
 
 function getOptionUniverseForMarket({
@@ -421,12 +523,26 @@ function getOptionUniverseForMarket({
   fallbackVolatility,
   optionType = "call"
 }) {
-  const targetValue = parseTargetFromQuestion(market.question) || currentUnderlyingSpot || currentOptionSpot;
+  const marketQuestion = String(market?.question ?? "");
+  const marketSignal = parsePolymarketQuestionSignal(marketQuestion);
+  const targetInProxyUnits = marketQuestionMentionsSymbol(marketQuestion, asset.optionSymbol);
+  const effectiveUnderlyingSpot = targetInProxyUnits ? currentOptionSpot : currentUnderlyingSpot;
+  const targetValue = marketSignal?.targetValue || effectiveUnderlyingSpot || currentOptionSpot;
   const ratio =
-    currentUnderlyingSpot > 0 && currentOptionSpot > 0
-      ? currentOptionSpot / currentUnderlyingSpot
-      : asset.conversionFallback;
-  const targetSpot = Math.max(targetValue * ratio, currentOptionSpot || 1);
+    targetInProxyUnits
+      ? 1
+      : currentUnderlyingSpot > 0 && currentOptionSpot > 0
+        ? currentOptionSpot / currentUnderlyingSpot
+        : asset.conversionFallback;
+  const targetSpot = Math.max(
+    projectPolymarketTargetProxySpot({
+      targetValue,
+      direction: marketSignal?.direction,
+      conversionRatio: ratio,
+      currentProxySpot: currentOptionSpot || 1
+    }),
+    0.01
+  );
   const { from: windowFrom, to: windowTo, referenceExpiry } = getOptionSearchWindowForMarket(market);
   const matchingLiveOptions = liveOptions.filter(
     (option) =>
@@ -480,12 +596,16 @@ function estimateBidAsk(unitPrice) {
   };
 }
 
-function binarySettlementValue(outcome, spot, targetThreshold) {
+function binarySettlementValue(outcome, spot, targetThreshold, marketSignal = null) {
+  const yesResolves = marketSignal
+    ? evaluatePolymarketSignalHit(spot, marketSignal)
+    : Number(spot) >= Number(targetThreshold);
+
   if (outcome === "NO") {
-    return spot < targetThreshold ? 1 : 0;
+    return yesResolves ? 0 : 1;
   }
 
-  return spot >= targetThreshold ? 1 : 0;
+  return yesResolves ? 1 : 0;
 }
 
 function binaryPriceFromYes(outcome, yesPrice) {
@@ -500,18 +620,20 @@ function estimatePolymarketYesPrice({
   riskFreeRate,
   marketReferenceYesPrice,
   currentSpot,
-  currentTimeYears
+  currentTimeYears,
+  signalDirection = "up"
 }) {
   if (timeYears < 0) {
-    return spot >= strike ? 1 : 0;
+    return signalDirection === "down" ? (spot <= strike ? 1 : 0) : (spot >= strike ? 1 : 0);
   }
 
   const effectiveTimeYears = Math.max(timeYears, 1 / 365);
   const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 365);
+  const binaryPriceFunction = signalDirection === "down" ? binaryPutPrice : binaryCallPrice;
 
   const rawEstimatedYesPrice =
     strike > 0 && spot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot,
           strike,
           timeToExpiryYears: effectiveTimeYears,
@@ -521,7 +643,7 @@ function estimatePolymarketYesPrice({
       : marketReferenceYesPrice;
   const currentModeledYesPrice =
     strike > 0 && currentSpot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot: currentSpot,
           strike,
           timeToExpiryYears: effectiveCurrentTimeYears,
@@ -710,6 +832,7 @@ function buildPayoffCurve({
   targetSpot,
   targetThreshold,
   binaryTargetThreshold = targetThreshold,
+  binarySignal = null,
   currentUnderlyingSpot = currentSpot,
   conversionRatio = 1,
   marketReferenceYesPrice = 0.5,
@@ -761,10 +884,11 @@ function buildPayoffCurve({
                   riskFreeRate,
                   marketReferenceYesPrice,
                   currentSpot: currentUnderlyingSpot,
-                  currentTimeYears: currentDaysToMarketResolution / 365
+                  currentTimeYears: currentDaysToMarketResolution / 365,
+                  signalDirection: binarySignal?.direction
                 })
               )
-            : binarySettlementValue(leg.outcome, settleUnderlying, binaryTargetThreshold);
+            : binarySettlementValue(leg.outcome, settleUnderlying, binaryTargetThreshold, binarySignal);
         const perUnit = leg.action === "LONG" ? markPrice - leg.entryPrice : leg.entryPrice - markPrice;
         return sum + leg.quantity * perUnit;
       }
@@ -821,6 +945,54 @@ function approximateBreakevens(curve) {
   return values.filter((value, index, array) => value != null && array.indexOf(value) === index);
 }
 
+export function buildPayoffSummary({
+  currentSpot,
+  targetSpot,
+  targetThreshold,
+  binaryTargetThreshold = targetThreshold,
+  binarySignal = null,
+  currentUnderlyingSpot = currentSpot,
+  conversionRatio = 1,
+  marketReferenceYesPrice = 0.5,
+  strategyCloseDate = null,
+  polymarketResolutionDate = null,
+  volatility = 0.24,
+  riskFreeRate = 0.0425,
+  legs
+}) {
+  const payoffCurve = buildPayoffCurve({
+    currentSpot,
+    targetSpot,
+    targetThreshold,
+    binaryTargetThreshold,
+    binarySignal,
+    currentUnderlyingSpot,
+    conversionRatio,
+    marketReferenceYesPrice,
+    strategyCloseDate,
+    polymarketResolutionDate,
+    volatility,
+    riskFreeRate,
+    legs
+  });
+  const { maxProfit, maxLoss, maxProfitUnbounded, maxLossUnbounded } = evaluatePayoffExtremes(
+    payoffCurve,
+    legs
+  );
+  const breakevens = approximateBreakevens(payoffCurve);
+  const marketBias = classifyStrategyBias(payoffCurve, currentSpot);
+
+  return {
+    payoffCurve,
+    maxProfit,
+    maxLoss,
+    maxProfitUnbounded,
+    maxLossUnbounded,
+    breakevens,
+    marketBias
+  };
+}
+
 const polymarketStructures = [
   {
     id: "pm-yes",
@@ -831,34 +1003,26 @@ const polymarketStructures = [
     id: "pm-no",
     legs: [{ outcome: "NO", action: "LONG", label: "PM NO", budgetShare: 1 }],
     displayOutcome: "NO"
-  },
-  {
-    id: "pm-yes-short",
-    legs: [{ outcome: "YES", action: "SHORT", label: "PM YES Short", budgetShare: 1 }],
-    displayOutcome: "YES"
-  },
-  {
-    id: "pm-no-short",
-    legs: [{ outcome: "NO", action: "SHORT", label: "PM NO Short", budgetShare: 1 }],
-    displayOutcome: "NO"
-  },
-  {
-    id: "pm-yes-plus-no-short",
-    legs: [
-      { outcome: "YES", action: "LONG", label: "PM YES", budgetShare: 0.5 },
-      { outcome: "NO", action: "SHORT", label: "PM NO Short", budgetShare: 0.5 }
-    ],
-    displayOutcome: "YES"
-  },
-  {
-    id: "pm-no-plus-yes-short",
-    legs: [
-      { outcome: "NO", action: "LONG", label: "PM NO", budgetShare: 0.5 },
-      { outcome: "YES", action: "SHORT", label: "PM YES Short", budgetShare: 0.5 }
-    ],
-    displayOutcome: "NO"
   }
 ];
+
+function invertBinaryOutcome(outcome) {
+  return outcome === "NO" ? "YES" : "NO";
+}
+
+function normalizePolymarketStructureId(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+
+  if (normalized === "pm-yes-short" || normalized === "pm-no-plus-yes-short") {
+    return "pm-no";
+  }
+
+  if (normalized === "pm-no-short" || normalized === "pm-yes-plus-no-short") {
+    return "pm-yes";
+  }
+
+  return normalized;
+}
 
 function buildPolymarketBlueprints(market, structure) {
   const yesPrice = clamp(market.yesPrice, 0.001, 0.999);
@@ -868,19 +1032,44 @@ function buildPolymarketBlueprints(market, structure) {
     0.999
   );
 
-  return structure.legs.map((leg) => ({
-    id: `${market.id}-${structure.id}-${leg.outcome.toLowerCase()}-${leg.action.toLowerCase()}`,
-    kind: "binary",
-    outcome: leg.outcome,
-    action: leg.action,
-    label: leg.label,
-    entryPrice: leg.outcome === "YES" ? yesPrice : noPrice,
-    budgetShare: leg.budgetShare,
-    displayPrice:
-      structure.displayOutcome === "YES"
-        ? yesPrice
-        : noPrice
-  }));
+  const mergedLegs = new Map();
+
+  for (const leg of structure.legs ?? []) {
+    const legOutcome = leg?.outcome === "NO" ? "NO" : "YES";
+    const legAction = String(leg?.action ?? "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+    const normalizedOutcome = legAction === "SHORT" ? invertBinaryOutcome(legOutcome) : legOutcome;
+    const normalizedAction = "LONG";
+    const key = `${normalizedOutcome}-${normalizedAction}`;
+    const existing = mergedLegs.get(key);
+
+    if (existing) {
+      existing.budgetShare += Number(leg?.budgetShare ?? 1) || 0;
+      continue;
+    }
+
+    mergedLegs.set(key, {
+      outcome: normalizedOutcome,
+      action: normalizedAction,
+      label:
+        legAction === "SHORT" ? `PM ${normalizedOutcome}` : String(leg?.label ?? `PM ${normalizedOutcome}`),
+      budgetShare: Number(leg?.budgetShare ?? 1) || 0
+    });
+  }
+
+  const normalizedDisplayOutcome = structure.displayOutcome === "NO" ? "NO" : "YES";
+
+  return [...mergedLegs.values()]
+    .filter((leg) => leg.budgetShare > 0)
+    .map((leg) => ({
+      id: `${market.id}-${structure.id}-${leg.outcome.toLowerCase()}-${leg.action.toLowerCase()}`,
+      kind: "binary",
+      outcome: leg.outcome,
+      action: leg.action,
+      label: leg.label,
+      entryPrice: leg.outcome === "YES" ? yesPrice : noPrice,
+      budgetShare: leg.budgetShare,
+      displayPrice: normalizedDisplayOutcome === "YES" ? yesPrice : noPrice
+    }));
 }
 
 function buildCombination({
@@ -893,11 +1082,18 @@ function buildCombination({
   currentOptionSpot,
   currentUnderlyingSpot
 }) {
-  const targetThreshold = parseTargetFromQuestion(market.question) || currentUnderlyingSpot;
+  const marketQuestion = String(market?.question ?? "");
+  const marketSignal = parsePolymarketQuestionSignal(marketQuestion);
+  const targetInProxyUnits = marketQuestionMentionsSymbol(marketQuestion, asset.optionSymbol);
+  const effectiveUnderlyingSymbol = targetInProxyUnits ? asset.optionSymbol : asset.underlyingSymbol;
+  const effectiveUnderlyingSpot = targetInProxyUnits ? currentOptionSpot : currentUnderlyingSpot;
   const conversionRatio =
-    currentUnderlyingSpot > 0 && currentOptionSpot > 0
-      ? currentOptionSpot / currentUnderlyingSpot
-      : asset.conversionFallback;
+    targetInProxyUnits
+      ? 1
+      : effectiveUnderlyingSpot > 0 && currentOptionSpot > 0
+        ? currentOptionSpot / effectiveUnderlyingSpot
+        : asset.conversionFallback;
+  const targetThreshold = marketSignal?.targetValue || effectiveUnderlyingSpot;
   const polymarketBudget = 1000;
   const optionBudget = 1000;
   const structureEntryPerUnit = optionLegBlueprints.reduce((sum, leg) => {
@@ -924,12 +1120,21 @@ function buildCombination({
     polymarketResolutionDate ||
     optionLegBlueprints[0]?.expiration ||
     defaultStrategyConfig.optionLeg.expiry;
-  const payoffCurve = buildPayoffCurve({
+  const {
+    payoffCurve,
+    maxProfit,
+    maxLoss,
+    maxProfitUnbounded,
+    maxLossUnbounded,
+    breakevens,
+    marketBias
+  } = buildPayoffSummary({
     currentSpot: currentOptionSpot,
     targetSpot: optionLegBlueprints[0]?.targetSpot || currentOptionSpot,
     targetThreshold: optionLegBlueprints[0]?.targetSpot || currentOptionSpot,
     binaryTargetThreshold: targetThreshold,
-    currentUnderlyingSpot,
+    binarySignal: marketSignal,
+    currentUnderlyingSpot: effectiveUnderlyingSpot,
     conversionRatio,
     marketReferenceYesPrice: market.yesPrice,
     strategyCloseDate,
@@ -940,15 +1145,9 @@ function buildCombination({
       Number(optionLegBlueprints[0]?.riskFreeRate ?? optionLegBlueprints[1]?.riskFreeRate ?? 0) || 0.0425,
     legs: payoffLegs
   });
-  const { maxProfit, maxLoss, maxProfitUnbounded, maxLossUnbounded } = evaluatePayoffExtremes(
-    payoffCurve,
-    payoffLegs
-  );
-  const marketBias = classifyStrategyBias(payoffCurve, currentOptionSpot);
   const expPayoff =
     payoffCurve.find((point) => Math.abs(point.spot - (optionLegBlueprints[0]?.targetSpot || currentOptionSpot)) < 0.5)
       ?.totalPnL ?? null;
-  const breakevens = approximateBreakevens(payoffCurve);
   const positivePoints = payoffCurve.filter((point) => (point.totalPnL ?? 0) > 0).length;
   const probabilityOfProfit = (positivePoints / payoffCurve.length) * 100;
   const netBid = optionLegBlueprints.reduce(
@@ -959,10 +1158,21 @@ function buildCombination({
     (sum, leg) => sum + (leg.action === "LONG" ? (leg.marketAsk ?? leg.entryPrice) : -(leg.marketBid ?? leg.entryPrice)),
     0
   );
+  const targetOptionBidSize = getMinimumQuoteSize(optionLegBlueprints, "bid");
+  const targetOptionAskSize = getMinimumQuoteSize(optionLegBlueprints, "ask");
+  const targetOptionQuoteSize =
+    targetOptionBidSize != null && targetOptionAskSize != null
+      ? Math.min(targetOptionBidSize, targetOptionAskSize)
+      : null;
+  const optionLiquidity = summarizeOptionStrategyLiquidity(optionLegBlueprints, {
+    side: "entry"
+  });
+  const hasRealNetSpread =
+    optionLegBlueprints.length > 0 && optionLegBlueprints.every((leg) => leg.hasRealBidAsk === true);
   const spreadPct =
-    Math.abs(netAsk) + Math.abs(netBid) > 0
+    hasRealNetSpread && Math.abs(netAsk) + Math.abs(netBid) > 0
       ? (Math.abs(netAsk - netBid) / Math.max(Math.abs((netAsk + netBid) / 2), 0.01)) * 100
-      : 0;
+      : null;
   const primaryPolymarketLeg = payoffLegs.find((leg) => leg.kind === "binary") ?? null;
   const polymarketPrice = primaryPolymarketLeg?.entryPrice ?? market.yesPrice;
   const polymarketPriceSide = primaryPolymarketLeg?.outcome ?? "YES";
@@ -973,11 +1183,21 @@ function buildCombination({
       .join("-")}`,
     assetId: asset.id,
     assetLabel: asset.label,
+    polymarketMarketId: market.id,
+    polymarketMarketSlug: market.slug ?? "",
+    polymarketEventSlug: market.eventSlug ?? "",
     polymarketQuestion: market.question,
     polymarketSource: market.source || "live",
+    resolutionRules: market.resolutionRules ?? null,
+    resolutionSource: market.resolutionSource ?? null,
+    scenarioMethod: marketSignal?.triggerType === "touch" ? "conditional-endpoint-approximation" : "terminal-price-grid",
     polymarketUrl: market.url,
     polymarketPrice: formatNumber(polymarketPrice, 4),
     polymarketPriceSide,
+    polymarketVolume: formatNumber(Number(market.volume ?? 0), 0),
+    polymarketLiquidity: formatNumber(Number(market.liquidity ?? 0), 0),
+    polymarketDirection: marketSignal?.direction ?? "up",
+    polymarketTriggerType: marketSignal?.triggerType ?? "touch",
     expiration: strategyCloseDate,
     strategyCloseDate,
     polymarketResolutionDate,
@@ -1005,6 +1225,11 @@ function buildCombination({
     theoPrice: formatNumber(structureEntryPerUnit, 4),
     bid: formatNumber(netBid, 4),
     ask: formatNumber(netAsk, 4),
+    targetOptionBidSize: formatNumber(targetOptionBidSize, 0),
+    targetOptionAskSize: formatNumber(targetOptionAskSize, 0),
+    targetOptionQuoteSize: formatNumber(targetOptionQuoteSize, 0),
+    normalizedOptionVolume: formatNumber(optionLiquidity.normalizedVolume, 0),
+    normalizedOptionOpenInterest: formatNumber(optionLiquidity.normalizedOpenInterest, 0),
     bidAskSpread: formatNumber(spreadPct, 2),
     expPayoff: formatNumber(expPayoff, 2),
     payoffCurve,
@@ -1013,16 +1238,23 @@ function buildCombination({
       theoPrice: formatNumber(structureEntryPerUnit, 4),
       bid: formatNumber(netBid, 4),
       ask: formatNumber(netAsk, 4),
+      targetOptionBidSize: formatNumber(targetOptionBidSize, 0),
+      targetOptionAskSize: formatNumber(targetOptionAskSize, 0),
+      targetOptionQuoteSize: formatNumber(targetOptionQuoteSize, 0),
+      normalizedOptionVolume: formatNumber(optionLiquidity.normalizedVolume, 0),
+      polymarketVolume: formatNumber(Number(market.volume ?? 0), 0),
       breakevens,
       probabilityOfProfit: formatNumber(probabilityOfProfit, 2)
     },
     marketContext: {
       proxySymbol: asset.optionSymbol,
-      underlyingSymbol: asset.underlyingSymbol,
+      underlyingSymbol: effectiveUnderlyingSymbol,
       currentProxySpot: formatNumber(currentOptionSpot, 4),
-      currentUnderlyingSpot: formatNumber(currentUnderlyingSpot, 2),
+      currentUnderlyingSpot: formatNumber(effectiveUnderlyingSpot, 2),
       conversionRatio: formatNumber(conversionRatio, 6),
-      targetUnderlyingValue: formatNumber(targetThreshold, 2)
+      targetUnderlyingValue: formatNumber(targetThreshold, 2),
+      polymarketDirection: marketSignal?.direction ?? "up",
+      polymarketTriggerType: marketSignal?.triggerType ?? "touch"
     },
     riskAnalysis: {
       expPayoff: formatNumber(expPayoff, 2),
@@ -1040,12 +1272,16 @@ function buildCombination({
             action: leg.action,
             quantity: leg.quantity,
             strike: leg.outcome,
-            bid: formatNumber(leg.entryPrice, 4),
-            ask: formatNumber(leg.entryPrice, 4),
-            spread: 0,
+            bid: null,
+            ask: null,
+            spread: null,
+            quoteQuality: "indicative-outcome-price",
             entryPrice: formatNumber(leg.entryPrice, 4),
             kind: leg.kind,
             outcome: leg.outcome,
+            polymarketMarketId: market.id,
+            volume: formatNumber(Number(market.volume ?? 0), 0),
+            liquidity: formatNumber(Number(market.liquidity ?? 0), 0),
             expiry: polymarketResolutionDate,
             strategyCloseDate,
             marketQuestion: market.question
@@ -1059,8 +1295,12 @@ function buildCombination({
             strike: formatNumber(leg.strike, 1),
             bid: leg.marketBid,
             ask: leg.marketAsk,
+            bidSize: formatNumber(leg.marketBidSize, 0),
+            askSize: formatNumber(leg.marketAskSize, 0),
+            volume: formatNumber(Number(leg.volume), 0),
+            openInterest: formatNumber(Number(leg.openInterest), 0),
             spread:
-              leg.marketBid != null && leg.marketAsk != null
+              leg.hasRealBidAsk === true && leg.marketBid != null && leg.marketAsk != null
                 ? formatNumber(
                     (Math.abs(leg.marketAsk - leg.marketBid) /
                       Math.max(Math.abs((leg.marketAsk + leg.marketBid) / 2), 0.01)) *
@@ -1075,7 +1315,8 @@ function buildCombination({
             impliedVolatility: formatNumber(leg.impliedVolatility, 4),
             contractMultiplier: leg.contractMultiplier,
             quoteSource: leg.quoteSource ?? "seed",
-            isLive: leg.isLive === true
+            isLive: leg.isLive === true,
+            hasRealBidAsk: leg.hasRealBidAsk === true
           }
     )
   };
@@ -1084,7 +1325,8 @@ function buildCombination({
 function buildStrategyFinder({
   quotes,
   polymarketMarkets,
-  optionMatches
+  optionMatches,
+  assetUniverse = baseStrategyAssetUniverse
 }) {
   const quoteMap = quoteLookup(quotes);
   const fallbackVolatility = {
@@ -1092,23 +1334,26 @@ function buildStrategyFinder({
     eth: 0.56,
     gold: 0.18,
     oil: 0.3,
-    stocks: 0.22
+    stocks: 0.22,
+    "stocks-spy": 0.22,
+    "stocks-spx": 0.22
   };
 
-  const rows = strategyAssetUniverse.flatMap((asset) => {
+  const rows = assetUniverse.flatMap((asset) => {
     const currentOptionSpot = getQuotePrice(quoteMap.get(asset.optionSymbol));
     const currentUnderlyingSpot = getQuotePrice(quoteMap.get(asset.underlyingSymbol));
     const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
+    const hasAssetQuoteSizeData = liveOptions.some((option) => hasUsableQuoteSize(option));
     const markets = getAssetMarkets(asset, polymarketMarkets);
 
-	    return markets.flatMap((market) => {
-	      const callUniverse = getOptionUniverseForMarket({
-	        asset,
-	        market,
+    return markets.flatMap((market) => {
+      const callUniverse = getOptionUniverseForMarket({
+        asset,
+        market,
         liveOptions,
         currentOptionSpot,
         currentUnderlyingSpot,
-        fallbackVolatility: fallbackVolatility[asset.id] || 0.24,
+        fallbackVolatility: asset.fallbackVolatility ?? fallbackVolatility[asset.id] ?? 0.24,
         optionType: "call"
       });
       const putUniverse = getOptionUniverseForMarket({
@@ -1117,51 +1362,54 @@ function buildStrategyFinder({
         liveOptions,
         currentOptionSpot,
         currentUnderlyingSpot,
-        fallbackVolatility: fallbackVolatility[asset.id] || 0.24,
+        fallbackVolatility: asset.fallbackVolatility ?? fallbackVolatility[asset.id] ?? 0.24,
         optionType: "put"
       });
 
-	      if (callUniverse.length < 1 && putUniverse.length < 1) {
-	        return [];
-	      }
+      if (callUniverse.length < 1 && putUniverse.length < 1) {
+        return [];
+      }
 
-	      const callUniverseByExpiry = groupOptionsByExpiration(callUniverse);
-	      const putUniverseByExpiry = groupOptionsByExpiration(putUniverse);
-	      const expiries = [...new Set([...callUniverseByExpiry.keys(), ...putUniverseByExpiry.keys()])].sort();
+      const callUniverseByExpiry = groupOptionsByExpiration(callUniverse);
+      const putUniverseByExpiry = groupOptionsByExpiration(putUniverse);
+      const expiries = [...new Set([...callUniverseByExpiry.keys(), ...putUniverseByExpiry.keys()])].sort();
 
-	      const targetValue = parseTargetFromQuestion(market.question) || currentUnderlyingSpot || currentOptionSpot;
-	      const ratio =
-	        currentUnderlyingSpot > 0 && currentOptionSpot > 0
-	          ? currentOptionSpot / currentUnderlyingSpot
-	          : asset.conversionFallback;
-	      const targetSpot = Math.max(targetValue * ratio, currentOptionSpot || 1);
+      const marketSignal = parsePolymarketQuestionSignal(market.question);
+      const targetInProxyUnits = marketQuestionMentionsSymbol(market.question, asset.optionSymbol);
+      const targetValue = marketSignal?.targetValue || (targetInProxyUnits ? currentOptionSpot : currentUnderlyingSpot) || currentOptionSpot;
+      const ratio = targetInProxyUnits ? 1 :
+        currentUnderlyingSpot > 0 && currentOptionSpot > 0
+          ? currentOptionSpot / currentUnderlyingSpot
+          : asset.conversionFallback;
+      const targetSpot = Math.max(
+        projectPolymarketTargetProxySpot({
+          targetValue,
+          direction: marketSignal?.direction,
+          conversionRatio: ratio,
+          currentProxySpot: currentOptionSpot || 1
+        }),
+        0.01
+      );
 
-	      const buildLeg = (option, action) => {
-	        const price =
-          (Number.isFinite(option.lastPrice) && option.lastPrice > 0
-            ? option.lastPrice
-            : Number.isFinite(option.mark) && option.mark > 0
-              ? option.mark
-              : Number.isFinite(option.bid) && Number.isFinite(option.ask) && option.bid >= 0 && option.ask >= 0
-                ? (option.bid + option.ask) / 2
-                : Number.isFinite(option.ask) && option.ask > 0
-                  ? option.ask
-                  : Number.isFinite(option.bid) && option.bid > 0
-                    ? option.bid
-                    : option.projectedTargetPrice ?? 0.05);
+      const buildLeg = (option, action) => {
+        const price = pickOptionReferencePrice(option, option.projectedTargetPrice ?? 0.05);
         const quotes =
-          option.bid != null && option.ask != null
+          option.hasRealBidAsk === true && option.bid != null && option.ask != null
             ? {
                 bid: formatNumber(option.bid, 4),
                 ask: formatNumber(option.ask, 4)
               }
-            : estimateBidAsk(price);
+            : {
+                bid: null,
+                ask: null
+              };
 
         return {
           id: `${market.id}-${option.contractSymbol}-${action.toLowerCase()}`,
           contractSymbol: option.contractSymbol,
           action,
           entryPrice: formatNumber(price, 4),
+          mark: formatNumber(price, 4),
           strike: option.strike,
           expiration: option.expiration,
           optionType: option.optionType ?? "call",
@@ -1169,120 +1417,221 @@ function buildStrategyFinder({
           targetSpot: formatNumber(targetSpot, 2),
           marketBid: quotes.bid,
           marketAsk: quotes.ask,
+          marketBidSize: formatNumber(Number(option.bidSize), 0),
+          marketAskSize: formatNumber(Number(option.askSize), 0),
+          volume: formatNumber(Number(option.volume), 0),
+          openInterest: formatNumber(Number(option.openInterest), 0),
           quoteSource: option.source || (option.isModeled ? "modeled" : "seed"),
-	          isLive: option.isLive === true
-	        };
-	      };
+          isLive: option.isLive === true,
+          hasRealBidAsk: option.hasRealBidAsk === true
+        };
+      };
 
-	      return expiries.flatMap((expiry) => {
-	        const expiryCalls = [...(callUniverseByExpiry.get(expiry) ?? [])].sort((left, right) => left.strike - right.strike);
-	        const expiryPuts = [...(putUniverseByExpiry.get(expiry) ?? [])].sort((left, right) => left.strike - right.strike);
+      return expiries.flatMap((expiry, expiryIndex) => {
+        const expiryCalls = [...(callUniverseByExpiry.get(expiry) ?? [])].sort(
+          (left, right) => left.strike - right.strike
+        );
+        const expiryPuts = [...(putUniverseByExpiry.get(expiry) ?? [])].sort(
+          (left, right) => left.strike - right.strike
+        );
+        const previousExpiry = expiryIndex > 0 ? expiries[expiryIndex - 1] : null;
+        const previousExpiryPuts = previousExpiry
+          ? [...(putUniverseByExpiry.get(previousExpiry) ?? [])].sort((left, right) => left.strike - right.strike)
+          : [];
+        const previousExpiryCalls = previousExpiry
+          ? [...(callUniverseByExpiry.get(previousExpiry) ?? [])].sort((left, right) => left.strike - right.strike)
+          : [];
 
-	        if (expiryCalls.length < 1 && expiryPuts.length < 1) {
-	          return [];
-	        }
+        if (expiryCalls.length < 1 && expiryPuts.length < 1) {
+          return [];
+        }
 
-	        const nearCall = pickNearestOption(expiryCalls, targetSpot);
-	        const higherCall = nearCall ? getHigherOption(expiryCalls, nearCall.strike) : null;
-	        const lowerCall = nearCall ? getLowerOption(expiryCalls, nearCall.strike) : null;
-	        const nearPut = pickNearestOption(expiryPuts, targetSpot);
-	        const higherPut = nearPut ? getHigherOption(expiryPuts, nearPut.strike) : null;
-	        const lowerPut = nearPut ? getLowerOption(expiryPuts, nearPut.strike) : null;
-	        const distinctHigherCall = higherCall && nearCall && higherCall.strike !== nearCall.strike ? higherCall : null;
-	        const distinctLowerCall = lowerCall && nearCall && lowerCall.strike !== nearCall.strike ? lowerCall : null;
-	        const distinctHigherPut = higherPut && nearPut && higherPut.strike !== nearPut.strike ? higherPut : null;
-	        const distinctLowerPut = lowerPut && nearPut && lowerPut.strike !== nearPut.strike ? lowerPut : null;
+        const nearCall = pickNearestOption(expiryCalls, targetSpot);
+        const higherCall = nearCall ? getHigherOption(expiryCalls, nearCall.strike) : null;
+        const lowerCall = nearCall ? getLowerOption(expiryCalls, nearCall.strike) : null;
+        const nearPut = pickNearestOption(expiryPuts, targetSpot);
+        const higherPut = nearPut ? getHigherOption(expiryPuts, nearPut.strike) : null;
+        const lowerPut = nearPut ? getLowerOption(expiryPuts, nearPut.strike) : null;
+        const distinctHigherCall = higherCall && nearCall && higherCall.strike !== nearCall.strike ? higherCall : null;
+        const distinctLowerCall = lowerCall && nearCall && lowerCall.strike !== nearCall.strike ? lowerCall : null;
+        const distinctHigherPut = higherPut && nearPut && higherPut.strike !== nearPut.strike ? higherPut : null;
+        const distinctLowerPut = lowerPut && nearPut && lowerPut.strike !== nearPut.strike ? lowerPut : null;
+        const calendarFrontCall =
+          nearCall && previousExpiryCalls.length ? pickNearestOption(previousExpiryCalls, nearCall.strike) : null;
+        const calendarFrontPut =
+          nearPut && previousExpiryPuts.length ? pickNearestOption(previousExpiryPuts, nearPut.strike) : null;
+        const bullishPolymarketStructureId = marketSignal?.direction === "down" ? "pm-no" : "pm-yes";
+        const bearishPolymarketStructureId = marketSignal?.direction === "down" ? "pm-yes" : "pm-no";
 
-	        const optionStrategies = [
-	          nearCall ? { label: "Long Call", legs: [buildLeg(nearCall, "LONG")] } : null,
-	          nearCall ? { label: "Short Call", legs: [buildLeg(nearCall, "SHORT")] } : null,
-	          nearPut ? { label: "Long Put", legs: [buildLeg(nearPut, "LONG")] } : null,
-	          nearPut ? { label: "Short Put", legs: [buildLeg(nearPut, "SHORT")] } : null,
-	          distinctLowerCall && nearCall
-	            ? { label: "Bull Call Spread", legs: [buildLeg(distinctLowerCall, "LONG"), buildLeg(nearCall, "SHORT")] }
-	            : null,
-	          nearCall && distinctHigherCall
-	            ? { label: "Bear Call Spread", legs: [buildLeg(nearCall, "SHORT"), buildLeg(distinctHigherCall, "LONG")] }
-	            : null,
-	          nearPut && distinctLowerPut
-	            ? { label: "Bear Put Spread", legs: [buildLeg(nearPut, "LONG"), buildLeg(distinctLowerPut, "SHORT")] }
-	            : null,
-	          distinctHigherPut && distinctLowerPut && distinctHigherPut.strike !== distinctLowerPut.strike
-	            ? { label: "Bull Put Spread", legs: [buildLeg(distinctHigherPut, "SHORT"), buildLeg(distinctLowerPut, "LONG")] }
-	            : null,
-	          nearCall && nearPut
-	            ? { label: "Long Straddle", legs: [buildLeg(nearCall, "LONG"), buildLeg(nearPut, "LONG")] }
-	            : null,
-	          nearCall && nearPut
-	            ? { label: "Short Straddle", legs: [buildLeg(nearCall, "SHORT"), buildLeg(nearPut, "SHORT")] }
-	            : null,
-	          distinctHigherCall && distinctLowerPut
-	            ? { label: "Long Strangle", legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "LONG")] }
-	            : null,
-	          distinctHigherCall && distinctLowerPut
-	            ? { label: "Short Strangle", legs: [buildLeg(distinctHigherCall, "SHORT"), buildLeg(distinctLowerPut, "SHORT")] }
-	            : null,
-	          distinctHigherCall && distinctLowerPut
-	            ? { label: "Bull Risk Reversal", legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "SHORT")] }
-	            : null,
-	          nearPut && nearCall
-	            ? { label: "Bear Risk Reversal", legs: [buildLeg(nearPut, "LONG"), buildLeg(nearCall, "SHORT")] }
-	            : null,
-	          distinctLowerPut && nearPut && nearCall && distinctHigherCall
-	            ? {
-	                label: "Iron Condor",
-	                legs: [
-	                  buildLeg(distinctLowerPut, "LONG"),
-	                  buildLeg(nearPut, "SHORT"),
-	                  buildLeg(nearCall, "SHORT"),
-	                  buildLeg(distinctHigherCall, "LONG")
-	                ]
-	              }
-	            : null
-	        ]
-	          .filter(Boolean)
-	          .filter((strategy, index, array) => {
-	            const signature = `${expiry}:${strategy.label}:${strategy.legs
-	              .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
-	              .join("|")}`;
-	            return array.findIndex((item) => {
-	              const itemSignature = `${expiry}:${item.label}:${item.legs
-	                .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
-	                .join("|")}`;
-	              return itemSignature === signature;
-	            }) === index;
-	          });
+        const optionStrategies = [
+          nearCall ? { label: "Long Call", legs: [buildLeg(nearCall, "LONG")] } : null,
+          nearCall ? { label: "Short Call", legs: [buildLeg(nearCall, "SHORT")] } : null,
+          nearPut ? { label: "Long Put", legs: [buildLeg(nearPut, "LONG")] } : null,
+          nearPut ? { label: "Short Put", legs: [buildLeg(nearPut, "SHORT")] } : null,
+          calendarFrontCall
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bearishPolymarketStructureId],
+                legs: [buildLeg(nearCall, "LONG"), buildLeg(calendarFrontCall, "SHORT")]
+              }
+            : null,
+          calendarFrontCall
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bullishPolymarketStructureId],
+                legs: [buildLeg(nearCall, "SHORT"), buildLeg(calendarFrontCall, "LONG")]
+              }
+            : null,
+          calendarFrontPut
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bullishPolymarketStructureId],
+                legs: [buildLeg(nearPut, "LONG"), buildLeg(calendarFrontPut, "SHORT")]
+              }
+            : null,
+          calendarFrontPut
+            ? {
+                label: "Calendar Spread",
+                polymarketStructureIds: [bearishPolymarketStructureId],
+                legs: [buildLeg(nearPut, "SHORT"), buildLeg(calendarFrontPut, "LONG")]
+              }
+            : null,
+          distinctLowerCall && nearCall
+            ? {
+                label: "Bull Call Spread",
+                legs: [buildLeg(distinctLowerCall, "LONG"), buildLeg(nearCall, "SHORT")]
+              }
+            : null,
+          nearCall && distinctHigherCall
+            ? {
+                label: "Bear Call Spread",
+                legs: [buildLeg(nearCall, "SHORT"), buildLeg(distinctHigherCall, "LONG")]
+              }
+            : null,
+          nearPut && distinctLowerPut
+            ? {
+                label: "Bear Put Spread",
+                legs: [buildLeg(nearPut, "LONG"), buildLeg(distinctLowerPut, "SHORT")]
+              }
+            : null,
+          distinctHigherPut && distinctLowerPut && distinctHigherPut.strike !== distinctLowerPut.strike
+            ? {
+                label: "Bull Put Spread",
+                legs: [buildLeg(distinctHigherPut, "SHORT"), buildLeg(distinctLowerPut, "LONG")]
+              }
+            : null,
+          nearCall && nearPut
+            ? { label: "Long Straddle", legs: [buildLeg(nearCall, "LONG"), buildLeg(nearPut, "LONG")] }
+            : null,
+          nearCall && nearPut
+            ? { label: "Short Straddle", legs: [buildLeg(nearCall, "SHORT"), buildLeg(nearPut, "SHORT")] }
+            : null,
+          distinctHigherCall && distinctLowerPut
+            ? {
+                label: "Long Strangle",
+                legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "LONG")]
+              }
+            : null,
+          distinctHigherCall && distinctLowerPut
+            ? {
+                label: "Short Strangle",
+                legs: [buildLeg(distinctHigherCall, "SHORT"), buildLeg(distinctLowerPut, "SHORT")]
+              }
+            : null,
+          distinctHigherCall && distinctLowerPut
+            ? {
+                label: "Bull Risk Reversal",
+                legs: [buildLeg(distinctHigherCall, "LONG"), buildLeg(distinctLowerPut, "SHORT")]
+              }
+            : null,
+          nearPut && nearCall
+            ? { label: "Bear Risk Reversal", legs: [buildLeg(nearPut, "LONG"), buildLeg(nearCall, "SHORT")] }
+            : null,
+          distinctLowerPut && nearPut && nearCall && distinctHigherCall
+            ? {
+                label: "Iron Condor",
+                legs: [
+                  buildLeg(distinctLowerPut, "LONG"),
+                  buildLeg(nearPut, "SHORT"),
+                  buildLeg(nearCall, "SHORT"),
+                  buildLeg(distinctHigherCall, "LONG")
+                ]
+              }
+            : null
+        ]
+          .filter(Boolean)
+          .filter((strategy) =>
+            !hasAssetQuoteSizeData ||
+            strategy.legs.every((leg) =>
+              quoteSizeMeetsThreshold(
+                {
+                  bidSize: leg.marketBidSize,
+                  askSize: leg.marketAskSize
+                },
+                DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
+              )
+            )
+          )
+          .filter((strategy, index, array) => {
+            const signature = `${expiry}:${strategy.label}:${strategy.legs
+              .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
+              .join("|")}`;
+            return (
+              array.findIndex((item) => {
+                const itemSignature = `${expiry}:${item.label}:${item.legs
+                  .map((leg) => `${leg.action}-${leg.optionType}-${leg.strike}`)
+                  .join("|")}`;
+                return itemSignature === signature;
+              }) === index
+            );
+          });
 
-	        return polymarketStructures.flatMap((polymarketStructure) => {
-	          const polymarketBlueprints = buildPolymarketBlueprints(market, polymarketStructure);
+        return optionStrategies.flatMap((strategy) => {
+          const requestedPolymarketStructures = strategy.polymarketStructureIds?.length
+            ? new Set(strategy.polymarketStructureIds.map(normalizePolymarketStructureId))
+            : null;
+          const eligiblePolymarketStructures = requestedPolymarketStructures
+            ? polymarketStructures.filter((structure) => requestedPolymarketStructures.has(structure.id))
+            : polymarketStructures;
 
-	          return optionStrategies.map((strategy) =>
-	            buildCombination({
-	              asset,
-	              market,
-	              polymarketBlueprints,
-	              polymarketStructureId: polymarketStructure.id,
-	              strategyType: strategy.label,
-	              optionLegBlueprints: strategy.legs,
-	              currentOptionSpot,
-	              currentUnderlyingSpot
-	            })
-	          );
-	        });
-	      });
-	    });
-	  });
+          return eligiblePolymarketStructures.map((polymarketStructure) => {
+            const polymarketBlueprints = buildPolymarketBlueprints(market, polymarketStructure);
+
+            return buildCombination({
+              asset,
+              market,
+              polymarketBlueprints,
+              polymarketStructureId: polymarketStructure.id,
+              strategyType: strategy.label,
+              optionLegBlueprints: strategy.legs,
+              currentOptionSpot,
+              currentUnderlyingSpot
+            });
+          });
+        });
+      });
+    });
+  });
 
   const selectedRow = rows[0] ?? null;
+  const quoteSizeDataAvailable = rows.some((row) => {
+    const quoteSize = Number(row.targetOptionQuoteSize);
+    return Number.isFinite(quoteSize) && quoteSize > 0;
+  });
+  const defaultDateFrom = toIsoDate(new Date());
+  const defaultDateTo = toIsoDate(addDays(new Date(`${defaultDateFrom}T00:00:00.000Z`), 30));
 
   return {
     filters: {
       dateRange: {
-        from: new Date().toISOString().slice(0, 10),
-        to: selectedRow?.expiration ?? defaultStrategyConfig.optionLeg.expiry
+        from: defaultDateFrom,
+        to: defaultDateTo >= defaultDateFrom ? defaultDateTo : defaultDateFrom
       },
       priceRange: "+5% to +10%",
-      strategyTypes: [...new Set(rows.map((row) => row.strategyType))]
+      strategyTypes: [...new Set(rows.map((row) => row.strategyType))],
+      quoteSizeDataAvailable,
+      targetOptionQuoteSizeThresholds: TARGET_OPTION_QUOTE_SIZE_THRESHOLDS,
+      defaultTargetOptionQuoteSizeThreshold: DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD
     },
     rows: rows.sort((left, right) => {
       if (right.rewardRisk !== left.rewardRisk) {
@@ -1318,7 +1667,7 @@ function buildScenarioFromConfig({
     parseTargetFromQuestion(polymarketMarket?.question ?? "") || config.yesLeg.targetValue;
   const conversionRatio = currentUnderlyingSpot > 0 ? currentOptionSpot / currentUnderlyingSpot : 1;
   const targetOptionSpot = Math.max(targetUnderlyingValue * conversionRatio, config.optionLeg.strike);
-  const premium = optionCandidates[0]?.lastPrice ?? config.optionLeg.premium;
+  const premium = pickOptionReferencePrice(optionCandidates[0], config.optionLeg.premium);
   const timeSeriesDates = buildDateSeries(config.optionLeg.expiry);
   const now = new Date();
   const daysToExpiry = Math.max(
@@ -1468,13 +1817,18 @@ function scoreOpportunity(scenario) {
 export async function buildStrategySummary({
   quotes,
   polymarketMarkets,
-  optionMatches
+  optionMatches,
+  assetUniverse = baseStrategyAssetUniverse
 }) {
+  const primaryAsset =
+    assetUniverse.find((asset) => String(asset.id ?? "").trim().toLowerCase() === "btc") ??
+    assetUniverse.find((asset) => String(asset.label ?? "").trim().toLowerCase() === "bitcoin") ??
+    null;
+  const resolvedPrimaryMarkets = primaryAsset ? getResolvedStrategyMarketsForAsset(primaryAsset, polymarketMarkets) : [];
   const primaryMarket =
-    polymarketMarkets.find((market) => {
-      const question = market.question.toLowerCase();
-      return (question.includes("bitcoin") || question.includes("btc")) && parseTargetFromQuestion(market.question);
-    }) ?? null;
+    resolvedPrimaryMarkets.find((market) => parsePolymarketQuestionSignal(market.question)?.direction !== "down") ??
+    resolvedPrimaryMarkets[0] ??
+    null;
   const primaryScenario = buildScenarioFromConfig({
     config: defaultStrategyConfig,
     quotes,
@@ -1487,12 +1841,14 @@ export async function buildStrategySummary({
     finder: buildStrategyFinder({
       quotes,
       polymarketMarkets,
-      optionMatches
+      optionMatches,
+      assetUniverse
     }),
     scanUniverse: buildAssetScans({
       quotes,
       polymarketMarkets,
-      optionMatches
+      optionMatches,
+      assetUniverse
     })
   };
 }
@@ -1500,7 +1856,8 @@ export async function buildStrategySummary({
 function buildAssetScans({
   quotes,
   polymarketMarkets,
-  optionMatches
+  optionMatches,
+  assetUniverse = baseStrategyAssetUniverse
 }) {
   const quoteMap = quoteLookup(quotes);
   const fallbackVolatility = {
@@ -1508,46 +1865,63 @@ function buildAssetScans({
     eth: 0.58,
     gold: 0.18,
     oil: 0.32,
-    stocks: 0.22
+    stocks: 0.22,
+    "stocks-spy": 0.22,
+    "stocks-spx": 0.22
   };
 
-  return strategyAssetUniverse
+  return assetUniverse
     .map((asset) => {
-      const matches = polymarketMarkets.filter((market) => {
-        const question = market.question.toLowerCase();
-        return asset.polymarketQueries.some((query) => question.includes(query.split(" ")[0]));
-      });
+      const matches = getResolvedStrategyMarketsForAsset(asset, polymarketMarkets);
 
       const optionQuote = quoteMap.get(asset.optionSymbol);
       const underlyingQuote = quoteMap.get(asset.underlyingSymbol);
       const currentOptionSpot = getQuotePrice(optionQuote);
       const currentUnderlyingSpot = getQuotePrice(underlyingQuote);
+      const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
+      const hasAssetQuoteSizeData = liveOptions.some((option) => hasUsableQuoteSize(option));
 
-	      const liveOptions = optionMatches.filter((option) => option.rootSymbol === asset.optionSymbol);
-
-      const opportunities = matches
-        .slice(0, 3)
-        .map((market) => {
-          const parsedTarget = parseTargetFromQuestion(market.question);
-          const targetValue = parsedTarget || 0;
-          const ratio =
-            currentUnderlyingSpot > 0 && currentOptionSpot > 0
-              ? currentOptionSpot / currentUnderlyingSpot
-              : asset.conversionFallback;
-          const proxyTarget = Math.max(targetValue * ratio, currentOptionSpot || 0);
-	          const optionUniverse = getOptionUniverseForMarket({
-	            asset,
-	            market,
-	            liveOptions,
-	            currentOptionSpot,
-	            currentUnderlyingSpot,
-	            fallbackVolatility: fallbackVolatility[asset.id] || 0.25,
-	            optionType: "call"
-	          });
+	      const opportunities = matches
+	        .map((market) => {
+	          const marketQuestion = String(market?.question ?? "");
+	          const marketSignal = parsePolymarketQuestionSignal(marketQuestion);
+	          const parsedTarget = marketSignal?.targetValue ?? null;
+	          const targetValue = parsedTarget || 0;
+	          const preferredOptionType = marketSignal?.direction === "down" ? "put" : "call";
+	          const targetInProxyUnits = marketQuestionMentionsSymbol(marketQuestion, asset.optionSymbol);
+	          const ratio =
+	            targetInProxyUnits
+	              ? 1
+	              : currentUnderlyingSpot > 0 && currentOptionSpot > 0
+	                ? currentOptionSpot / currentUnderlyingSpot
+	                : asset.conversionFallback;
+	          const proxyTarget = projectPolymarketTargetProxySpot({
+	            targetValue,
+	            direction: marketSignal?.direction,
+	            conversionRatio: ratio,
+            currentProxySpot: currentOptionSpot || 0
+          });
+          const optionUniverse = getOptionUniverseForMarket({
+            asset,
+            market,
+            liveOptions,
+            currentOptionSpot,
+            currentUnderlyingSpot,
+            fallbackVolatility: asset.fallbackVolatility ?? fallbackVolatility[asset.id] ?? 0.25,
+            optionType: preferredOptionType
+          }).filter(
+            (option) =>
+              !hasAssetQuoteSizeData ||
+              quoteSizeMeetsThreshold(option, DEFAULT_TARGET_OPTION_QUOTE_SIZE_THRESHOLD)
+          );
           const option = optionUniverse
             .sort((left, right) => {
-              const leftDistance = Math.abs((left.projectedTargetPrice ?? left.lastPrice) - 0.45);
-              const rightDistance = Math.abs((right.projectedTargetPrice ?? right.lastPrice) - 0.45);
+              const leftDistance = Math.abs(
+                pickOptionReferencePrice(left, left.projectedTargetPrice ?? 0) - 0.45
+              );
+              const rightDistance = Math.abs(
+                pickOptionReferencePrice(right, right.projectedTargetPrice ?? 0) - 0.45
+              );
               if (leftDistance !== rightDistance) {
                 return leftDistance - rightDistance;
               }
@@ -1559,6 +1933,8 @@ function buildAssetScans({
             return null;
           }
 
+          const optionReferencePrice = pickOptionReferencePrice(option, option.projectedTargetPrice ?? 0);
+
           const timeToExpiryYears = Math.max(
             differenceInDays(
               new Date(),
@@ -1566,7 +1942,8 @@ function buildAssetScans({
             ) / 365,
             1 / 365
           );
-          const theoreticalPrice = blackScholesCall({
+          const theoreticalPrice = priceOption({
+            type: preferredOptionType,
             spot: proxyTarget,
             strike: option.strike,
             timeToExpiryYears,
@@ -1575,7 +1952,7 @@ function buildAssetScans({
           });
 
           const grossYesUnits = market.yesPrice ? 1000 / market.yesPrice : 0;
-          const shortUnits = option.lastPrice ? 1000 / option.lastPrice : 0;
+          const shortUnits = optionReferencePrice ? 1000 / optionReferencePrice : 0;
           const projectedProfit = grossYesUnits - shortUnits * theoreticalPrice + 1000;
 
           return {
@@ -1585,9 +1962,10 @@ function buildAssetScans({
             yesPrice: formatNumber(market.yesPrice, 4),
             optionSymbol: asset.optionSymbol,
             optionReference: asset.referenceSymbol,
+            optionType: preferredOptionType,
             optionStrike: option.strike,
             optionExpiry: option.expiration,
-            liveOptionPrice: formatNumber(option.lastPrice, 4),
+            liveOptionPrice: formatNumber(optionReferencePrice, 4),
             optionPriceSource: option.isModeled ? "modeled" : "live",
             theoreticalOptionPriceAtTarget: formatNumber(theoreticalPrice, 4),
             targetUnderlyingValue: formatNumber(targetValue, 2),
@@ -1596,7 +1974,8 @@ function buildAssetScans({
           };
         })
         .filter(Boolean)
-        .sort((left, right) => (right.projectedProfit ?? -Infinity) - (left.projectedProfit ?? -Infinity));
+        .sort((left, right) => (right.projectedProfit ?? -Infinity) - (left.projectedProfit ?? -Infinity))
+        .slice(0, 3);
 
       return {
         id: asset.id,

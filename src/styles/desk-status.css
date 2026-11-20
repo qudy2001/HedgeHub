@@ -1,0 +1,157 @@
+/* Admin > Analysis tasks > Daily desk status. Builds on the shared admin-users__*, admin-tasks__* and pill classes. */
+.desk-status__intro {
+  flex: 1 1 320px;
+  max-width: 80ch;
+}
+
+.desk-status__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.desk-status__lane {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--button-border);
+  background: var(--surface-muted);
+}
+
+.desk-status__lane-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.desk-status__lane-head strong {
+  font-size: 1rem;
+}
+
+.desk-status__duty {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.desk-status__meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.desk-status__warn,
+.desk-status__meta.desk-status__warn {
+  color: var(--amber);
+}
+
+:root[data-theme="light"] .desk-status__warn,
+:root[data-theme="light"] .desk-status__meta.desk-status__warn {
+  color: #b45309;
+}
+
+.desk-status__inbox {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.desk-status__label {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.desk-status__topics {
+  display: grid;
+  gap: 6px;
+}
+
+.desk-status__topic {
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--button-border);
+  background: var(--input-bg-strong);
+}
+
+.desk-status__topic summary {
+  display: grid;
+  gap: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.desk-status__topic summary::-webkit-details-marker {
+  display: none;
+}
+
+.desk-status__title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.desk-status__facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.desk-status__stage {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--button-border);
+  color: var(--text);
+  font-size: 0.72rem;
+}
+
+.desk-status__stage--none,
+.desk-status__stage--resolved,
+.desk-status__stage--fading {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.desk-status__stage--new,
+.desk-status__stage--developing,
+.desk-status__stage--active {
+  border-color: var(--active-border);
+  background: var(--active-bg);
+}
+
+.desk-status__updated {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.desk-status__topic pre {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

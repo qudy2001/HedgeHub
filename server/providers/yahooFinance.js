@@ -1,6 +1,8 @@
+import { normalCdf, optionPrice as blackScholesOptionPrice } from "../../shared/optionMath.js";
 const STOOQ_BASE_URL = "https://stooq.com/q/l/?f=sd2t2ohlcvn&e=csv&s=";
+const YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart";
+const YAHOO_SUMMARY_URL = "https://query1.finance.yahoo.com/v10/finance/quoteSummary";
 const COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3/simple/price";
-const POLYGON_OPTIONS_SNAPSHOT_URL = "https://api.polygon.io/v3/snapshot/options";
 
 async function fetchText(url) {
   const controller = new AbortController();
@@ -50,24 +52,11 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-function normalCdf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  const absX = Math.abs(x);
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-  const t = 1 / (1 + p * absX);
-  const y =
-    1 -
-    (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX));
-
-  return 0.5 * (1 + sign * y);
+function normalPdf(x) {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
 }
 
-function blackScholesOptionPrice({
+function blackScholesGreeks({
   type,
   spot,
   strike,
@@ -75,22 +64,64 @@ function blackScholesOptionPrice({
   volatility,
   riskFreeRate
 }) {
-  if (timeYears <= 0) {
-    return type === "put" ? Math.max(strike - spot, 0) : Math.max(spot - strike, 0);
+  const normalizedSpot = Number(spot ?? 0);
+  const normalizedStrike = Number(strike ?? 0);
+  const normalizedT = Number(timeYears ?? 0);
+  const normalizedVol = Number(volatility ?? 0);
+  const normalizedRate = Number(riskFreeRate ?? 0);
+
+  if (
+    !Number.isFinite(normalizedSpot) ||
+    normalizedSpot <= 0 ||
+    !Number.isFinite(normalizedStrike) ||
+    normalizedStrike <= 0 ||
+    !Number.isFinite(normalizedT) ||
+    normalizedT <= 0 ||
+    !Number.isFinite(normalizedVol) ||
+    normalizedVol <= 0
+  ) {
+    return {
+      delta: null,
+      gamma: null,
+      theta: null,
+      vega: null,
+      rho: null
+    };
   }
 
-  const sqrtT = Math.sqrt(timeYears);
+  const sqrtT = Math.sqrt(normalizedT);
   const d1 =
-    (Math.log(spot / strike) + (riskFreeRate + 0.5 * volatility * volatility) * timeYears) /
-    (volatility * sqrtT);
-  const d2 = d1 - volatility * sqrtT;
-  const discountedStrike = strike * Math.exp(-riskFreeRate * timeYears);
+    (Math.log(normalizedSpot / normalizedStrike) +
+      (normalizedRate + 0.5 * normalizedVol * normalizedVol) * normalizedT) /
+    (normalizedVol * sqrtT);
+  const d2 = d1 - normalizedVol * sqrtT;
+  const pdfD1 = normalPdf(d1);
+  const discountedStrike = normalizedStrike * Math.exp(-normalizedRate * normalizedT);
+  const cdfD1 = normalCdf(d1);
+  const cdfD2 = normalCdf(d2);
+  const cdfMinusD2 = normalCdf(-d2);
 
-  if (type === "put") {
-    return discountedStrike * normalCdf(-d2) - spot * normalCdf(-d1);
-  }
+  const delta = type === "put" ? cdfD1 - 1 : cdfD1;
+  const gamma = pdfD1 / (normalizedSpot * normalizedVol * sqrtT);
 
-  return spot * normalCdf(d1) - discountedStrike * normalCdf(d2);
+  const yearlyTheta =
+    type === "put"
+      ? (-normalizedSpot * pdfD1 * normalizedVol) / (2 * sqrtT) + normalizedRate * discountedStrike * cdfMinusD2
+      : (-normalizedSpot * pdfD1 * normalizedVol) / (2 * sqrtT) - normalizedRate * discountedStrike * cdfD2;
+
+  const vega = normalizedSpot * pdfD1 * sqrtT;
+  const rho =
+    type === "put"
+      ? -normalizedStrike * normalizedT * Math.exp(-normalizedRate * normalizedT) * cdfMinusD2
+      : normalizedStrike * normalizedT * Math.exp(-normalizedRate * normalizedT) * cdfD2;
+
+  return {
+    delta,
+    gamma,
+    theta: yearlyTheta,
+    vega,
+    rho
+  };
 }
 
 function estimateBidAsk(midPrice) {
@@ -180,61 +211,21 @@ function buildSyntheticOptionChain({
           optionType,
           bid: quotes.bid,
           ask: quotes.ask,
+          bidSize: null,
+          askSize: null,
           mark: quotes.mark,
           lastPrice: quotes.mark,
           impliedVolatility: volatility,
+          volume: null,
           openInterest: null,
+          exerciseStyle: null,
           source: "modeled",
           sourceLabel: "Synthetic chain",
-          isLive: false
+          isLive: false,
+          hasRealBidAsk: false
         };
       })
   );
-}
-
-function normalizePolygonContract(item, fallbackType) {
-  const strike = Number(item?.details?.strike_price ?? 0);
-  if (!Number.isFinite(strike) || strike <= 0) {
-    return null;
-  }
-
-  const bid = Number(item?.last_quote?.bid);
-  const ask = Number(item?.last_quote?.ask);
-  const trade = Number(item?.last_trade?.price);
-  const dayClose = Number(item?.day?.close);
-  const hasLiveQuote = Number.isFinite(bid) && Number.isFinite(ask) && (bid > 0 || ask > 0);
-  const midpoint =
-    hasLiveQuote
-      ? (bid + ask) / 2
-      : Number.isFinite(trade) && trade > 0
-        ? trade
-        : Number.isFinite(dayClose) && dayClose > 0
-          ? dayClose
-          : null;
-  const fallbackQuotes = Number.isFinite(midpoint) && midpoint > 0 ? estimateBidAsk(midpoint) : null;
-
-  return {
-    contractSymbol:
-      item?.details?.ticker ||
-      `${item?.details?.underlying_ticker ?? "OPT"}-${item?.details?.expiration_date}-${strike}`,
-    strike,
-    expiration: item?.details?.expiration_date,
-    optionType: item?.details?.contract_type ?? fallbackType,
-    bid: Number.isFinite(bid) && bid > 0 ? bid : fallbackQuotes?.bid ?? null,
-    ask: Number.isFinite(ask) && ask > 0 ? ask : fallbackQuotes?.ask ?? null,
-    mark: Number.isFinite(midpoint) ? midpoint : null,
-    lastPrice:
-      Number.isFinite(trade) && trade > 0
-        ? trade
-        : Number.isFinite(midpoint)
-          ? midpoint
-          : null,
-    impliedVolatility: Number(item?.implied_volatility ?? 0) || null,
-    openInterest: Number(item?.open_interest ?? 0) || null,
-    source: "polygon",
-    sourceLabel: "Polygon.io",
-    isLive: true
-  };
 }
 
 function timeToExpiryYears(expiration) {
@@ -274,67 +265,75 @@ function enrichContractWithFallbackQuotes(contract, currentSpot = 0) {
     ...contract,
     bid: Number.isFinite(contract.bid) && contract.bid > 0 ? contract.bid : fallbackQuotes.bid,
     ask: Number.isFinite(contract.ask) && contract.ask > 0 ? contract.ask : fallbackQuotes.ask,
+    bidSize: contract.bidSize ?? null,
+    askSize: contract.askSize ?? null,
     mark: Number.isFinite(contract.mark) && contract.mark > 0 ? contract.mark : fallbackQuotes.mark,
     lastPrice:
-      Number.isFinite(contract.lastPrice) && contract.lastPrice > 0 ? contract.lastPrice : fallbackQuotes.mark
+      Number.isFinite(contract.lastPrice) && contract.lastPrice > 0 ? contract.lastPrice : fallbackQuotes.mark,
+    isLive: false,
+    hasRealBidAsk: false
   };
 }
 
-async function fetchPolygonOptionChain({
-  symbol,
-  expiration,
-  expirationFrom,
-  expirationTo,
-  optionType,
-  strikeMin,
-  strikeMax,
-  limit = 80
-}) {
-  if (!process.env.POLYGON_API_KEY) {
-    return null;
-  }
+function enrichContractWithDerivedMetrics(contract, currentSpot = 0) {
+  const withQuotes = enrichContractWithFallbackQuotes(contract, currentSpot);
+  const spot = Number(currentSpot ?? 0);
+  const strike = Number(withQuotes.strike ?? 0);
 
-  const url = new URL(`${POLYGON_OPTIONS_SNAPSHOT_URL}/${encodeURIComponent(symbol)}`);
-  if (expiration) {
-    url.searchParams.set("expiration_date", expiration);
-  } else {
-    if (expirationFrom) {
-      url.searchParams.set("expiration_date.gte", expirationFrom);
-    }
+  const mid =
+    Number.isFinite(withQuotes.bid) &&
+    withQuotes.bid > 0 &&
+    Number.isFinite(withQuotes.ask) &&
+    withQuotes.ask > 0
+      ? (withQuotes.bid + withQuotes.ask) / 2
+      : Number(withQuotes.mark ?? withQuotes.lastPrice ?? NaN);
+  const mark = Number(withQuotes.mark ?? mid ?? NaN);
 
-    if (expirationTo) {
-      url.searchParams.set("expiration_date.lte", expirationTo);
-    }
-  }
+  const dayOpen = Number(withQuotes.dayOpen ?? NaN);
+  const changePercent =
+    Number.isFinite(dayOpen) && dayOpen > 0 && Number.isFinite(mark)
+      ? ((mark - dayOpen) / dayOpen) * 100
+      : null;
 
-  url.searchParams.set("contract_type", optionType);
-  url.searchParams.set("limit", String(Math.max(limit, 20)));
-  url.searchParams.set("sort", "strike_price");
-  url.searchParams.set("order", "asc");
+  const defaultVolatility = spot > 200 ? 0.22 : spot > 50 ? 0.28 : 0.36;
+  const volatility = clamp(Number(withQuotes.impliedVolatility ?? 0) || defaultVolatility, 0.05, 3);
+  const greeks = blackScholesGreeks({
+    type: withQuotes.optionType,
+    spot,
+    strike,
+    timeYears: timeToExpiryYears(withQuotes.expiration),
+    volatility,
+    riskFreeRate: 0.0425
+  });
 
-  if (Number.isFinite(strikeMin) && strikeMin > 0) {
-    url.searchParams.set("strike_price.gte", String(strikeMin));
-  }
-
-  if (Number.isFinite(strikeMax) && strikeMax > 0) {
-    url.searchParams.set("strike_price.lte", String(strikeMax));
-  }
-
-  url.searchParams.set("apiKey", process.env.POLYGON_API_KEY);
-
-  const payload = await fetchJson(url.toString());
-  const contracts = (payload?.results ?? [])
-    .map((item) => normalizePolygonContract(item, optionType))
-    .filter(Boolean);
+  const intrinsicValue =
+    Number.isFinite(spot) && spot > 0 && Number.isFinite(strike) && strike > 0
+      ? withQuotes.optionType === "put"
+        ? Math.max(strike - spot, 0)
+        : Math.max(spot - strike, 0)
+      : null;
+  const timeValue =
+    Number.isFinite(mark) && Number.isFinite(intrinsicValue)
+      ? mark - intrinsicValue
+      : null;
+  const premiumPercent =
+    Number.isFinite(timeValue) && Number.isFinite(spot) && spot > 0
+      ? (timeValue / spot) * 100
+      : null;
 
   return {
-    symbol,
-    expiration,
-    optionType,
-    source: "polygon",
-    sourceLabel: "Polygon.io",
-    isLive: true,
-    contracts
+    ...withQuotes,
+    mid: Number.isFinite(mid) ? mid : null,
+    mark: Number.isFinite(mark) ? mark : withQuotes.mark ?? null,
+    changePercent,
+    intrinsicValue,
+    timeValue,
+    premiumPercent,
+    delta: Number.isFinite(greeks.delta) ? greeks.delta : null,
+    gamma: Number.isFinite(greeks.gamma) ? greeks.gamma : null,
+    theta: Number.isFinite(greeks.theta) ? greeks.theta / 365 : null,
+    vega: Number.isFinite(greeks.vega) ? greeks.vega / 100 : null,
+    rho: Number.isFinite(greeks.rho) ? greeks.rho / 100 : null
   };
 }
 
@@ -411,6 +410,92 @@ async function fetchStooqQuotes(items) {
     .filter(Boolean);
 }
 
+function normalizeYahooEquityTicker(sourceSymbol = "") {
+  return String(sourceSymbol ?? "")
+    .trim()
+    .replace(/\.us$/i, "")
+    .toUpperCase();
+}
+
+async function fetchYahooEquityQuotes(items) {
+  if (!items.length) {
+    return [];
+  }
+
+  const tickers = [...new Set(items.map((item) => normalizeYahooEquityTicker(item.sourceSymbol)).filter(Boolean))];
+  if (!tickers.length) {
+    return [];
+  }
+
+  const chartResults = await Promise.allSettled(
+    tickers.map(async (ticker) => {
+      const url = new URL(`${YAHOO_CHART_URL}/${encodeURIComponent(ticker)}`);
+      url.searchParams.set("interval", "1m");
+      url.searchParams.set("range", "1d");
+      url.searchParams.set("includePrePost", "true");
+
+      const payload = await fetchJson(url.toString());
+      const result = Array.isArray(payload?.chart?.result) ? payload.chart.result[0] : null;
+      const meta = result?.meta ?? null;
+      const priceCandidates = [
+        Number(meta?.regularMarketPrice),
+        Number(meta?.previousClose)
+      ];
+      const regularMarketPrice = priceCandidates.find((value) => Number.isFinite(value) && value > 0) ?? null;
+      if (!meta || !(regularMarketPrice > 0)) {
+        return null;
+      }
+
+      const previousClose = Number(meta?.previousClose);
+      const changePercent =
+        Number.isFinite(previousClose) && previousClose > 0
+          ? ((regularMarketPrice - previousClose) / previousClose) * 100
+          : 0;
+      const marketTimeSeconds = Number(meta?.regularMarketTime ?? 0);
+
+      return [
+        ticker,
+        {
+          regularMarketPrice,
+          regularMarketChangePercent: changePercent,
+          regularMarketTime:
+            Number.isFinite(marketTimeSeconds) && marketTimeSeconds > 0
+              ? new Date(marketTimeSeconds * 1000).toISOString()
+              : new Date().toISOString(),
+          shortName: meta?.shortName ?? meta?.longName ?? ticker,
+          exchange: "Yahoo Finance",
+          currency: meta?.currency ?? "USD"
+        }
+      ];
+    })
+  );
+
+  const quoteByTicker = new Map(
+    chartResults
+      .filter((result) => result.status === "fulfilled" && Array.isArray(result.value))
+      .map((result) => result.value)
+  );
+
+  return items
+    .map((item) => {
+      const quote = quoteByTicker.get(normalizeYahooEquityTicker(item.sourceSymbol));
+      if (!quote) {
+        return null;
+      }
+
+      return {
+        symbol: item.symbol,
+        shortName: item.label || quote.shortName,
+        regularMarketPrice: quote.regularMarketPrice,
+        regularMarketChangePercent: quote.regularMarketChangePercent,
+        currency: quote.currency,
+        exchange: quote.exchange,
+        regularMarketTime: quote.regularMarketTime
+      };
+    })
+    .filter(Boolean);
+}
+
 async function fetchCoinGeckoQuotes(items) {
   if (!items.length) {
     return [];
@@ -442,17 +527,60 @@ async function fetchCoinGeckoQuotes(items) {
     .filter(Boolean);
 }
 
+async function fetchStockQuotesWithFallback(items) {
+  if (!items.length) {
+    return [];
+  }
+
+  const resolved = new Array(items.length).fill(null);
+  let remaining = items.map((item, index) => ({ item, index }));
+
+  const mergeQuotes = (quotes = []) => {
+    if (!quotes.length || !remaining.length) {
+      return;
+    }
+
+    const quotesBySymbol = new Map(
+      quotes.map((quote) => [String(quote.symbol ?? "").trim().toUpperCase(), quote])
+    );
+
+    remaining = remaining.filter(({ item, index }) => {
+      const quote = quotesBySymbol.get(String(item.symbol ?? "").trim().toUpperCase());
+      if (!quote || !(Number(quote.regularMarketPrice) > 0)) {
+        return true;
+      }
+
+      resolved[index] = quote;
+      return false;
+    });
+  };
+
+  try {
+    mergeQuotes(await fetchYahooEquityQuotes(remaining.map(({ item }) => item)));
+  } catch (_error) {
+    // Fall through to Stooq.
+  }
+
+  try {
+    mergeQuotes(await fetchStooqQuotes(remaining.map(({ item }) => item)));
+  } catch (_error) {
+    // Surface an empty result if every provider failed.
+  }
+
+  return resolved.filter(Boolean);
+}
+
 export async function fetchQuotes(items) {
-  const stooqItems = items.filter((item) => item.provider === "stooq");
+  const stockItems = items.filter((item) => item.provider !== "coingecko");
   const coingeckoItems = items.filter((item) => item.provider === "coingecko");
-  const [stooqResult, coingeckoResult] = await Promise.allSettled([
-    fetchStooqQuotes(stooqItems),
+  const [stockResult, coingeckoResult] = await Promise.allSettled([
+    fetchStockQuotesWithFallback(stockItems),
     fetchCoinGeckoQuotes(coingeckoItems)
   ]);
 
   return [
-    ...(stooqResult.status === "fulfilled" ? stooqResult.value : []),
-    ...(coingeckoResult.status === "fulfilled" ? coingeckoResult.value : [])
+    ...(stockResult.status === "fulfilled" ? stockResult.value : []),
+    ...(coingeckoResult.status === "fulfilled" ? coingeckoResult.value : []),
   ];
 }
 
@@ -464,54 +592,8 @@ export async function fetchOptionChain({
   optionType = "call",
   currentSpot = 0,
   strikeHint = 0,
-  strikeMin,
-  strikeMax,
   limit = 60
 }) {
-  try {
-    const polygonResult = await fetchPolygonOptionChain({
-      symbol,
-      expiration,
-      expirationFrom,
-      expirationTo,
-      optionType,
-      strikeMin,
-      strikeMax,
-      limit
-    });
-
-    if (polygonResult?.contracts?.length) {
-      return {
-        ...polygonResult,
-        contracts: polygonResult.contracts.map((contract) =>
-          enrichContractWithFallbackQuotes(contract, currentSpot)
-        )
-      };
-    }
-  } catch (error) {
-    return {
-      symbol,
-      expiration,
-      expirationFrom,
-      expirationTo,
-      optionType,
-      source: "modeled",
-      sourceLabel: "Synthetic chain",
-      isLive: false,
-      warning: `Polygon option chain unavailable: ${error.message}`,
-      contracts: buildSyntheticOptionChain({
-        symbol,
-        expiration,
-        expirationFrom,
-        expirationTo,
-        optionType,
-        currentSpot,
-        strikeHint,
-        limit
-      })
-    };
-  }
-
   return {
     symbol,
     expiration,
@@ -521,11 +603,6 @@ export async function fetchOptionChain({
     source: "modeled",
     sourceLabel: "Synthetic chain",
     isLive: false,
-    warning: process.env.POLYGON_API_KEY
-      ? expirationFrom || expirationTo
-        ? "No live contracts returned for this search window."
-        : "No live contracts returned for this expiry."
-      : "POLYGON_API_KEY not configured.",
     contracts: buildSyntheticOptionChain({
       symbol,
       expiration,
@@ -535,7 +612,7 @@ export async function fetchOptionChain({
       currentSpot,
       strikeHint,
       limit
-    })
+    }).map((contract) => enrichContractWithDerivedMetrics(contract, currentSpot))
   };
 }
 
@@ -565,7 +642,122 @@ export async function fetchNearestCalls(symbol, targetStrike, desiredExpiry, lim
       optionType: contract.optionType,
       bid: contract.bid,
       ask: contract.ask,
+      bidSize: contract.bidSize ?? null,
+      askSize: contract.askSize ?? null,
       source: contract.source,
-      isLive: contract.isLive
+      isLive: contract.isLive,
+      isLive: false,
+    hasRealBidAsk: false
     }));
+}
+
+// quoteSummary needs a session cookie plus a crumb token; chart endpoints do not.
+const YAHOO_BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const YAHOO_SESSION_TTL_MS = 60 * 60 * 1000;
+let yahooSession = null;
+let yahooSessionPending = null;
+
+async function createYahooSession() {
+  const cookieResponse = await fetch("https://fc.yahoo.com", {
+    headers: { "user-agent": YAHOO_BROWSER_UA },
+    redirect: "manual",
+    signal: AbortSignal.timeout(15000)
+  });
+  // fc.yahoo.com answers 404 on purpose; only its Set-Cookie matters.
+  const cookie = (cookieResponse.headers.getSetCookie?.() ?? []).map((value) => value.split(";")[0]).join("; ");
+  if (!cookie) throw new Error("Yahoo Finance did not issue a session cookie");
+  const crumbResponse = await fetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
+    headers: { "user-agent": YAHOO_BROWSER_UA, cookie },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!crumbResponse.ok) throw new Error(`Yahoo Finance crumb request failed with ${crumbResponse.status}`);
+  const crumb = (await crumbResponse.text()).trim();
+  if (!crumb || crumb.includes("<") || crumb.includes(" ")) throw new Error("Yahoo Finance returned an invalid crumb");
+  return { cookie, crumb, createdAt: Date.now() };
+}
+
+async function getYahooSession(forceRefresh = false) {
+  if (!forceRefresh && yahooSession && Date.now() - yahooSession.createdAt < YAHOO_SESSION_TTL_MS) return yahooSession;
+  yahooSessionPending ??= createYahooSession()
+    .then((session) => (yahooSession = session))
+    .finally(() => {
+      yahooSessionPending = null;
+    });
+  return yahooSessionPending;
+}
+
+async function fetchYahooSummary(symbol, modules, retry = true) {
+  const session = await getYahooSession(!retry);
+  const url = new URL(`${YAHOO_SUMMARY_URL}/${encodeURIComponent(symbol)}`);
+  url.searchParams.set("modules", modules.join(","));
+  url.searchParams.set("corsDomain", "finance.yahoo.com");
+  url.searchParams.set("crumb", session.crumb);
+  const response = await fetch(url, {
+    headers: { "user-agent": YAHOO_BROWSER_UA, cookie: session.cookie },
+    signal: AbortSignal.timeout(15000)
+  });
+  if ((response.status === 401 || response.status === 403) && retry) {
+    yahooSession = null;
+    return fetchYahooSummary(symbol, modules, false);
+  }
+  if (!response.ok) throw new Error(`Request failed with ${response.status}`);
+  const result = (await response.json())?.quoteSummary?.result?.[0];
+  if (!result) throw new Error(`Yahoo Finance returned no data for ${symbol}`);
+  return result;
+}
+
+export async function fetchYahooFundamentals({ symbol } = {}) {
+  const normalized = String(symbol ?? "").trim().toUpperCase();
+  if (!normalized) throw new Error("symbol is required");
+  const data = await fetchYahooSummary(normalized, ["summaryDetail", "assetProfile", "price"]);
+  const sd = data.summaryDetail ?? {};
+  const ap = data.assetProfile ?? {};
+  const pr = data.price ?? {};
+  const toNum = (v) => { const n = Number(v?.raw ?? v); return Number.isFinite(n) ? n : null; };
+  const dividendYield = toNum(sd.dividendYield);
+  return {
+    generatedAt: new Date().toISOString(),
+    requestedSymbol: normalized,
+    resolvedSymbol: pr.symbol ?? normalized,
+    ticker: pr.symbol ?? normalized,
+    description: pr.longName ?? pr.shortName ?? null,
+    marketCapUsd: toNum(pr.marketCap),
+    peTtm: toNum(sd.trailingPE),
+    dividendYield: dividendYield != null ? dividendYield * 100 : null,
+    beta1y: toNum(sd.beta),
+    volume: toNum(sd.volume),
+    averageVolume10d: toNum(sd.averageVolume10days ?? sd.averageDailyVolume10Day),
+    averageVolume30d: toNum(sd.averageVolume),
+    high52w: toNum(sd.fiftyTwoWeekHigh),
+    low52w: toNum(sd.fiftyTwoWeekLow),
+    sector: ap.sector ?? null,
+    industry: ap.industry ?? null,
+    currency: pr.currency ?? sd.currency ?? null,
+    exchange: pr.exchangeName ?? null,
+    type: pr.quoteType ?? null,
+    source: "yahoo"
+  };
+}
+
+export async function fetchYahooEarningsDate(symbol) {
+  const normalized = String(symbol ?? "").trim().toUpperCase();
+  if (!normalized) throw new Error("symbol is required");
+  const data = await fetchYahooSummary(normalized, ["calendarEvents"]);
+  const dates = (data.calendarEvents?.earnings?.earningsDate ?? [])
+    .map(d => { const n = Number(d?.raw ?? d); return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toISOString().slice(0, 10) : null; })
+    .filter(Boolean)
+    .sort();
+  if (!dates.length) throw new Error(`No earnings date found on Yahoo Finance for ${normalized}`);
+  const now = new Date().toISOString().slice(0, 10);
+  const next = dates.find(d => d >= now) ?? dates.at(-1);
+  return {
+    source: "yahoo",
+    fetchedAt: new Date().toISOString(),
+    events: dates.map(date => ({ date, type: "earnings", symbol: normalized })),
+    complete: Boolean(dates.find(d => d >= now)),
+    from: now,
+    to: next,
+    status: "event-found"
+  };
 }

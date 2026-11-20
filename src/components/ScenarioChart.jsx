@@ -7,6 +7,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import { getChartPalette } from "../theme.js";
 
 function currencyFormatter(value) {
   if (typeof value !== "number") {
@@ -16,7 +17,9 @@ function currencyFormatter(value) {
   return `$${value.toLocaleString()}`;
 }
 
-export default function ScenarioChart({ data }) {
+export default function ScenarioChart({ data, theme = "dark" }) {
+  const chartTheme = getChartPalette(theme);
+
   return (
     <div className="chart-card">
       <div className="section-heading">
@@ -27,24 +30,24 @@ export default function ScenarioChart({ data }) {
       <div className="chart-frame">
         <ResponsiveContainer width="100%" height={320}>
           <ComposedChart data={data}>
-            <XAxis dataKey="date" tick={{ fill: "rgba(226,232,240,0.6)", fontSize: 11 }} />
+            <XAxis dataKey="date" tick={{ fill: chartTheme.axis, fontSize: 11 }} />
             <YAxis
               yAxisId="profit"
-              tick={{ fill: "rgba(226,232,240,0.6)", fontSize: 11 }}
+              tick={{ fill: chartTheme.axis, fontSize: 11 }}
               tickFormatter={currencyFormatter}
             />
             <YAxis
               yAxisId="price"
               orientation="right"
-              tick={{ fill: "rgba(226,232,240,0.6)", fontSize: 11 }}
+              tick={{ fill: chartTheme.axis, fontSize: 11 }}
             />
             <Tooltip
               formatter={(value, name) =>
                 name === "projectedProfit" ? currencyFormatter(value) : value
               }
               contentStyle={{
-                background: "rgba(15, 23, 42, 0.92)",
-                border: "1px solid rgba(148, 163, 184, 0.18)",
+                background: chartTheme.tooltipBackground,
+                border: `1px solid ${chartTheme.tooltipBorder}`,
                 borderRadius: "14px"
               }}
             />
@@ -52,15 +55,15 @@ export default function ScenarioChart({ data }) {
               yAxisId="profit"
               type="monotone"
               dataKey="projectedProfit"
-              stroke="#f59e0b"
-              fill="rgba(245,158,11,0.22)"
+              stroke={chartTheme.scenarioAreaStroke}
+              fill={chartTheme.scenarioAreaFill}
               strokeWidth={2.5}
             />
             <Line
               yAxisId="price"
               type="monotone"
               dataKey="maxProjectedOptionPrice"
-              stroke="#38bdf8"
+              stroke={chartTheme.scenarioLineSky}
               dot={false}
               strokeWidth={2}
             />
@@ -68,7 +71,7 @@ export default function ScenarioChart({ data }) {
               yAxisId="price"
               type="monotone"
               dataKey="theoreticalOptionPrice"
-              stroke="#34d399"
+              stroke={chartTheme.scenarioLineEmerald}
               dot={false}
               strokeWidth={1.7}
             />

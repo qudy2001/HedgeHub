@@ -1,0 +1,126 @@
+/* Admin > Analysis tasks > Recent runs. Builds on the shared admin-users__* classes and on the expandable-text
+   styles (.admin-tasks__prompt) that ship with ai-schedule-templates.css. */
+.admin-tasks__runs-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.admin-tasks__runs-header h3 {
+  margin: 0;
+}
+
+.admin-tasks__note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.admin-tasks__runs .refresh-feedback {
+  margin: 0 0 12px;
+}
+
+.admin-tasks__runs-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-tasks__run .admin-users__identity {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.admin-tasks__run-title {
+  overflow-wrap: anywhere;
+}
+
+.admin-tasks__label {
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.admin-tasks__result summary {
+  font-weight: 500;
+}
+
+/* The first line previews the result while it is closed; once open, the full text is right below. */
+.admin-tasks__result[open] .admin-tasks__teaser {
+  display: none;
+}
+
+.admin-tasks__result pre {
+  max-height: 480px;
+}
+
+/* On a phone the status pill moves above the text so the text can use the full width. */
+@media (max-width: 600px) {
+  .admin-tasks__run {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .admin-tasks__run .admin-users__badges {
+    justify-content: flex-start;
+  }
+}
+
+/* Phones: this page nests three cards, which left 291px of a 375px screen for text. Trim the nesting, stack each
+   definition's buttons under its prompt, and let the prompt header wrap. */
+@media (max-width: 600px) {
+  .app-shell:has(.workspace--admin-analysis-tasks) {
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .workspace--admin-analysis-tasks {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .workspace--admin-analysis-tasks .admin-users__panel {
+    padding: 14px 12px;
+  }
+
+  .workspace--admin-analysis-tasks .admin-users__row:not(.admin-tasks__run) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace--admin-analysis-tasks .admin-users__row:not(.admin-tasks__run) .admin-users__badges {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .workspace--admin-analysis-tasks .ai-templates__prompt-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .workspace--admin-analysis-tasks .ai-templates__prompt-head > :first-child {
+    flex-basis: 100%;
+  }
+
+  .workspace--admin-analysis-tasks .ai-templates__prompt-head .ai-templates__language {
+    margin-left: 0;
+    margin-right: auto;
+  }
+}
+
+/* iOS zooms the page when a focused field's text is under 16px. */
+@media (pointer: coarse) {
+  .workspace--admin-analysis-tasks input:not([type="checkbox"]):not([type="radio"]),
+  .workspace--admin-analysis-tasks select,
+  .workspace--admin-analysis-tasks textarea {
+    font-size: 16px;
+  }
+}

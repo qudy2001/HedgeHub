@@ -1,6 +1,68 @@
-const GAMMA_BASE_URL = "https://gamma-api.polymarket.com/markets";
+const GAMMA_ORIGIN = "https://gamma-api.polymarket.com";
+const GAMMA_BASE_URL = `${GAMMA_ORIGIN}/markets`;
 const MIN_TRADABLE_POLY_PRICE = 0.03;
 const MAX_TRADABLE_POLY_PRICE = 0.97;
+
+// Accepts www./http/locale/query/trailing-slash variants and returns the canonical
+// https://polymarket.com/event/<slug> form, or "" when the value is not an event URL.
+export function canonicalPolymarketEventUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+
+  try {
+    const url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+    if (!/^(www\.)?polymarket\.com$/i.test(url.hostname)) {
+      return "";
+    }
+
+    const parts = url.pathname.split("/").filter(Boolean);
+    const eventIndex = parts.indexOf("event");
+    const slug = eventIndex >= 0 ? parts[eventIndex + 1] : "";
+    return /^[a-z0-9][a-z0-9-]*$/i.test(slug ?? "") ? `https://polymarket.com/event/${slug}` : "";
+  } catch {
+    return "";
+  }
+}
+
+// Polymarket monthly events end at ~00:00 ET on the 1st (03:59:59.999Z or 04:00:00Z), so the last
+// day to trade the underlying is the previous US Eastern calendar day.
+export function polymarketEventDay(endDate) {
+  const time = Date.parse(endDate ?? "");
+  if (!Number.isFinite(time)) {
+    return null;
+  }
+
+  return new Date(time - 60_000).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+export function getPolymarketEventSlug(value) {
+  return canonicalPolymarketEventUrl(value).replace("https://polymarket.com/event/", "");
+}
+
+export function getPolymarketEventUrl(market) {
+  const url = canonicalPolymarketEventUrl(market?.url);
+  if (url) {
+    return url;
+  }
+
+  const eventSlug = String(market?.eventSlug ?? "").trim();
+  if (eventSlug) {
+    return `https://polymarket.com/event/${eventSlug}`;
+  }
+
+  const marketSlug = String(market?.slug ?? "").trim();
+  if (marketSlug) {
+    return `https://polymarket.com/event/${marketSlug}`;
+  }
+
+  return "";
+}
+
+export function hasPublicPolymarketEvent(market) {
+  return Boolean(getPolymarketEventUrl(market));
+}
 
 async function fetchWithTimeout(url) {
   const controller = new AbortController();
@@ -50,6 +112,11 @@ function safeJsonParse(value, fallback = []) {
   }
 }
 
+function finiteOrNull(value) {
+  const number = Number(value);
+  return value != null && value !== "" && Number.isFinite(number) ? number : null;
+}
+
 function normalizeMarket(rawMarket, overrides = {}) {
   const outcomes = safeJsonParse(rawMarket.outcomes);
   const outcomePrices = safeJsonParse(rawMarket.outcomePrices).map((value) => Number(value));
@@ -68,17 +135,30 @@ function normalizeMarket(rawMarket, overrides = {}) {
     question: rawMarket.question || rawMarket.title || "Unknown market",
     yesPrice,
     noPrice,
+    resolutionRules: rawMarket.description ?? null,
+    resolutionSource: rawMarket.resolutionSource ?? null,
+    groupItemTitle: rawMarket.groupItemTitle ?? null,
+    bestBid: finiteOrNull(rawMarket.bestBid),
+    bestAsk: finiteOrNull(rawMarket.bestAsk),
+    spread: finiteOrNull(rawMarket.spread),
+    lastTradePrice: finiteOrNull(rawMarket.lastTradePrice),
+    liquidityClob: finiteOrNull(rawMarket.liquidityClob ?? rawMarket.liquidityNum),
+    volume24hr: finiteOrNull(rawMarket.volume24hr),
+    tickSize: finiteOrNull(rawMarket.orderPriceMinTickSize),
+    minOrderSize: finiteOrNull(rawMarket.orderMinSize),
+    acceptingOrders: rawMarket.acceptingOrders ?? null,
+    negRisk: rawMarket.negRisk ?? null,
+    feeSchedule: rawMarket.feeSchedule ?? null,
+    eventTitle: overrides.eventTitle ?? null,
+    seriesSlug: overrides.seriesSlug ?? null,
+    tokenIds: safeJsonParse(rawMarket.clobTokenIds),
+    fetchedAt: new Date().toISOString(),
     volume: Number(rawMarket.volume ?? rawMarket.volumeClob ?? 0),
     liquidity: Number(rawMarket.liquidity ?? 0),
     endDate: rawMarket.endDate || rawMarket.end_date || rawMarket.closedTime || null,
     closed: rawMarket.closed ?? rawMarket.isClosed ?? false,
     active: rawMarket.active ?? rawMarket.isActive ?? true,
-    url: overrides.url ||
-      (eventSlug
-      ? `https://polymarket.com/event/${eventSlug}`
-      : slug
-        ? `https://polymarket.com/event/${slug}`
-        : "https://polymarket.com/"),
+    url: overrides.url || getPolymarketEventUrl({ slug, eventSlug }),
     source: overrides.source || rawMarket.source || "live"
   };
 }
@@ -114,56 +194,6 @@ export function isTradablePolymarketMarket(market, now = new Date()) {
   return true;
 }
 
-function extractJsonArray(html, marker) {
-  const markerIndex = html.indexOf(marker);
-  if (markerIndex < 0) {
-    return null;
-  }
-
-  const arrayStart = html.indexOf("[", markerIndex + marker.length);
-  if (arrayStart < 0) {
-    return null;
-  }
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = arrayStart; index < html.length; index += 1) {
-    const char = html[index];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === "\"") {
-      inString = true;
-      continue;
-    }
-
-    if (char === "[") {
-      depth += 1;
-      continue;
-    }
-
-    if (char === "]") {
-      depth -= 1;
-      if (depth === 0) {
-        return html.slice(arrayStart, index + 1);
-      }
-    }
-  }
-
-  return null;
-}
-
 function scoreQuestion(query, question) {
   const tokens = query
     .toLowerCase()
@@ -181,17 +211,39 @@ function scoreQuestion(query, question) {
   }, 0);
 }
 
+function flattenEventMarkets(event, overrides = {}) {
+  const eventSlug = event?.slug ?? null;
+  const eventUrl = eventSlug ? `https://polymarket.com/event/${eventSlug}` : "";
+  return (Array.isArray(event?.markets) ? event.markets : []).map((market) =>
+    normalizeMarket(
+      {
+        ...market,
+        active: market.active ?? true,
+        endDate: market.endDate ?? event?.endDate ?? null,
+        events: [{ slug: eventSlug }]
+      },
+      {
+        url: eventUrl,
+        source: "live",
+        eventTitle: event?.title ?? null,
+        seriesSlug: event?.seriesSlug ?? event?.series?.[0]?.slug ?? null,
+        ...overrides
+      }
+    )
+  );
+}
+
+// Text search over live events (Gamma's /markets endpoint ignores its `search` parameter).
 export async function searchPolymarketMarkets(query, limit = 8) {
   const params = new URLSearchParams({
-    limit: String(limit),
-    closed: "false",
-    active: "true",
-    search: query,
+    q: query,
+    events_status: "active",
+    limit_per_type: String(Math.max(limit, 5)),
   });
-
-  const url = `${GAMMA_BASE_URL}?${params.toString()}`;
-  const payload = await fetchJson(url);
-  const markets = Array.isArray(payload) ? payload : payload.markets ?? [];
+  const payload = await fetchJson(`${GAMMA_ORIGIN}/public-search?${params.toString()}`);
+  const markets = (Array.isArray(payload?.events) ? payload.events : []).flatMap((event) =>
+    flattenEventMarkets(event, { source: "live" })
+  );
 
   const minimumScore = Math.min(
     2,
@@ -202,10 +254,9 @@ export async function searchPolymarketMarkets(query, limit = 8) {
   );
 
   return markets
-    .map(normalizeMarket)
     .map((market) => ({
       ...market,
-      score: scoreQuestion(query, market.question)
+      score: scoreQuestion(query, `${market.eventTitle ?? ""} ${market.question}`)
     }))
     .filter((market) => market.score >= minimumScore)
     .filter((market) => isTradablePolymarketMarket(market))
@@ -215,41 +266,42 @@ export async function searchPolymarketMarkets(query, limit = 8) {
       }
 
       return right.volume - left.volume;
-    });
+    })
+    .slice(0, limit);
 }
 
-export async function fetchPolymarketMarketsFromEventPage(eventUrl, options = {}) {
-  const { tradableOnly = true } = options;
+// Fetches one event (with all its markets) from the Gamma JSON API; null when it does not exist.
+export async function fetchPolymarketEventBySlug(slug) {
+  const normalizedSlug = String(slug ?? "").trim();
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(normalizedSlug)) {
+    return null;
+  }
 
-  if (!eventUrl?.startsWith("https://polymarket.com/event/")) {
+  const payload = await fetchJson(`${GAMMA_ORIGIN}/events?slug=${encodeURIComponent(normalizedSlug)}`);
+  return (Array.isArray(payload) ? payload : []).find((event) => event?.slug === normalizedSlug) ?? null;
+}
+
+// `now` is the moment "tradable" is judged at (a market past its end date is not); it defaults to the present.
+export async function fetchPolymarketMarketsFromEventPage(eventUrl, options = {}) {
+  const { tradableOnly = true, now = new Date() } = options;
+  const canonicalUrl = canonicalPolymarketEventUrl(eventUrl);
+
+  if (!canonicalUrl) {
     return [];
   }
 
-  const html = await fetchText(eventUrl);
-  const rawMarketsJson = extractJsonArray(html, "\"markets\":");
-
-  if (!rawMarketsJson) {
-    throw new Error("Event markets payload not found");
+  const slug = getPolymarketEventSlug(canonicalUrl);
+  const event = await fetchPolymarketEventBySlug(slug);
+  if (!event) {
+    throw new Error(`Polymarket event not found: ${slug}`);
   }
 
-  const rawMarkets = safeJsonParse(rawMarketsJson, []);
-  const normalizedMarkets = rawMarkets
-    .map((market) =>
-      normalizeMarket(
-        {
-          ...market,
-          active: market.active ?? true
-        },
-        {
-          url: eventUrl,
-          source: "event-page"
-        }
-      )
-    )
-    .filter((market) => market.question && market.yesPrice != null)
-    .filter((market) => market.active !== false && market.closed !== true);
+  // Markets that resolved early inside a still-open event stay available for valuing existing positions.
+  const normalizedMarkets = flattenEventMarkets(event, { source: "event-page" }).filter(
+    (market) => market.question && market.yesPrice != null
+  );
 
   return tradableOnly
-    ? normalizedMarkets.filter((market) => isTradablePolymarketMarket(market))
+    ? normalizedMarkets.filter((market) => isTradablePolymarketMarket(market, now))
     : normalizedMarkets;
 }

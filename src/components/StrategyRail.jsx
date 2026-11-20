@@ -1,18 +1,118 @@
+import { useEffect, useMemo, useState } from "react";
+import { buildMarketTimerModel, buildUnderlyingMarketMonitorModels } from "../marketTimers.js";
+
+const OPTION_SESSION_ENTRY_KEYS = new Set(["option-pre", "option-open", "option-post"]);
+const PINNED_UNDERLYING_MARKETS = [
+  {
+    source: "underlying-monitor-gold",
+    label: "Gold",
+    underlyingSymbol: "XAU-USD",
+    referenceSymbol: "COMEX:GC1!"
+  },
+  {
+    source: "underlying-monitor-oil",
+    label: "Oil",
+    underlyingSymbol: "WTI-USD",
+    referenceSymbol: "NYMEX:CL1!"
+  },
+  {
+    source: "underlying-monitor-spy-spx",
+    label: "SPY",
+    underlyingSymbol: "SPY",
+    referenceSymbol: "NYSE:SPY"
+  }
+];
+
+function getStateToneClassName(tone) {
+  if (tone === "live") {
+    return "macro-layout-diagnostics__state--live";
+  }
+
+  if (tone === "warning") {
+    return "macro-layout-diagnostics__state--retrying";
+  }
+
+  return "macro-layout-diagnostics__state--idle";
+}
+
 export default function StrategyRail({
+  sidebarId,
   activeView,
   strategies,
   selectedStrategyId,
+  streamDiagnostics,
+  marketStatusPayload,
+  marketTimerContext,
   onOpenDashboard,
+  onOpenWatchlist,
+  onOpenSettings,
+  onOpenScreening,
   onOpenPaperTrading,
+  onOpenAdminUsers,
+  onOpenAdminAnalysisTasks,
+  onOpenAdminCatalysts,
   onSelect,
-  paperPortfolio
+  paperPortfolio,
+  screeningSummary,
+  isAdmin = false,
+  isMobile = false,
+  isOpen = true,
+  onCloseMobile = null
 }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const paperSummary = paperPortfolio?.summary ?? null;
   const paperPnL = Number(paperSummary?.profitLossValue ?? 0);
   const closedPaperPnL = Number(paperSummary?.totalClosedProfitLossValue ?? 0);
+  const screeningInsertAfterStrategyId = strategies.some((strategy) => strategy.id === "strategy-tv-finder")
+    ? "strategy-tv-finder"
+    : "strategy-1";
+  const marketTimerModel = useMemo(
+    () => buildMarketTimerModel(marketTimerContext, marketStatusPayload, nowMs),
+    [marketStatusPayload, marketTimerContext, nowMs]
+  );
+  const optionSessionEntries = useMemo(
+    () => marketTimerModel?.entries.filter((entry) => OPTION_SESSION_ENTRY_KEYS.has(entry.key)) ?? [],
+    [marketTimerModel]
+  );
+  const marketTimerEntries = useMemo(
+    () => marketTimerModel?.entries.filter((entry) => !OPTION_SESSION_ENTRY_KEYS.has(entry.key)) ?? [],
+    [marketTimerModel]
+  );
+  const underlyingMarketMonitorModels = useMemo(
+    () => buildUnderlyingMarketMonitorModels(PINNED_UNDERLYING_MARKETS, marketStatusPayload, nowMs),
+    [marketStatusPayload, nowMs]
+  );
+  const sidebarClassName = [
+    "sidebar",
+    isMobile ? "sidebar--mobile" : "",
+    !isMobile && !isOpen ? "sidebar--desktop-hidden" : "",
+    isMobile && isOpen ? "sidebar--open" : "",
+    isMobile && !isOpen ? "sidebar--hidden" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
 
   return (
-    <aside className="sidebar">
+    <aside id={sidebarId} className={sidebarClassName} aria-hidden={!isOpen}>
+      {isMobile ? (
+        <div className="sidebar__mobile-bar">
+          <span className="brand__eyebrow">Navigation</span>
+          <button type="button" className="sidebar-close" onClick={onCloseMobile}>
+            Hide sidebar
+          </button>
+        </div>
+      ) : null}
+
       <div className="brand">
         <span className="brand__eyebrow">Hedge strategy desk</span>
         <h1>HedgeHub</h1>
@@ -22,13 +122,147 @@ export default function StrategyRail({
       </div>
 
       <div className="sidebar__section">
-        <button
-          type="button"
-          className={`dashboard-button ${activeView === "dashboard" ? "dashboard-button--active" : ""}`}
-          onClick={onOpenDashboard}
-        >
-          Dashboard
-        </button>
+        <div className="sidebar-primary-nav">
+          {marketTimerModel || underlyingMarketMonitorModels.length ? (
+            <div className="macro-layout-diagnostics sidebar-market-timers sidebar-underlying-monitor">
+              {marketTimerModel ? (
+                <>
+                  <div className="sidebar-market-timers__header">
+                    <span className="brand__eyebrow">Market timers</span>
+                  </div>
+
+                  <div className="sidebar-market-timers__list">
+                    {optionSessionEntries.length ? (
+                      <div
+                        className="macro-layout-diagnostics__row sidebar-market-timers__row sidebar-market-timers__row--combined"
+                      >
+                        <span className="macro-layout-diagnostics__label sidebar-market-timers__label">Option</span>
+                        <div className="sidebar-market-timers__combined-states">
+                          {optionSessionEntries.map((entry) => (
+                            <span key={entry.key} className="sidebar-market-timers__combined-state">
+                              <span className="sidebar-market-timers__combined-label">
+                                {entry.label.replace(/^Option\s+/u, "")}
+                              </span>
+                              <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
+                                {entry.countdown}
+                              </span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {marketTimerEntries.map((entry) => (
+                      <div
+                        key={entry.key}
+                        className="macro-layout-diagnostics__row sidebar-market-timers__row"
+                      >
+                        <span className="macro-layout-diagnostics__label sidebar-market-timers__label">{entry.label}</span>
+                        <span className={`macro-layout-diagnostics__state ${getStateToneClassName(entry.tone)}`}>
+                          {entry.countdown}
+                        </span>
+                        {entry.detail ? <span className="sidebar-market-timers__detail">{entry.detail}</span> : null}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+
+              {underlyingMarketMonitorModels.length ? (
+                <>
+                  {marketTimerModel ? <div className="sidebar-market-timers__divider" role="presentation" /> : null}
+                  <div className="sidebar-market-timers__header sidebar-market-timers__header--secondary">
+                    <span className="brand__eyebrow">Underlying markets</span>
+                  </div>
+
+                  <div className="sidebar-underlying-monitor__list">
+                    {underlyingMarketMonitorModels.map((market) => {
+                      const isOpenNow = String(market.status?.label ?? "").toLowerCase() === "open";
+
+                      return (
+                        <div
+                          key={market.key}
+                          className="macro-layout-diagnostics__row sidebar-underlying-monitor__row"
+                        >
+                          <span className="macro-layout-diagnostics__label sidebar-underlying-monitor__label">
+                            {market.title}
+                          </span>
+                          <div className="sidebar-market-timers__combined-states">
+                            {market.open ? (
+                              <span className="sidebar-market-timers__combined-state">
+                                <span
+                                  className={`macro-layout-diagnostics__state ${getStateToneClassName(isOpenNow ? "live" : market.open.tone)}`}
+                                >
+                                  {isOpenNow ? "OPEN" : market.open.countdown}
+                                </span>
+                              </span>
+                            ) : null}
+                            {market.close ? (
+                              <span className="sidebar-market-timers__combined-state">
+                                <span className={`macro-layout-diagnostics__state ${getStateToneClassName(market.close.tone)}`}>
+                                  {market.close.countdown}
+                                </span>
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            className={`dashboard-button ${activeView === "dashboard" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenDashboard}
+          >
+            Dashboard
+          </button>
+          <button
+            type="button"
+            className={`dashboard-button ${activeView === "watchlist" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenWatchlist}
+          >
+            Watchlist
+          </button>
+          <button
+            type="button"
+            className={`dashboard-button ${activeView === "settings" ? "dashboard-button--active" : ""}`}
+            onClick={onOpenSettings}
+          >
+            Strategy settings
+          </button>
+          {isAdmin ? (
+            <button
+              type="button"
+              className={`dashboard-button ${activeView === "admin-users" ? "dashboard-button--active" : ""}`}
+              onClick={onOpenAdminUsers}
+            >
+              User admin
+            </button>
+          ) : null}
+          {isAdmin ? (
+            <button
+              type="button"
+              className={`dashboard-button ${activeView === "admin-analysis-tasks" ? "dashboard-button--active" : ""}`}
+              onClick={onOpenAdminAnalysisTasks}
+            >
+              Analysis tasks
+            </button>
+          ) : null}
+          {isAdmin ? (
+            <button
+              type="button"
+              className={`dashboard-button ${activeView === "admin-catalysts" ? "dashboard-button--active" : ""}`}
+              onClick={onOpenAdminCatalysts}
+            >
+              Catalysts
+            </button>
+          ) : null}
+        </div>
 
         <div className="section-heading">
           <span>Strategies</span>
@@ -36,10 +270,9 @@ export default function StrategyRail({
         </div>
 
         <div className="strategy-list">
-          {strategies.map((strategy) => {
+          {strategies.flatMap((strategy) => {
             const isActive = activeView === "strategy" && strategy.id === selectedStrategyId;
-
-            return (
+            const cards = [
               <button
                 key={strategy.id}
                 type="button"
@@ -52,10 +285,31 @@ export default function StrategyRail({
                     {strategy.status}
                   </span>
                 </div>
-                <div className="strategy-card__asset">{strategy.assetLabel}</div>
+                {strategy.assetLabel ? <div className="strategy-card__asset">{strategy.assetLabel}</div> : null}
                 <p>{strategy.description}</p>
               </button>
-            );
+            ];
+
+            if (strategy.id === screeningInsertAfterStrategyId) {
+              cards.push(
+                <button
+                  key="screening-v2"
+                  type="button"
+                  className={`sidebar-nav-card ${activeView === "screening" ? "sidebar-nav-card--active" : ""}`}
+                  onClick={onOpenScreening}
+                >
+                  <div className="strategy-card__topline">
+                    <span className="strategy-card__name">Probability Mismatch</span>
+                    <span className={`pill ${(screeningSummary?.executableEdges ?? 0) > 0 ? "pill--live" : "pill--ghost"}`}>
+                      {screeningSummary?.executableEdges ?? 0} live
+                    </span>
+                  </div>
+                  <p>Rank probability mismatch trades by execution quality, liquidity, and hedge strength.</p>
+                </button>
+              );
+            }
+
+            return cards;
           })}
         </div>
       </div>

@@ -1,0 +1,333 @@
+/* Admin > Analysis tasks > AI schedule templates. Builds on the shared admin-users__* classes and theme variables. */
+.ai-templates__header h3 {
+  margin: 0;
+}
+
+.ai-templates__lede {
+  margin: 6px 0 0;
+  max-width: 76ch;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.ai-templates__howto,
+.ai-templates__options {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--button-border);
+  background: var(--surface-muted);
+}
+
+.ai-templates__howto summary,
+.ai-templates__options summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.ai-templates__howto ol {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 2px;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.ai-templates__howto li strong {
+  color: var(--text);
+}
+
+.ai-templates code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.ai-templates__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 250px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  margin-top: 16px;
+}
+
+.ai-templates__list {
+  display: grid;
+  gap: 14px;
+}
+
+.ai-templates__group h4 {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ai-templates__item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-templates__item:hover {
+  background: var(--button-hover);
+}
+
+.ai-templates__item[aria-pressed="true"] {
+  background: var(--active-bg);
+  border-color: var(--active-border);
+}
+
+.ai-templates__item:focus-visible,
+.ai-templates__howto summary:focus-visible,
+.ai-templates__options summary:focus-visible {
+  outline: 2px solid var(--active-border);
+  outline-offset: 2px;
+}
+
+.ai-templates__detail {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ai-templates__detail h4 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+.ai-templates__summary {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.ai-templates__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.ai-templates__chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--button-border);
+  background: var(--surface-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.ai-templates__chip--time {
+  border-color: var(--active-border);
+  background: var(--active-bg);
+}
+
+.ai-templates__zone,
+.ai-templates__note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.ai-templates__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.ai-templates__options .ai-templates__fields {
+  margin-top: 12px;
+}
+
+.ai-templates__field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-width: 0;
+}
+
+.ai-templates__field--wide {
+  grid-column: 1 / -1;
+}
+
+.ai-templates__field label,
+.ai-templates__multi legend {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.ai-templates__multi {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ai-templates__multi legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.ai-templates__checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.admin-users__form label.ai-templates__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ai-templates__check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--sky, #38bdf8);
+}
+
+.ai-templates textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--button-border);
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.ai-templates__field [aria-invalid="true"] {
+  border-color: rgba(251, 113, 133, 0.7);
+}
+
+.ai-templates__help {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.ai-templates__error {
+  color: var(--rose, #fb7185);
+  font-size: 0.8rem;
+}
+
+.ai-templates__error--unfilled {
+  color: var(--amber, #f59e0b);
+}
+
+.ai-templates__prompt {
+  display: grid;
+  gap: 6px;
+}
+
+.ai-templates__prompt-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-templates__prompt-head label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* Sits between the "Prompt to paste" label and the character count. */
+.ai-templates__prompt-head .ai-templates__language {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 0.8rem;
+}
+
+.ai-templates .ai-templates__language select {
+  width: auto;
+  min-width: 0;
+  padding: 2px 6px;
+  font-size: 0.8rem;
+}
+
+.ai-templates .ai-templates__preview {
+  min-height: 300px;
+  background: var(--input-bg-strong);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.ai-templates__tips {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* Long prompts in the definitions list: show the first lines, expand on click. */
+.admin-tasks__prompt summary {
+  cursor: pointer;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.admin-tasks__prompt pre {
+  margin: 8px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--button-border);
+  background: var(--input-bg-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.workspace--admin-analysis-tasks .admin-users__form textarea {
+  padding: 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--button-border);
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+@media (max-width: 900px) {
+  .ai-templates__layout {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-templates__list {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+}

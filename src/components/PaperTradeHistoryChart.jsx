@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getChartPalette } from "../theme.js";
 
 function formatCurrency(value, digits = 2) {
   if (value == null || Number.isNaN(Number(value))) {
@@ -67,11 +68,12 @@ function buildTickValues(minValue, maxValue, count = 5) {
   return Array.from({ length: count }, (_value, index) => minValue + (step * index));
 }
 
-export default function PaperTradeHistoryChart({ history }) {
+export default function PaperTradeHistoryChart({ history, theme = "dark" }) {
   const containerRef = useRef(null);
   const [chartWidth, setChartWidth] = useState(0);
   const [activeIndex, setActiveIndex] = useState(null);
   const candles = history?.candles ?? [];
+  const chartTheme = getChartPalette(theme);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -167,14 +169,14 @@ export default function PaperTradeHistoryChart({ history }) {
                   x2={width - margin.right}
                   y1={y}
                   y2={y}
-                  stroke={isZeroLine ? "rgba(56, 189, 248, 0.36)" : "rgba(148, 163, 184, 0.12)"}
+                  stroke={isZeroLine ? chartTheme.historyZeroGrid : chartTheme.historyGrid}
                   strokeDasharray={isZeroLine ? "0" : "4 6"}
                 />
                 <text
                   x={margin.left - 12}
                   y={y + 4}
                   textAnchor="end"
-                  fill="rgba(209, 212, 220, 0.68)"
+                  fill={chartTheme.historyAxis}
                   fontSize="11"
                 >
                   {formatCurrency(tick)}
@@ -188,7 +190,7 @@ export default function PaperTradeHistoryChart({ history }) {
             x2={width - margin.right}
             y1={zeroY}
             y2={zeroY}
-            stroke="rgba(56, 189, 248, 0.28)"
+            stroke={chartTheme.historyZeroLine}
             strokeWidth="1.1"
           />
 
@@ -201,8 +203,8 @@ export default function PaperTradeHistoryChart({ history }) {
             const bodyTop = Math.min(openY, closeY);
             const bodyHeight = Math.max(Math.abs(closeY - openY), 2);
             const rising = candle.close >= candle.open;
-            const bodyFill = rising ? "rgba(52, 211, 153, 0.78)" : "rgba(251, 113, 133, 0.72)";
-            const wickStroke = rising ? "rgba(52, 211, 153, 0.94)" : "rgba(251, 113, 133, 0.92)";
+            const bodyFill = rising ? chartTheme.historyCandleUp : chartTheme.historyCandleDown;
+            const wickStroke = rising ? chartTheme.historyCandleUpStroke : chartTheme.historyCandleDownStroke;
 
             return (
               <g
@@ -245,7 +247,7 @@ export default function PaperTradeHistoryChart({ history }) {
                 x={xForIndex(index)}
                 y={height - 10}
                 textAnchor="middle"
-                fill="rgba(209, 212, 220, 0.68)"
+                fill={chartTheme.historyAxis}
                 fontSize="11"
               >
                 {formatHourLabel(candle.bucketStart)}

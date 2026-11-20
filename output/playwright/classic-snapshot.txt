@@ -1,0 +1,27 @@
+### Open tabs
+- 0: [HedgeHub](http://127.0.0.1:5188/builder?demo=1)
+- 1: (current) [HedgeHub](http://127.0.0.1:5188/)
+### Page
+- Page URL: http://127.0.0.1:5188/
+- Page Title: HedgeHub
+- Console: 2 errors, 0 warnings
+### Snapshot
+```yaml
+- generic [ref=e5]:
+  - banner [ref=e6]:
+    - generic [ref=e7]: HedgeHub
+    - heading "Sign in" [level=1] [ref=e8]
+    - paragraph [ref=e9]: Sign in to access your IBKR settings and trading records.
+  - generic [ref=e10]:
+    - generic [ref=e11]:
+      - generic [ref=e12]: Username
+      - textbox "Username" [ref=e13]:
+        - /placeholder: admin
+    - generic [ref=e14]:
+      - generic [ref=e15]: Password
+      - textbox "Password" [ref=e16]:
+        - /placeholder: Your password
+    - button "Sign in" [disabled] [ref=e17]
+```
+### Events
+- New console entries: .playwright-cli/console-2026-10-10T17-01-50-775Z.log#L2-L3

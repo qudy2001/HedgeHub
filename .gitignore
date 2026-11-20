@@ -3,9 +3,16 @@ dist
 /data/
 /dashboards/
 /logs/
+/tmp/
 *.log
 *.pid
 .env
 .env.app
 .env.local
+docker-compose.override.yml
 .DS_Store
+/vendor/clientportal.gw/
+.venv-tiger/
+__pycache__/
+/Tiger_Accounts/
+/TradingAgents/

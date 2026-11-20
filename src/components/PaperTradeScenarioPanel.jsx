@@ -9,15 +9,29 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import ScenarioHeatmap from "./ScenarioHeatmap.jsx";
+import ScenarioHeatmap, { buildScenarioHeatmapSnapshot } from "./ScenarioHeatmap.jsx";
+import { getChartPalette } from "../theme.js";
+import {
+  buildTradingDateRange,
+  coerceToTradingDate,
+  countTradingDaysBetween,
+  tradingDaysToYears
+} from "../tradingCalendar.js";
+import {
+  evaluatePolymarketSignalHit,
+  projectPolymarketTargetProxySpot,
+  resolvePolymarketSignal
+} from "../../shared/polymarketSignals.js";
+import { buildDynamicHedgePlan, inferStraddleContractCount } from "../../shared/hedgeEngine.js";
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
 function normalCdf(x) {
-  const sign = x >= 0 ? 1 : -1;
-  const absX = Math.abs(x);
+  const scaledX = x / Math.SQRT2;
+  const sign = scaledX >= 0 ? 1 : -1;
+  const absX = Math.abs(scaledX);
   const a1 = 0.254829592;
   const a2 = -0.284496736;
   const a3 = 1.421413741;
@@ -55,6 +69,116 @@ function blackScholesPrice({ type, spot, strike, timeYears, volatility, riskFree
   return spot * normalCdf(d1) - discountedStrike * normalCdf(d2);
 }
 
+function blackScholesDelta({ type, spot, strike, timeYears, volatility, riskFreeRate }) {
+  if (!(spot > 0) || !(strike > 0)) {
+    return 0;
+  }
+
+  if (timeYears <= 0 || volatility <= 0) {
+    if (type === "put") {
+      return spot < strike ? -1 : 0;
+    }
+
+    return spot > strike ? 1 : 0;
+  }
+
+  const sqrtT = Math.sqrt(timeYears);
+  const d1 =
+    (Math.log(spot / strike) + (riskFreeRate + 0.5 * volatility * volatility) * timeYears) /
+    (volatility * sqrtT);
+  const cdfD1 = normalCdf(d1);
+
+  return type === "put" ? cdfD1 - 1 : cdfD1;
+}
+
+function solveImpliedVolatility({
+  type,
+  spot,
+  strike,
+  timeYears,
+  riskFreeRate,
+  optionPrice,
+  minVolatility = 0.0001,
+  maxVolatility = 3
+}) {
+  const price = Number(optionPrice);
+  if (!Number.isFinite(price) || price <= 0) {
+    return null;
+  }
+
+  const numericSpot = Number(spot);
+  const numericStrike = Number(strike);
+  const numericTimeYears = Number(timeYears);
+  const numericRate = Number(riskFreeRate);
+
+  if (!(numericSpot > 0) || !(numericStrike > 0) || !(numericTimeYears > 0)) {
+    return null;
+  }
+
+  const intrinsic =
+    type === "put"
+      ? Math.max(numericStrike - numericSpot, 0)
+      : Math.max(numericSpot - numericStrike, 0);
+  const targetPrice = Math.max(price, intrinsic);
+
+  let low = minVolatility;
+  let high = maxVolatility;
+  let lowPrice = blackScholesPrice({
+    type,
+    spot: numericSpot,
+    strike: numericStrike,
+    timeYears: numericTimeYears,
+    volatility: low,
+    riskFreeRate: Number.isFinite(numericRate) ? numericRate : 0
+  });
+  let highPrice = blackScholesPrice({
+    type,
+    spot: numericSpot,
+    strike: numericStrike,
+    timeYears: numericTimeYears,
+    volatility: high,
+    riskFreeRate: Number.isFinite(numericRate) ? numericRate : 0
+  });
+
+  if (targetPrice <= lowPrice) {
+    return low;
+  }
+
+  if (targetPrice >= highPrice) {
+    return high;
+  }
+
+  for (let iteration = 0; iteration < 64; iteration += 1) {
+    const mid = (low + high) / 2;
+    const midPrice = blackScholesPrice({
+      type,
+      spot: numericSpot,
+      strike: numericStrike,
+      timeYears: numericTimeYears,
+      volatility: mid,
+      riskFreeRate: Number.isFinite(numericRate) ? numericRate : 0
+    });
+
+    if (!Number.isFinite(midPrice)) {
+      break;
+    }
+
+    if (midPrice > targetPrice) {
+      high = mid;
+      highPrice = midPrice;
+    } else {
+      low = mid;
+      lowPrice = midPrice;
+    }
+  }
+
+  if (!Number.isFinite(lowPrice) || !Number.isFinite(highPrice)) {
+    return null;
+  }
+
+  return (low + high) / 2;
+}
+
 function binaryCallPrice({ spot, strike, timeYears, volatility, riskFreeRate }) {
   if (timeYears <= 0 || spot <= 0 || strike <= 0 || volatility <= 0) {
     return spot >= strike ? 1 : 0;
@@ -66,6 +190,19 @@ function binaryCallPrice({ spot, strike, timeYears, volatility, riskFreeRate }) 
     (volatility * sqrtT);
 
   return Math.exp(-riskFreeRate * timeYears) * normalCdf(d2);
+}
+
+function binaryPutPrice({ spot, strike, timeYears, volatility, riskFreeRate }) {
+  if (timeYears <= 0 || spot <= 0 || strike <= 0 || volatility <= 0) {
+    return spot <= strike ? 1 : 0;
+  }
+
+  const sqrtT = Math.sqrt(timeYears);
+  const d2 =
+    (Math.log(spot / strike) + (riskFreeRate - 0.5 * volatility * volatility) * timeYears) /
+    (volatility * sqrtT);
+
+  return Math.exp(-riskFreeRate * timeYears) * normalCdf(-d2);
 }
 
 function clampProbability(value) {
@@ -158,6 +295,44 @@ function formatNumber(value, digits = 2) {
   }
 
   return Number(value).toFixed(digits);
+}
+
+function getPolymarketEventUrl(url) {
+  const normalizedUrl = String(url ?? "").trim();
+  return normalizedUrl.startsWith("https://polymarket.com/event/") ? normalizedUrl : "";
+}
+
+function derivePolymarketEventSlug(url) {
+  const eventUrl = getPolymarketEventUrl(url);
+  if (!eventUrl) {
+    return "";
+  }
+
+  const match = eventUrl.match(/^https:\/\/polymarket\.com\/event\/([^/?#]+)/i);
+  return match?.[1] ?? "";
+}
+
+function buildPolymarketReferenceLine({ marketId, marketSlug, eventSlug, url, source }) {
+  const parts = [];
+  const derivedEventSlug = eventSlug || derivePolymarketEventSlug(url);
+
+  if (marketId) {
+    parts.push(`ID ${marketId}`);
+  }
+
+  if (marketSlug) {
+    parts.push(`slug ${marketSlug}`);
+  }
+
+  if (derivedEventSlug) {
+    parts.push(`event ${derivedEventSlug}`);
+  }
+
+  if (parts.length) {
+    return parts.join(" · ");
+  }
+
+  return source === "seed" ? "Seed fallback market · no live slug/event yet" : "";
 }
 
 function formatDateLabel(value) {
@@ -308,17 +483,19 @@ function estimatePolymarketYesPrice({
   riskFreeRate,
   marketReferenceYesPrice,
   currentSpot,
-  currentTimeYears
+  currentTimeYears,
+  signalDirection = "up"
 }) {
   if (timeYears < 0) {
-    return spot >= strike ? 1 : 0;
+    return signalDirection === "down" ? (spot <= strike ? 1 : 0) : (spot >= strike ? 1 : 0);
   }
 
-  const effectiveTimeYears = Math.max(timeYears, 1 / 365);
-  const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 365);
+  const effectiveTimeYears = Math.max(timeYears, 1 / 252);
+  const effectiveCurrentTimeYears = Math.max(currentTimeYears, 1 / 252);
+  const binaryPriceFunction = signalDirection === "down" ? binaryPutPrice : binaryCallPrice;
   const rawEstimatedYesPrice =
     strike > 0 && spot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot,
           strike,
           timeYears: effectiveTimeYears,
@@ -328,7 +505,7 @@ function estimatePolymarketYesPrice({
       : marketReferenceYesPrice;
   const currentModeledYesPrice =
     strike > 0 && currentSpot > 0
-      ? binaryCallPrice({
+      ? binaryPriceFunction({
           spot: currentSpot,
           strike,
           timeYears: effectiveCurrentTimeYears,
@@ -355,6 +532,8 @@ function estimatePolymarketYesPrice({
 
 function serializeScenarioOrder(order) {
   return {
+    strategyId: order.strategyId,
+    strategyName: order.strategyName,
     id: order.id,
     combinationLabel: order.combinationLabel,
     assetLabel: order.assetLabel,
@@ -363,6 +542,9 @@ function serializeScenarioOrder(order) {
     createdAt: order.createdAt,
     closedAt: order.closedAt,
     status: order.status,
+    polymarketMarketId: order.polymarketMarketId ?? "",
+    polymarketMarketSlug: order.polymarketMarketSlug ?? "",
+    polymarketEventSlug: order.polymarketEventSlug ?? "",
     polymarketQuestion: order.polymarketQuestion,
     polymarketUrl: order.polymarketUrl,
     strategyCloseDate: order.strategyCloseDate,
@@ -375,15 +557,23 @@ function serializeScenarioOrder(order) {
       currentUnderlyingSpot: Number(order.valuationContext?.currentUnderlyingSpot ?? 0),
       conversionRatio: Number(order.valuationContext?.conversionRatio ?? 0),
       targetUnderlyingValue: Number(order.valuationContext?.targetUnderlyingValue ?? 0),
+      polymarketDirection: order.marketContext?.polymarketDirection ?? order.valuationContext?.polymarketDirection ?? "up",
+      polymarketTriggerType: order.marketContext?.polymarketTriggerType ?? order.valuationContext?.polymarketTriggerType ?? "touch",
       currentYesPrice: Number(order.valuationContext?.currentYesPrice ?? 0.5)
     },
     legs: (order.legs ?? []).map((leg) => ({
       id: leg.id,
       label: leg.label,
       kind: leg.kind,
+      status: leg.status ?? null,
       action: leg.action,
       quantity: Number(leg.quantity ?? 0),
       entryPrice: Number(leg.entryPrice ?? 0),
+      closedAt: leg.closedAt ?? null,
+      closedDate: leg.closedDate ?? null,
+      closedPrice: Number.isFinite(Number(leg.closedPrice)) ? Number(leg.closedPrice) : null,
+      profitLossValue: Number(leg.profitLossValue ?? 0),
+      polymarketMarketId: leg.polymarketMarketId ?? "",
       contractMultiplier: Number(leg.contractMultiplier ?? 100),
       optionType: leg.optionType ?? null,
       expiry: leg.expiry ?? "",
@@ -399,6 +589,23 @@ function serializeScenarioOrder(order) {
   };
 }
 
+function inferScenarioLegStatus(leg) {
+  const explicit = String(leg?.status ?? "").trim().toLowerCase();
+  if (explicit === "closed" || explicit === "open") {
+    return explicit;
+  }
+
+  if (leg?.closedAt || leg?.closedDate || leg?.closedPrice != null) {
+    return "closed";
+  }
+
+  return "open";
+}
+
+function isScenarioLegClosed(leg) {
+  return inferScenarioLegStatus(leg) === "closed";
+}
+
 function buildDefaultControls(order, referenceTimestamp, snapshotControls = null) {
   const strategyCloseDate =
     minIsoDate([order.polymarketResolutionDate, ...(order.legs ?? []).map((leg) => leg.expiry)]) ||
@@ -407,8 +614,88 @@ function buildDefaultControls(order, referenceTimestamp, snapshotControls = null
     referenceTimestamp?.slice(0, 10) ||
     new Date().toISOString().slice(0, 10);
   const marketDate = referenceTimestamp?.slice(0, 10) || order.purchaseDate || new Date().toISOString().slice(0, 10);
-  const defaultVolatility =
-    ((order.legs ?? []).find((leg) => leg.kind === "option")?.impliedVolatility ?? 0.24) * 100;
+  const optionLegs = (order.legs ?? []).filter((leg) => leg.kind === "option");
+  const referenceSpot =
+    Number(snapshotControls?.underlyingPrice ?? order.valuationContext?.currentProxySpot ?? 0) ||
+    Number(order.valuationContext?.currentUnderlyingSpot ?? 0) ||
+    0;
+  const fallbackVolatility =
+    Number(optionLegs.find((leg) => Number(leg?.impliedVolatility ?? 0) > 0)?.impliedVolatility ?? 0) || 0.24;
+  const impliedVolCandidates = [];
+  const callVolCandidates = [];
+  const putVolCandidates = [];
+
+  const pickCalibrationPrice = (leg) => {
+    const bid = Number(leg?.bid ?? NaN);
+    const ask = Number(leg?.ask ?? NaN);
+    if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+      return (bid + ask) / 2;
+    }
+
+    const currentPrice = Number(leg?.currentPrice ?? NaN);
+    if (Number.isFinite(currentPrice) && currentPrice > 0) {
+      return currentPrice;
+    }
+
+    const entryPrice = Math.abs(Number(leg?.entryPrice ?? NaN));
+    if (Number.isFinite(entryPrice) && entryPrice > 0) {
+      return entryPrice;
+    }
+
+    return null;
+  };
+
+  optionLegs.forEach((leg) => {
+    const type = String(leg.optionType ?? "call").trim().toLowerCase() === "put" ? "put" : "call";
+    const strike = Number(leg.strike ?? 0);
+    const optionPrice = pickCalibrationPrice(leg);
+    if (!(optionPrice > 0) || !(strike > 0) || !(referenceSpot > 0) || !leg.expiry) {
+      return;
+    }
+
+    const remainingDays = countTradingDaysBetween(marketDate, leg.expiry, {
+      includeStart: false,
+      includeEnd: true
+    });
+    const timeYears = Math.max(tradingDaysToYears(remainingDays), 1 / 252);
+    const riskFreeRate = Number(leg.riskFreeRate ?? 0.0425) || 0.0425;
+    const solved = solveImpliedVolatility({
+      type,
+      spot: referenceSpot,
+      strike,
+      timeYears,
+      riskFreeRate,
+      optionPrice
+    });
+
+    if (solved == null) {
+      return;
+    }
+
+    impliedVolCandidates.push(solved);
+    if (type === "put") {
+      putVolCandidates.push(solved);
+    } else {
+      callVolCandidates.push(solved);
+    }
+  });
+
+  const averageOrNull = (values) => {
+    const numericValues = values.filter((value) => Number.isFinite(Number(value)) && Number(value) > 0);
+    if (!numericValues.length) {
+      return null;
+    }
+
+    return numericValues.reduce((sum, value) => sum + Number(value), 0) / numericValues.length;
+  };
+
+  const baseVolatility = averageOrNull(impliedVolCandidates) ?? fallbackVolatility;
+  const putVolatility = averageOrNull(putVolCandidates) ?? baseVolatility * 1.2;
+  const callVolatility = averageOrNull(callVolCandidates) ?? baseVolatility * 0.9;
+
+  const defaultVolatility = baseVolatility * 100;
+  const defaultPutVolatility = putVolatility * 100;
+  const defaultCallVolatility = callVolatility * 100;
 
   return {
     valuationDate:
@@ -417,19 +704,393 @@ function buildDefaultControls(order, referenceTimestamp, snapshotControls = null
     underlyingPrice:
       snapshotControls?.underlyingPrice ??
       String(Number(order.valuationContext?.currentProxySpot ?? 0) || 0),
-    impliedVolatility: snapshotControls?.impliedVolatility ?? String(Number(defaultVolatility.toFixed(2)))
+    impliedVolatility: snapshotControls?.impliedVolatility ?? String(Number(defaultVolatility.toFixed(2))),
+    ivPut: snapshotControls?.ivPut ?? String(Number(defaultPutVolatility.toFixed(2))),
+    ivCall: snapshotControls?.ivCall ?? String(Number(defaultCallVolatility.toFixed(2))),
+    polymarketYesPrice: snapshotControls?.polymarketYesPrice ?? ""
+  };
+}
+
+function buildLiveHeatmapScenario(order, lastUpdated) {
+  const scenarioOrder = serializeScenarioOrder(order);
+  const controls = buildDefaultControls(order, lastUpdated);
+  const allLegs = Array.isArray(scenarioOrder.legs) ? scenarioOrder.legs : [];
+  const optionLegs = allLegs.filter((leg) => leg.kind === "option");
+  const polymarketLegs = allLegs.filter((leg) => leg.kind === "binary");
+  const stockLegs = allLegs.filter((leg) => leg.kind === "stock");
+  const openOptionLegs = optionLegs.filter((leg) => !isScenarioLegClosed(leg));
+  const strategyCloseDate =
+    minIsoDate([scenarioOrder.polymarketResolutionDate, ...openOptionLegs.map((leg) => leg.expiry)]) ||
+    scenarioOrder.strategyCloseDate ||
+    scenarioOrder.polymarketResolutionDate ||
+    lastUpdated?.slice(0, 10) ||
+    new Date().toISOString().slice(0, 10);
+  const marketDate =
+    (scenarioOrder.status === "closed" ? scenarioOrder.closedAt?.slice(0, 10) : null) ||
+    lastUpdated?.slice(0, 10) ||
+    strategyCloseDate;
+  const valuationMinBaseDate = marketDate <= strategyCloseDate ? marketDate : strategyCloseDate;
+  const valuationDateOptions = buildTradingDateRange(valuationMinBaseDate, strategyCloseDate);
+  const valuationMinDate = valuationDateOptions[0] ?? valuationMinBaseDate;
+  const valuationMaxDate = valuationDateOptions[valuationDateOptions.length - 1] ?? strategyCloseDate;
+  const valuationDate = coerceToTradingDate(
+    clampIsoDate(controls.valuationDate, valuationMinDate, valuationMaxDate),
+    valuationDateOptions.length ? valuationDateOptions : [valuationMaxDate].filter(Boolean),
+    "previous"
+  );
+  const currentProxySpot = Number(scenarioOrder.valuationContext?.currentProxySpot ?? 0);
+  const currentUnderlyingSpot = Number(scenarioOrder.valuationContext?.currentUnderlyingSpot ?? 0);
+  const converterRatio =
+    Number(scenarioOrder.valuationContext?.conversionRatio ?? 0) ||
+    (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
+  const polymarketSignal = resolvePolymarketSignal({
+    question: scenarioOrder.polymarketQuestion,
+    targetValue: Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0) || null,
+    direction: scenarioOrder.valuationContext?.polymarketDirection,
+    triggerType: scenarioOrder.valuationContext?.polymarketTriggerType
+  });
+  const targetUnderlyingValue =
+    polymarketSignal?.targetValue ?? Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0);
+  const rawUnderlyingPrice = Number(controls.underlyingPrice ?? currentProxySpot ?? 0);
+  const impliedVolatility = Number(controls.impliedVolatility ?? 24) / 100;
+  const putVolatility = Number(controls.ivPut ?? Number(controls.impliedVolatility ?? 24) * 1.2) / 100;
+  const callVolatility = Number(controls.ivCall ?? Number(controls.impliedVolatility ?? 24) * 0.9) / 100;
+  const riskFreeRate =
+    Number(optionLegs[0]?.riskFreeRate ?? order.legs?.find((leg) => leg.kind === "option")?.riskFreeRate ?? 0.0425) || 0.0425;
+  const payoffTargetProxy = projectPolymarketTargetProxySpot({
+    targetValue: targetUnderlyingValue,
+    direction: polymarketSignal?.direction,
+    conversionRatio: converterRatio,
+    currentProxySpot: currentProxySpot || rawUnderlyingPrice
+  });
+  const payoffRange = buildPayoffEvaluationRange({
+    currentSpot: currentProxySpot || rawUnderlyingPrice,
+    targetThreshold: payoffTargetProxy,
+    optionLegs: openOptionLegs
+  });
+  const spotMin = Math.max(Number(payoffRange.start.toFixed(2)), 0.01);
+  const spotMax = Math.max(Number(payoffRange.end.toFixed(2)), spotMin + 1);
+  const spotStep = spotMax - spotMin > 250 ? 1 : 0.1;
+  const proxySpotDigits = spotStep >= 1 ? 0 : 2;
+  const underlyingPrice = clamp(
+    Number.isFinite(rawUnderlyingPrice) ? rawUnderlyingPrice : currentProxySpot || spotMin,
+    spotMin,
+    spotMax
+  );
+  const equivalentUnderlyingSpot = converterRatio > 0 ? underlyingPrice / converterRatio : underlyingPrice;
+  const actualSpotStep = determineStepFromRange(
+    converterRatio > 0 ? Math.max(Number((spotMin / converterRatio).toFixed(2)), 0.01) : spotMin,
+    converterRatio > 0 ? Math.max(Number((spotMax / converterRatio).toFixed(2)), 1) : spotMax
+  );
+  const actualSpotDigits = actualSpotStep >= 1 ? 0 : 2;
+  const proxySpotLabel = scenarioOrder.valuationContext?.proxySymbol || scenarioOrder.assetLabel || "Proxy";
+  const actualSpotLabel = formatUnderlyingLabel(
+    scenarioOrder.valuationContext?.underlyingSymbol,
+    scenarioOrder.assetLabel || "Underlying"
+  );
+  const daysToMarketResolution = countTradingDaysBetween(
+    valuationDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
+  );
+  const currentDaysToMarketResolution = countTradingDaysBetween(
+    marketDate || valuationDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
+  );
+  const currentTimeToMarketResolutionYears = tradingDaysToYears(currentDaysToMarketResolution);
+  const referenceYesLeg = polymarketLegs.find((leg) => leg.outcome === "YES") ?? null;
+  const referenceNoLeg = polymarketLegs.find((leg) => leg.outcome === "NO") ?? null;
+  const marketReferenceYesPrice = Number(
+    scenarioOrder.marketReferenceYesPrice ??
+      referenceYesLeg?.entryPrice ??
+      (referenceNoLeg ? 1 - Number(referenceNoLeg.entryPrice) : scenarioOrder.valuationContext?.currentYesPrice ?? 0.5)
+  );
+  const estimatedYesPrice = estimatePolymarketYesPrice({
+    spot: equivalentUnderlyingSpot,
+    strike: targetUnderlyingValue,
+    timeYears: tradingDaysToYears(daysToMarketResolution),
+    volatility: impliedVolatility,
+    riskFreeRate,
+    marketReferenceYesPrice,
+    currentSpot: currentUnderlyingSpot,
+    currentTimeYears: currentTimeToMarketResolutionYears,
+    signalDirection: polymarketSignal?.direction
+  });
+  const polymarketYesPriceInput = String(controls.polymarketYesPrice ?? "").trim();
+  const polymarketYesPriceManual = polymarketYesPriceInput ? Number(polymarketYesPriceInput) : null;
+  const polymarketYesPrice = clamp(
+    Number.isFinite(polymarketYesPriceManual) ? polymarketYesPriceManual : estimatedYesPrice,
+    0,
+    1
+  );
+  const resolveOptionVolatility = (leg) =>
+    String(leg.optionType ?? "call").trim().toLowerCase() === "put" ? putVolatility : callVolatility;
+  const repricedOptionLegs = optionLegs.map((leg) => {
+    const isClosed = isScenarioLegClosed(leg);
+    const contractUnits = Number(leg.quantity ?? 0) * Number(leg.contractMultiplier ?? 100);
+    const daysToExpiry = countTradingDaysBetween(valuationDate, leg.expiry, {
+      includeStart: false,
+      includeEnd: true
+    });
+    const timeYears = Math.max(tradingDaysToYears(daysToExpiry), 1 / 252);
+    const entryPrice = Number(leg.entryPrice ?? 0);
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    const resolvedClosedPrice = isClosed
+      ? (Number.isFinite(Number(leg.closedPrice))
+          ? Number(leg.closedPrice)
+          : Number.isFinite(Number(leg.currentPrice))
+            ? Number(leg.currentPrice)
+            : entryPrice)
+      : null;
+    const modelPrice = isClosed
+      ? resolvedClosedPrice
+      : blackScholesPrice({
+          type: leg.optionType,
+          spot: underlyingPrice,
+          strike: Number(leg.strike),
+          timeYears,
+          volatility: resolveOptionVolatility(leg),
+          riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+        });
+    const derivedPnL = direction * (Number(modelPrice ?? 0) - entryPrice) * contractUnits;
+    const pnl =
+      isClosed && Number.isFinite(Number(leg.profitLossValue)) ? Number(leg.profitLossValue) : derivedPnL;
+
+    return {
+      ...leg,
+      isClosed,
+      contractUnits,
+      pnl
+    };
+  });
+  const repricedPolymarketLegs = polymarketLegs.map((leg) => {
+    const isClosed = isScenarioLegClosed(leg);
+    const entryPrice = Number(leg.entryPrice ?? 0);
+    const quantity = Number(leg.quantity ?? 0);
+    const resolvedClosedPrice = isClosed
+      ? (Number.isFinite(Number(leg.closedPrice))
+          ? Number(leg.closedPrice)
+          : Number.isFinite(Number(leg.currentPrice))
+            ? Number(leg.currentPrice)
+            : entryPrice)
+      : null;
+    const modelPrice = isClosed ? resolvedClosedPrice : binaryPriceFromYes(leg.outcome, polymarketYesPrice);
+    const derivedPnL = binaryPnL({
+      action: leg.action,
+      entryPrice,
+      markPrice: Number(modelPrice ?? 0),
+      quantity
+    });
+    const pnl = isClosed && Number.isFinite(Number(leg.profitLossValue)) ? Number(leg.profitLossValue) : derivedPnL;
+
+    return {
+      ...leg,
+      isClosed,
+      pnl
+    };
+  });
+  const repricedStockLegs = stockLegs.map((leg) => {
+    const isClosed = isScenarioLegClosed(leg);
+    const entryPrice = Number(leg.entryPrice ?? 0);
+    const quantity = Number(leg.quantity ?? 0);
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    const resolvedClosedPrice = isClosed
+      ? (Number.isFinite(Number(leg.closedPrice)) ? Number(leg.closedPrice) : entryPrice)
+      : null;
+    const modelPrice = isClosed ? resolvedClosedPrice : underlyingPrice;
+    const derivedPnL = direction * (Number(modelPrice ?? 0) - entryPrice) * quantity;
+    const pnl =
+      isClosed && Number.isFinite(Number(leg.profitLossValue)) ? Number(leg.profitLossValue) : derivedPnL;
+
+    return {
+      ...leg,
+      isClosed,
+      pnl
+    };
+  });
+  const openOptionScenarioLegs = repricedOptionLegs.filter((leg) => !leg.isClosed);
+  const closedOptionPnL = repricedOptionLegs.filter((leg) => leg.isClosed).reduce((sum, leg) => sum + leg.pnl, 0);
+  const openPolymarketScenarioLegs = repricedPolymarketLegs.filter((leg) => !leg.isClosed);
+  const closedPolymarketPnL = repricedPolymarketLegs
+    .filter((leg) => leg.isClosed)
+    .reduce((sum, leg) => sum + leg.pnl, 0);
+  const openStockScenarioLegs = repricedStockLegs.filter((leg) => !leg.isClosed);
+  const closedSharesPnL = repricedStockLegs.filter((leg) => leg.isClosed).reduce((sum, leg) => sum + leg.pnl, 0);
+
+  function calculateHeatmapPnL({ spot, date }) {
+    const optionPnL = openOptionScenarioLegs.reduce((sum, leg) => {
+      const remainingDays = countTradingDaysBetween(date, leg.expiry, {
+        includeStart: false,
+        includeEnd: true
+      });
+      const optionMarkPrice =
+        remainingDays > 0
+          ? blackScholesPrice({
+              type: leg.optionType,
+              spot,
+              strike: Number(leg.strike),
+              timeYears: tradingDaysToYears(remainingDays),
+              volatility: resolveOptionVolatility(leg),
+              riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+            })
+          : leg.optionType === "put"
+            ? Math.max(Number(leg.strike) - spot, 0)
+            : Math.max(spot - Number(leg.strike), 0);
+      const pnlPerUnit =
+        leg.action === "LONG" ? optionMarkPrice - Number(leg.entryPrice ?? 0) : Number(leg.entryPrice ?? 0) - optionMarkPrice;
+
+      return sum + pnlPerUnit * leg.contractUnits;
+    }, 0) + closedOptionPnL;
+    const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
+    const remainingPolymarketDays = countTradingDaysBetween(
+      date,
+      scenarioOrder.polymarketResolutionDate,
+      {
+        includeStart: false,
+        includeEnd: true
+      }
+    );
+    const yesPrice =
+      remainingPolymarketDays > 0
+        ? estimatePolymarketYesPrice({
+            spot: settleUnderlying,
+            strike: targetUnderlyingValue,
+            timeYears: tradingDaysToYears(remainingPolymarketDays),
+            volatility: impliedVolatility,
+            riskFreeRate,
+            marketReferenceYesPrice,
+            currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
+            currentTimeYears: currentTimeToMarketResolutionYears,
+            signalDirection: polymarketSignal?.direction
+          })
+        : targetUnderlyingValue > 0
+          ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal)
+            ? 1
+            : 0
+          : marketReferenceYesPrice;
+    const binaryPnLAtDate =
+      openPolymarketScenarioLegs.reduce(
+        (sum, leg) =>
+          sum +
+          binaryPnL({
+            action: leg.action,
+            entryPrice: Number(leg.entryPrice ?? 0),
+            markPrice: binaryPriceFromYes(leg.outcome, yesPrice),
+            quantity: Number(leg.quantity ?? 0)
+          }),
+        0
+      ) + closedPolymarketPnL;
+    const sharePnLAtDate =
+      openStockScenarioLegs.reduce((sum, leg) => {
+        const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+        const quantity = Number(leg.quantity ?? 0);
+        const entryPrice = Number(leg.entryPrice ?? 0);
+        return sum + direction * (spot - entryPrice) * quantity;
+      }, 0) + closedSharesPnL;
+
+    return optionPnL + binaryPnLAtDate + sharePnLAtDate;
+  }
+
+  return {
+    valuationMinDate,
+    valuationMaxDate,
+    currentPrice: currentProxySpot || underlyingPrice,
+    impliedVolatility,
+    putVolatility,
+    callVolatility,
+    proxySpotLabel,
+    proxySpotDigits,
+    actualSpotLabel,
+    actualSpotDigits,
+    converterRatio,
+    calculateHeatmapPnL
+  };
+}
+
+export function buildPaperTradeHeatmapBenchmark(order, lastUpdated) {
+  const scenario = buildLiveHeatmapScenario(order, lastUpdated);
+
+  if (!scenario) {
+    return null;
+  }
+
+  const heatmapSnapshot = buildScenarioHeatmapSnapshot({
+    startDate: scenario.valuationMinDate,
+    endDate: scenario.valuationMaxDate,
+    currentPrice: scenario.currentPrice,
+    volatility: scenario.impliedVolatility,
+    ivAtm: scenario.impliedVolatility,
+    ivPut: scenario.putVolatility,
+    ivCall: scenario.callVolatility,
+    spotLabel: scenario.proxySpotLabel,
+    priceDigits: scenario.proxySpotDigits,
+    secondarySpotLabel: scenario.converterRatio > 0 ? scenario.actualSpotLabel : "",
+    secondaryPriceDigits: scenario.actualSpotDigits,
+    getSecondarySpot: scenario.converterRatio > 0 ? (spot) => spot / scenario.converterRatio : null,
+    rowCount: 13,
+    getCellPnL: scenario.calculateHeatmapPnL,
+    rangeMultiplier: 1
+  });
+
+  const pnlValues =
+    heatmapSnapshot?.rows
+      ?.flatMap((row) => row.cells.map((cell) => Number(cell.pnl)))
+      .filter((value) => Number.isFinite(value)) ?? [];
+
+  if (!pnlValues.length) {
+    return {
+      percentValue: null,
+      maxPositivePnl: null,
+      minNegativePnl: null
+    };
+  }
+
+  const maxPositivePnl = pnlValues.reduce((maxValue, value) => (value > maxValue ? value : maxValue), Number.NEGATIVE_INFINITY);
+  const minNegativePnl = pnlValues.reduce((minValue, value) => (value < minValue ? value : minValue), Number.POSITIVE_INFINITY);
+  const currentPnL = Number(order?.profitLossValue ?? NaN);
+  let percentValue = null;
+
+  if (Number.isFinite(currentPnL)) {
+    if (currentPnL > 0 && maxPositivePnl > 0) {
+      percentValue = (currentPnL / maxPositivePnl) * 100;
+    } else if (currentPnL < 0 && minNegativePnl < 0) {
+      percentValue = -1 * (Math.abs(currentPnL) / Math.abs(minNegativePnl)) * 100;
+    } else if (currentPnL === 0) {
+      percentValue = 0;
+    }
+  }
+
+  return {
+    percentValue,
+    maxPositivePnl: Number.isFinite(maxPositivePnl) && maxPositivePnl > 0 ? maxPositivePnl : null,
+    minNegativePnl: Number.isFinite(minNegativePnl) && minNegativePnl < 0 ? minNegativePnl : null
   };
 }
 
 export default function PaperTradeScenarioPanel({
   order,
   lastUpdated,
-  onSaveCalculatorSnapshot
+  onSaveCalculatorSnapshot,
+  refreshNonce = 0,
+  className = "",
+  defaultOpen = false,
+  theme = "dark"
 }) {
-  const [panelOpen, setPanelOpen] = useState(false);
+  const chartTheme = getChartPalette(theme);
+  const [panelOpen, setPanelOpen] = useState(defaultOpen);
   const [activeSnapshotId, setActiveSnapshotId] = useState(null);
+  const [activeSnapshotRefreshNonce, setActiveSnapshotRefreshNonce] = useState(0);
   const [controls, setControls] = useState(() => buildDefaultControls(order, lastUpdated));
   const [chartMode, setChartMode] = useState("date");
+  const [heatmapRangeMultiplier, setHeatmapRangeMultiplier] = useState(1);
+  const [heatmapRowCount, setHeatmapRowCount] = useState(13);
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [chartPanelHeight, setChartPanelHeight] = useState(null);
@@ -437,15 +1098,43 @@ export default function PaperTradeScenarioPanel({
   const sliderStackRef = useRef(null);
   const snapshots = order.calculatorSnapshots ?? [];
   const activeSnapshot =
-    snapshots.find((snapshot) => String(snapshot.id) === String(activeSnapshotId)) ?? null;
+    activeSnapshotId != null && activeSnapshotRefreshNonce === refreshNonce
+      ? snapshots.find((snapshot) => String(snapshot.id) === String(activeSnapshotId)) ?? null
+      : null;
   const scenarioOrder = activeSnapshot?.payload?.orderSnapshot ?? serializeScenarioOrder(order);
+  const scenarioPolymarketEventUrl = getPolymarketEventUrl(scenarioOrder.polymarketUrl);
+  const polymarketReferenceLine = buildPolymarketReferenceLine({
+    marketId: scenarioOrder.polymarketMarketId,
+    marketSlug: scenarioOrder.polymarketMarketSlug,
+    eventSlug: scenarioOrder.polymarketEventSlug,
+    url: scenarioOrder.polymarketUrl,
+    source: scenarioOrder.polymarketSource
+  });
 
   useEffect(() => {
     setActiveSnapshotId(null);
+    setActiveSnapshotRefreshNonce(refreshNonce);
     setControls(buildDefaultControls(order, lastUpdated));
+    setHeatmapRangeMultiplier(1);
+    setHeatmapRowCount(13);
     setFeedback(null);
     setSavingSnapshot(false);
-  }, [order.id]);
+    setPanelOpen(defaultOpen);
+  }, [defaultOpen, order.id]);
+
+  useEffect(() => {
+    if (!refreshNonce) {
+      return;
+    }
+
+    setActiveSnapshotId(null);
+    setActiveSnapshotRefreshNonce(refreshNonce);
+    setControls(buildDefaultControls(order, lastUpdated));
+    setHeatmapRangeMultiplier(1);
+    setHeatmapRowCount(13);
+    setFeedback(null);
+    setSavingSnapshot(false);
+  }, [refreshNonce]);
 
   useEffect(() => {
     if (!panelOpen || typeof window === "undefined") {
@@ -494,10 +1183,14 @@ export default function PaperTradeScenarioPanel({
     };
   }, [panelOpen, order.id, activeSnapshotId]);
 
-  const optionLegs = (scenarioOrder.legs ?? []).filter((leg) => leg.kind === "option");
-  const polymarketLegs = (scenarioOrder.legs ?? []).filter((leg) => leg.kind === "binary");
+  const allLegs = Array.isArray(scenarioOrder.legs) ? scenarioOrder.legs : [];
+  const optionLegs = allLegs.filter((leg) => leg.kind === "option");
+  const polymarketLegs = allLegs.filter((leg) => leg.kind === "binary");
+  const stockLegs = allLegs.filter((leg) => leg.kind === "stock");
+  const openOptionLegs = optionLegs.filter((leg) => !isScenarioLegClosed(leg));
+  const openStockLegs = stockLegs.filter((leg) => !isScenarioLegClosed(leg));
   const strategyCloseDate =
-    minIsoDate([scenarioOrder.polymarketResolutionDate, ...optionLegs.map((leg) => leg.expiry)]) ||
+    minIsoDate([scenarioOrder.polymarketResolutionDate, ...openOptionLegs.map((leg) => leg.expiry)]) ||
     scenarioOrder.strategyCloseDate ||
     scenarioOrder.polymarketResolutionDate ||
     lastUpdated?.slice(0, 10) ||
@@ -507,26 +1200,46 @@ export default function PaperTradeScenarioPanel({
     (scenarioOrder.status === "closed" ? scenarioOrder.closedAt?.slice(0, 10) : null) ||
     lastUpdated?.slice(0, 10) ||
     strategyCloseDate;
-  const valuationMinDate = marketDate <= strategyCloseDate ? marketDate : strategyCloseDate;
-  const valuationDate = clampIsoDate(controls.valuationDate, valuationMinDate, strategyCloseDate);
-  const maxDateOffset = Math.max(differenceInDays(valuationMinDate, strategyCloseDate), 0);
-  const currentDateOffset = clamp(differenceInDays(valuationMinDate, valuationDate), 0, maxDateOffset);
+  const valuationMinBaseDate = marketDate <= strategyCloseDate ? marketDate : strategyCloseDate;
+  const valuationDateOptions = buildTradingDateRange(valuationMinBaseDate, strategyCloseDate);
+  const valuationMinDate = valuationDateOptions[0] ?? valuationMinBaseDate;
+  const valuationMaxDate = valuationDateOptions[valuationDateOptions.length - 1] ?? strategyCloseDate;
+  const valuationDate = coerceToTradingDate(
+    clampIsoDate(controls.valuationDate, valuationMinDate, valuationMaxDate),
+    valuationDateOptions.length ? valuationDateOptions : [valuationMaxDate].filter(Boolean),
+    "previous"
+  );
+  const maxDateOffset = Math.max(valuationDateOptions.length - 1, 0);
+  const currentDateOffset = Math.max(valuationDateOptions.indexOf(valuationDate), 0);
   const currentProxySpot = Number(scenarioOrder.valuationContext?.currentProxySpot ?? 0);
   const currentUnderlyingSpot = Number(scenarioOrder.valuationContext?.currentUnderlyingSpot ?? 0);
   const converterRatio =
     Number(scenarioOrder.valuationContext?.conversionRatio ?? 0) ||
     (currentUnderlyingSpot > 0 && currentProxySpot > 0 ? currentProxySpot / currentUnderlyingSpot : 0);
-  const targetUnderlyingValue = Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0);
+  const polymarketSignal = resolvePolymarketSignal({
+    question: scenarioOrder.polymarketQuestion,
+    targetValue: Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0) || null,
+    direction: scenarioOrder.valuationContext?.polymarketDirection,
+    triggerType: scenarioOrder.valuationContext?.polymarketTriggerType
+  });
+  const targetUnderlyingValue =
+    polymarketSignal?.targetValue ?? Number(scenarioOrder.valuationContext?.targetUnderlyingValue ?? 0);
   const rawUnderlyingPrice = Number(controls.underlyingPrice ?? currentProxySpot ?? 0);
   const impliedVolatility = Number(controls.impliedVolatility ?? 24) / 100;
+  const putVolatility = Number(controls.ivPut ?? Number(controls.impliedVolatility ?? 24) * 1.2) / 100;
+  const callVolatility = Number(controls.ivCall ?? Number(controls.impliedVolatility ?? 24) * 0.9) / 100;
   const riskFreeRate =
     Number(optionLegs[0]?.riskFreeRate ?? order.legs?.find((leg) => leg.kind === "option")?.riskFreeRate ?? 0.0425) || 0.0425;
-  const payoffTargetProxy =
-    targetUnderlyingValue > 0 && converterRatio > 0 ? targetUnderlyingValue * converterRatio : targetUnderlyingValue;
+  const payoffTargetProxy = projectPolymarketTargetProxySpot({
+    targetValue: targetUnderlyingValue,
+    direction: polymarketSignal?.direction,
+    conversionRatio: converterRatio,
+    currentProxySpot: currentProxySpot || rawUnderlyingPrice
+  });
   const payoffRange = buildPayoffEvaluationRange({
     currentSpot: currentProxySpot || rawUnderlyingPrice,
     targetThreshold: payoffTargetProxy,
-    optionLegs
+    optionLegs: openOptionLegs
   });
   const spotMin = Math.max(Number(payoffRange.start.toFixed(2)), 0.01);
   const spotMax = Math.max(Number(payoffRange.end.toFixed(2)), spotMin + 1);
@@ -549,13 +1262,24 @@ export default function PaperTradeScenarioPanel({
     scenarioOrder.valuationContext?.underlyingSymbol,
     scenarioOrder.assetLabel || "Underlying"
   );
-  const daysToMarketResolution = Math.max(differenceInDays(valuationDate, scenarioOrder.polymarketResolutionDate), 0);
-  const currentDaysToMarketResolution = Math.max(
-    differenceInDays(marketDate || valuationDate, scenarioOrder.polymarketResolutionDate),
-    0
+  const daysToMarketResolution = countTradingDaysBetween(
+    valuationDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
   );
-  const timeToMarketResolutionYears = daysToMarketResolution / 365;
-  const currentTimeToMarketResolutionYears = currentDaysToMarketResolution / 365;
+  const currentDaysToMarketResolution = countTradingDaysBetween(
+    marketDate || valuationDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
+  );
+  const timeToMarketResolutionYears = tradingDaysToYears(daysToMarketResolution);
+  const currentTimeToMarketResolutionYears = tradingDaysToYears(currentDaysToMarketResolution);
   const referenceYesLeg = polymarketLegs.find((leg) => leg.outcome === "YES") ?? null;
   const referenceNoLeg = polymarketLegs.find((leg) => leg.outcome === "NO") ?? null;
   const marketReferenceYesPrice = Number(
@@ -571,36 +1295,56 @@ export default function PaperTradeScenarioPanel({
     riskFreeRate,
     marketReferenceYesPrice,
     currentSpot: currentUnderlyingSpot,
-    currentTimeYears: currentTimeToMarketResolutionYears
+    currentTimeYears: currentTimeToMarketResolutionYears,
+    signalDirection: polymarketSignal?.direction
   });
+  const polymarketYesPriceInput = String(controls.polymarketYesPrice ?? "").trim();
+  const polymarketYesPriceManual = polymarketYesPriceInput ? Number(polymarketYesPriceInput) : null;
+  const polymarketYesPrice = clamp(
+    Number.isFinite(polymarketYesPriceManual) ? polymarketYesPriceManual : estimatedYesPrice,
+    0,
+    1
+  );
+
+  const resolveOptionVolatility = (leg) =>
+    String(leg.optionType ?? "call").trim().toLowerCase() === "put" ? putVolatility : callVolatility;
 
   const repricedOptionLegs = optionLegs.map((leg) => {
+    const isClosed = isScenarioLegClosed(leg);
     const contractUnits = Number(leg.quantity ?? 0) * Number(leg.contractMultiplier ?? 100);
-    const daysToExpiry = Math.max(
-      Math.round(
-        (new Date(`${leg.expiry}T00:00:00.000Z`).getTime() -
-          new Date(`${valuationDate}T00:00:00.000Z`).getTime()) /
-          (24 * 60 * 60 * 1000)
-      ),
-      0
-    );
-    const timeYears = Math.max(daysToExpiry / 365, 1 / 365);
-    const modelPrice = blackScholesPrice({
-      type: leg.optionType,
-      spot: underlyingPrice,
-      strike: Number(leg.strike),
-      timeYears,
-      volatility: impliedVolatility,
-      riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+    const daysToExpiry = countTradingDaysBetween(valuationDate, leg.expiry, {
+      includeStart: false,
+      includeEnd: true
     });
+    const timeYears = Math.max(tradingDaysToYears(daysToExpiry), 1 / 252);
     const entryPrice = Number(leg.entryPrice ?? 0);
-    const pnlPerUnit = leg.action === "LONG" ? modelPrice - entryPrice : entryPrice - modelPrice;
-    const pnl = pnlPerUnit * contractUnits;
-    const markValue = (leg.action === "LONG" ? 1 : -1) * modelPrice * contractUnits;
-    const entryValue = (leg.action === "LONG" ? 1 : -1) * entryPrice * contractUnits;
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    const resolvedClosedPrice = isClosed
+      ? (Number.isFinite(Number(leg.closedPrice))
+          ? Number(leg.closedPrice)
+          : Number.isFinite(Number(leg.currentPrice))
+            ? Number(leg.currentPrice)
+            : entryPrice)
+      : null;
+    const modelPrice = isClosed
+      ? resolvedClosedPrice
+      : blackScholesPrice({
+          type: leg.optionType,
+          spot: underlyingPrice,
+          strike: Number(leg.strike),
+          timeYears,
+          volatility: resolveOptionVolatility(leg),
+          riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+        });
+    const derivedPnL = direction * (Number(modelPrice ?? 0) - entryPrice) * contractUnits;
+    const pnl =
+      isClosed && Number.isFinite(Number(leg.profitLossValue)) ? Number(leg.profitLossValue) : derivedPnL;
+    const entryValue = direction * entryPrice * contractUnits;
+    const markValue = isClosed ? entryValue + pnl : direction * Number(modelPrice ?? 0) * contractUnits;
 
     return {
       ...leg,
+      isClosed,
       contractUnits,
       modelPrice,
       daysToExpiry,
@@ -611,20 +1355,56 @@ export default function PaperTradeScenarioPanel({
   });
 
   const repricedPolymarketLegs = polymarketLegs.map((leg) => {
+    const isClosed = isScenarioLegClosed(leg);
     const entryPrice = Number(leg.entryPrice ?? 0);
     const quantity = Number(leg.quantity ?? 0);
-    const modelPrice = binaryPriceFromYes(leg.outcome, estimatedYesPrice);
-    const pnl = binaryPnL({
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    const resolvedClosedPrice = isClosed
+      ? (Number.isFinite(Number(leg.closedPrice))
+          ? Number(leg.closedPrice)
+          : Number.isFinite(Number(leg.currentPrice))
+            ? Number(leg.currentPrice)
+            : entryPrice)
+      : null;
+    const modelPrice = isClosed ? resolvedClosedPrice : binaryPriceFromYes(leg.outcome, polymarketYesPrice);
+    const derivedPnL = binaryPnL({
       action: leg.action,
       entryPrice,
-      markPrice: modelPrice,
+      markPrice: Number(modelPrice ?? 0),
       quantity
     });
-    const markValue = (leg.action === "LONG" ? 1 : -1) * modelPrice * quantity;
-    const entryValue = (leg.action === "LONG" ? 1 : -1) * entryPrice * quantity;
+    const pnl = isClosed && Number.isFinite(Number(leg.profitLossValue)) ? Number(leg.profitLossValue) : derivedPnL;
+    const entryValue = direction * entryPrice * quantity;
+    const markValue = isClosed ? entryValue + pnl : direction * Number(modelPrice ?? 0) * quantity;
 
     return {
       ...leg,
+      isClosed,
+      modelPrice,
+      pnl,
+      markValue,
+      entryValue
+    };
+  });
+
+  const repricedStockLegs = stockLegs.map((leg) => {
+    const isClosed = isScenarioLegClosed(leg);
+    const entryPrice = Number(leg.entryPrice ?? 0);
+    const quantity = Number(leg.quantity ?? 0);
+    const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+    const resolvedClosedPrice = isClosed
+      ? (Number.isFinite(Number(leg.closedPrice)) ? Number(leg.closedPrice) : entryPrice)
+      : null;
+    const modelPrice = isClosed ? resolvedClosedPrice : underlyingPrice;
+    const derivedPnL = direction * (Number(modelPrice ?? 0) - entryPrice) * quantity;
+    const pnl =
+      isClosed && Number.isFinite(Number(leg.profitLossValue)) ? Number(leg.profitLossValue) : derivedPnL;
+    const entryValue = direction * entryPrice * quantity;
+    const markValue = isClosed ? entryValue + pnl : direction * Number(modelPrice ?? 0) * quantity;
+
+    return {
+      ...leg,
+      isClosed,
       modelPrice,
       pnl,
       markValue,
@@ -634,35 +1414,58 @@ export default function PaperTradeScenarioPanel({
 
   const optionsPnL = repricedOptionLegs.reduce((sum, leg) => sum + leg.pnl, 0);
   const polymarketPnL = repricedPolymarketLegs.reduce((sum, leg) => sum + leg.pnl, 0);
+  const sharesPnL = repricedStockLegs.reduce((sum, leg) => sum + leg.pnl, 0);
   const optionsMarkedValue = repricedOptionLegs.reduce((sum, leg) => sum + leg.markValue, 0);
   const optionsEntryValue = repricedOptionLegs.reduce((sum, leg) => sum + leg.entryValue, 0);
   const polymarketMarkedValue = repricedPolymarketLegs.reduce((sum, leg) => sum + leg.markValue, 0);
   const polymarketEntryValue = repricedPolymarketLegs.reduce((sum, leg) => sum + leg.entryValue, 0);
-  const initialInvestment = optionsEntryValue + polymarketEntryValue;
-  const currentMarkedValue = optionsMarkedValue + polymarketMarkedValue;
-  const totalPnL = optionsPnL + polymarketPnL;
+  const sharesMarkedValue = repricedStockLegs.reduce((sum, leg) => sum + leg.markValue, 0);
+  const sharesEntryValue = repricedStockLegs.reduce((sum, leg) => sum + leg.entryValue, 0);
+  const strategyId = String(scenarioOrder.strategyId ?? order.strategyId ?? "").trim();
+  const strategyName = String(scenarioOrder.strategyName ?? order.strategyName ?? "").trim();
+  const isDeltaHedgeStrategy =
+    strategyId === "strategy-4" || strategyName.toLowerCase().includes("delta hedge");
+  const initialInvestment = optionsEntryValue + polymarketEntryValue + sharesEntryValue;
+  const currentMarkedValue = optionsMarkedValue + polymarketMarkedValue + sharesMarkedValue;
+  const totalPnL = optionsPnL + polymarketPnL + sharesPnL;
+
+  const openOptionScenarioLegs = repricedOptionLegs.filter((leg) => !leg.isClosed);
+  const closedOptionPnL = repricedOptionLegs.filter((leg) => leg.isClosed).reduce((sum, leg) => sum + leg.pnl, 0);
+  const openPolymarketScenarioLegs = repricedPolymarketLegs.filter((leg) => !leg.isClosed);
+  const closedPolymarketPnL = repricedPolymarketLegs
+    .filter((leg) => leg.isClosed)
+    .reduce((sum, leg) => sum + leg.pnl, 0);
+  const openStockScenarioLegs = repricedStockLegs.filter((leg) => !leg.isClosed);
+  const closedSharesPnL = repricedStockLegs.filter((leg) => leg.isClosed).reduce((sum, leg) => sum + leg.pnl, 0);
 
   const spotEvaluationGrid = buildSpotEvaluationGrid({
     start: payoffRange.start,
     end: spotMax,
     targetThreshold: payoffTargetProxy,
-    optionLegs: repricedOptionLegs
+    optionLegs: repricedOptionLegs.filter((leg) => !leg.isClosed)
   });
-  const daysToMarketResolutionAtClose = Math.max(
-    differenceInDays(strategyCloseDate, scenarioOrder.polymarketResolutionDate),
-    0
+  const daysToMarketResolutionAtClose = countTradingDaysBetween(
+    valuationMaxDate,
+    scenarioOrder.polymarketResolutionDate,
+    {
+      includeStart: false,
+      includeEnd: true
+    }
   );
   const spotPayoffSeries = spotEvaluationGrid.map((spot) => {
-    const optionPnL = repricedOptionLegs.reduce((sum, leg) => {
-      const optionRemainingDaysAtClose = Math.max(differenceInDays(strategyCloseDate, leg.expiry), 0);
+    const optionPnL = openOptionScenarioLegs.reduce((sum, leg) => {
+      const optionRemainingDaysAtClose = countTradingDaysBetween(valuationMaxDate, leg.expiry, {
+        includeStart: false,
+        includeEnd: true
+      });
       const optionMarkPrice =
         optionRemainingDaysAtClose > 0
           ? blackScholesPrice({
               type: leg.optionType,
               spot,
               strike: Number(leg.strike),
-              timeYears: Math.max(optionRemainingDaysAtClose / 365, 1 / 365),
-              volatility: Number(leg.impliedVolatility ?? impliedVolatility) || impliedVolatility,
+              timeYears: Math.max(tradingDaysToYears(optionRemainingDaysAtClose), 1 / 252),
+              volatility: resolveOptionVolatility(leg),
               riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
             })
           : leg.optionType === "put"
@@ -673,13 +1476,15 @@ export default function PaperTradeScenarioPanel({
       return sum + (pnlPerUnit * leg.contractUnits);
     }, 0);
     const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
-    const binaryPnLAtSpot = repricedPolymarketLegs.reduce((sum, leg) => {
+    const binaryPnLAtSpot = openPolymarketScenarioLegs.reduce((sum, leg) => {
+      const signalHit =
+        targetUnderlyingValue > 0 ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal) : false;
       const settlePrice =
         leg.outcome === "NO"
-          ? targetUnderlyingValue > 0 && settleUnderlying < targetUnderlyingValue
-            ? 1
-            : 0
-          : targetUnderlyingValue > 0 && settleUnderlying >= targetUnderlyingValue
+          ? signalHit
+            ? 0
+            : 1
+          : signalHit
             ? 1
             : 0;
       const markPrice =
@@ -689,12 +1494,13 @@ export default function PaperTradeScenarioPanel({
               estimatePolymarketYesPrice({
                 spot: settleUnderlying,
                 strike: targetUnderlyingValue,
-                timeYears: daysToMarketResolutionAtClose / 365,
+                timeYears: tradingDaysToYears(daysToMarketResolutionAtClose),
                 volatility: impliedVolatility,
                 riskFreeRate,
                 marketReferenceYesPrice,
                 currentSpot: currentUnderlyingSpot,
-                currentTimeYears: currentTimeToMarketResolutionYears
+                currentTimeYears: currentTimeToMarketResolutionYears,
+                signalDirection: polymarketSignal?.direction
               })
             )
           : settlePrice;
@@ -706,48 +1512,69 @@ export default function PaperTradeScenarioPanel({
         quantity: Number(leg.quantity ?? 0)
       });
     }, 0);
+    const sharePnLAtSpot = openStockScenarioLegs.reduce((sum, leg) => {
+      const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+      const quantity = Number(leg.quantity ?? 0);
+      const entryPrice = Number(leg.entryPrice ?? 0);
+      return sum + (direction * (spot - entryPrice) * quantity);
+    }, 0);
 
     return {
       spot: formatNumber(spot, 2),
-      totalPnL: formatNumber(optionPnL + binaryPnLAtSpot, 2)
+      totalPnL: formatNumber(
+        optionPnL +
+          binaryPnLAtSpot +
+          sharePnLAtSpot +
+          closedOptionPnL +
+          closedPolymarketPnL +
+          closedSharesPnL,
+        2
+      )
     };
   });
 
   const dateProfitSeries = [];
-  if (valuationMinDate && strategyCloseDate) {
-    let cursor = parseIsoDate(valuationMinDate);
-    const endDate = parseIsoDate(strategyCloseDate);
-
-    while (cursor && endDate && cursor.getTime() <= endDate.getTime()) {
-      const dateIso = toIsoDate(cursor);
-      const optionsValue = repricedOptionLegs.reduce((sum, leg) => {
-        const optionRemainingDays = Math.max(differenceInDays(dateIso, leg.expiry), 0);
-        const modelPrice = blackScholesPrice({
-          type: leg.optionType,
-          spot: underlyingPrice,
-          strike: Number(leg.strike),
-          timeYears: Math.max(optionRemainingDays / 365, 1 / 365),
-          volatility: impliedVolatility,
-          riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+  if (valuationDateOptions.length) {
+    valuationDateOptions.forEach((dateIso) => {
+      const optionsValue = openOptionScenarioLegs.reduce((sum, leg) => {
+        const optionRemainingDays = countTradingDaysBetween(dateIso, leg.expiry, {
+          includeStart: false,
+          includeEnd: true
         });
+      const modelPrice = blackScholesPrice({
+        type: leg.optionType,
+        spot: underlyingPrice,
+        strike: Number(leg.strike),
+        timeYears: Math.max(tradingDaysToYears(optionRemainingDays), 1 / 252),
+        volatility: resolveOptionVolatility(leg),
+        riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+      });
         const pnlPerUnit =
           leg.action === "LONG" ? modelPrice - Number(leg.entryPrice ?? 0) : Number(leg.entryPrice ?? 0) - modelPrice;
 
         return sum + (pnlPerUnit * leg.contractUnits);
-      }, 0);
+      }, 0) + closedOptionPnL;
 
-      const remainingPolymarketDays = Math.max(differenceInDays(dateIso, scenarioOrder.polymarketResolutionDate), 0);
+      const remainingPolymarketDays = countTradingDaysBetween(
+        dateIso,
+        scenarioOrder.polymarketResolutionDate,
+        {
+          includeStart: false,
+          includeEnd: true
+        }
+      );
       const timelineYesPrice = estimatePolymarketYesPrice({
         spot: equivalentUnderlyingSpot,
         strike: targetUnderlyingValue,
-        timeYears: remainingPolymarketDays / 365,
+        timeYears: tradingDaysToYears(remainingPolymarketDays),
         volatility: impliedVolatility,
         riskFreeRate,
         marketReferenceYesPrice,
         currentSpot: currentUnderlyingSpot,
-        currentTimeYears: currentTimeToMarketResolutionYears
+        currentTimeYears: currentTimeToMarketResolutionYears,
+        signalDirection: polymarketSignal?.direction
       });
-      const timelineBinaryPnL = repricedPolymarketLegs.reduce((sum, leg) => {
+      const timelineBinaryPnL = openPolymarketScenarioLegs.reduce((sum, leg) => {
         const timelineMarkPrice = binaryPriceFromYes(leg.outcome, timelineYesPrice);
         return sum + binaryPnL({
           action: leg.action,
@@ -755,16 +1582,21 @@ export default function PaperTradeScenarioPanel({
           markPrice: timelineMarkPrice,
           quantity: Number(leg.quantity ?? 0)
         });
-      }, 0);
+      }, 0) + closedPolymarketPnL;
+      const timelineSharePnL =
+        openStockScenarioLegs.reduce((sum, leg) => {
+          const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+          const quantity = Number(leg.quantity ?? 0);
+          const entryPrice = Number(leg.entryPrice ?? 0);
+          return sum + (direction * (underlyingPrice - entryPrice) * quantity);
+        }, 0) + closedSharesPnL;
 
       dateProfitSeries.push({
         date: dateIso,
         dateLabel: formatShortDate(dateIso),
-        totalPnL: formatNumber(optionsValue + timelineBinaryPnL, 2)
+        totalPnL: formatNumber(optionsValue + timelineBinaryPnL + timelineSharePnL, 2)
       });
-
-      cursor = addDays(dateIso, 1) ? parseIsoDate(addDays(dateIso, 1)) : null;
-    }
+    });
   }
 
   const chartData = chartMode === "date" ? dateProfitSeries : spotPayoffSeries;
@@ -775,17 +1607,32 @@ export default function PaperTradeScenarioPanel({
   const chartRange = Math.max(chartMax - chartMin, 1);
   const chartDomain = [chartMin - Math.max(chartRange * 0.08, 20), chartMax + Math.max(chartRange * 0.08, 20)];
 
+  const hedgingEnabled =
+    order?.monitoringEnabled === true && order?.hedgePlan && typeof order.hedgePlan === "object";
+  const hedgePlan = hedgingEnabled ? buildDynamicHedgePlan(order.hedgePlan) : null;
+  const hedgeContracts = hedgePlan
+    ? Math.max(
+        Number(order?.hedgeState?.optionContracts ?? NaN) || inferStraddleContractCount(openOptionLegs) || 1,
+        1
+      )
+    : null;
+  const hedgeThresholdShares =
+    hedgePlan && hedgeContracts != null ? hedgePlan.deltaThresholdSharesPerContract * hedgeContracts : null;
+
   function calculateHeatmapPnL({ spot, date }) {
-    const optionPnL = repricedOptionLegs.reduce((sum, leg) => {
-      const remainingDays = Math.max(differenceInDays(date, leg.expiry), 0);
+    const optionPnL = openOptionScenarioLegs.reduce((sum, leg) => {
+      const remainingDays = countTradingDaysBetween(date, leg.expiry, {
+        includeStart: false,
+        includeEnd: true
+      });
       const optionMarkPrice =
         remainingDays > 0
           ? blackScholesPrice({
               type: leg.optionType,
               spot,
               strike: Number(leg.strike),
-              timeYears: remainingDays / 365,
-              volatility: impliedVolatility,
+              timeYears: tradingDaysToYears(remainingDays),
+              volatility: resolveOptionVolatility(leg),
               riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
             })
           : leg.optionType === "put"
@@ -795,27 +1642,36 @@ export default function PaperTradeScenarioPanel({
         leg.action === "LONG" ? optionMarkPrice - Number(leg.entryPrice ?? 0) : Number(leg.entryPrice ?? 0) - optionMarkPrice;
 
       return sum + pnlPerUnit * leg.contractUnits;
-    }, 0);
+    }, 0) + closedOptionPnL;
     const settleUnderlying = converterRatio > 0 ? spot / converterRatio : spot;
-    const remainingPolymarketDays = Math.max(differenceInDays(date, scenarioOrder.polymarketResolutionDate), 0);
+    const remainingPolymarketDays = countTradingDaysBetween(
+      date,
+      scenarioOrder.polymarketResolutionDate,
+      {
+        includeStart: false,
+        includeEnd: true
+      }
+    );
     const yesPrice =
       remainingPolymarketDays > 0
         ? estimatePolymarketYesPrice({
             spot: settleUnderlying,
             strike: targetUnderlyingValue,
-            timeYears: remainingPolymarketDays / 365,
+            timeYears: tradingDaysToYears(remainingPolymarketDays),
             volatility: impliedVolatility,
             riskFreeRate,
             marketReferenceYesPrice,
             currentSpot: currentUnderlyingSpot || equivalentUnderlyingSpot,
-            currentTimeYears: currentTimeToMarketResolutionYears
+            currentTimeYears: currentTimeToMarketResolutionYears,
+            signalDirection: polymarketSignal?.direction
           })
         : targetUnderlyingValue > 0
-          ? settleUnderlying >= targetUnderlyingValue
+          ? evaluatePolymarketSignalHit(settleUnderlying, polymarketSignal)
             ? 1
             : 0
           : marketReferenceYesPrice;
-    const binaryPnLAtDate = repricedPolymarketLegs.reduce(
+    const binaryPnLAtDate =
+      openPolymarketScenarioLegs.reduce(
       (sum, leg) =>
         sum +
         binaryPnL({
@@ -825,9 +1681,89 @@ export default function PaperTradeScenarioPanel({
           quantity: Number(leg.quantity ?? 0)
         }),
       0
-    );
+    ) + closedPolymarketPnL;
 
-    return optionPnL + binaryPnLAtDate;
+    const sharePnLAtDate =
+      openStockScenarioLegs.reduce((sum, leg) => {
+        const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+        const quantity = Number(leg.quantity ?? 0);
+        const entryPrice = Number(leg.entryPrice ?? 0);
+        return sum + (direction * (spot - entryPrice) * quantity);
+      }, 0) + closedSharesPnL;
+
+    return optionPnL + binaryPnLAtDate + sharePnLAtDate;
+  }
+
+  function calculateHeatmapSignal({ spot, date }) {
+    if (!hedgePlan || hedgeThresholdShares == null || !(hedgeThresholdShares > 0)) {
+      return "";
+    }
+
+    const numericSpot = Number(spot);
+    if (!Number.isFinite(numericSpot) || numericSpot <= 0) {
+      return "";
+    }
+
+    let optionDeltaShares = 0;
+    let minDaysToExpiry = null;
+
+    openOptionLegs.forEach((leg) => {
+      const quantity = Number(leg.quantity ?? 0);
+      const multiplier = Number(leg.contractMultiplier ?? 100);
+      const contractUnits = quantity * multiplier;
+      if (!(contractUnits > 0) || !leg.expiry) {
+        return;
+      }
+
+      const strike = Number(leg.strike ?? 0);
+      if (!(strike > 0)) {
+        return;
+      }
+
+      const remainingDays = countTradingDaysBetween(date, leg.expiry, {
+        includeStart: false,
+        includeEnd: true
+      });
+      minDaysToExpiry = minDaysToExpiry == null ? remainingDays : Math.min(minDaysToExpiry, remainingDays);
+      const timeYears = Math.max(tradingDaysToYears(remainingDays), 0);
+      const volatility = resolveOptionVolatility(leg);
+      const delta = blackScholesDelta({
+        type: leg.optionType,
+        spot: numericSpot,
+        strike,
+        timeYears,
+        volatility,
+        riskFreeRate: Number(leg.riskFreeRate ?? riskFreeRate) || riskFreeRate
+      });
+      const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+      optionDeltaShares += direction * delta * contractUnits;
+    });
+
+    const stockDeltaShares = openStockLegs.reduce((sum, leg) => {
+      const quantity = Number(leg?.quantity ?? 0);
+      if (!(quantity > 0)) {
+        return sum;
+      }
+
+      const direction = String(leg.action ?? "LONG").toUpperCase() === "SHORT" ? -1 : 1;
+      return sum + direction * quantity;
+    }, 0);
+    const netDeltaShares = optionDeltaShares + stockDeltaShares;
+
+    if (
+      minDaysToExpiry != null &&
+      hedgePlan.exitDteDays != null &&
+      Number.isFinite(Number(hedgePlan.exitDteDays)) &&
+      minDaysToExpiry <= hedgePlan.exitDteDays
+    ) {
+      return "EXIT_SIGNAL";
+    }
+
+    if (Math.abs(netDeltaShares) >= hedgeThresholdShares) {
+      return netDeltaShares > 0 ? "HEDGE_SHORT" : "HEDGE_LONG";
+    }
+
+    return "";
   }
 
   async function handleSaveSnapshot() {
@@ -839,6 +1775,24 @@ export default function PaperTradeScenarioPanel({
     setFeedback(null);
 
     try {
+      const heatmapSnapshot = buildScenarioHeatmapSnapshot({
+        startDate: valuationMinDate,
+        endDate: valuationMaxDate,
+        currentPrice: currentProxySpot || underlyingPrice,
+        volatility: impliedVolatility,
+        ivAtm: impliedVolatility,
+        ivPut: putVolatility,
+        ivCall: callVolatility,
+        spotLabel: proxySpotLabel,
+        priceDigits: proxySpotDigits,
+        secondarySpotLabel: converterRatio > 0 ? actualSpotLabel : "",
+        secondaryPriceDigits: actualSpotDigits,
+        getSecondarySpot: converterRatio > 0 ? (spot) => spot / converterRatio : null,
+        rowCount: heatmapRowCount,
+        getCellPnL: calculateHeatmapPnL,
+        rangeMultiplier: heatmapRangeMultiplier
+      });
+
       await onSaveCalculatorSnapshot(order.id, {
         snapshotName: order.combinationLabel,
         payload: {
@@ -847,8 +1801,12 @@ export default function PaperTradeScenarioPanel({
           controls: {
             valuationDate,
             underlyingPrice: String(underlyingPrice),
-            impliedVolatility: String(controls.impliedVolatility ?? "24")
-          }
+            impliedVolatility: String(controls.impliedVolatility ?? "24"),
+            ivPut: String(controls.ivPut ?? ""),
+            ivCall: String(controls.ivCall ?? ""),
+            polymarketYesPrice: String(controls.polymarketYesPrice ?? "")
+          },
+          heatmapSnapshot
         }
       });
 
@@ -869,6 +1827,9 @@ export default function PaperTradeScenarioPanel({
 
   function handleLoadSnapshot(snapshot) {
     setActiveSnapshotId(snapshot.id);
+    setActiveSnapshotRefreshNonce(refreshNonce);
+    setHeatmapRangeMultiplier(snapshot.payload?.heatmapSnapshot?.rangeMultiplier ?? 1);
+    setHeatmapRowCount(snapshot.payload?.heatmapSnapshot?.rowCount ?? 13);
     setControls(
       buildDefaultControls(
         snapshot.payload?.orderSnapshot ?? order,
@@ -885,12 +1846,15 @@ export default function PaperTradeScenarioPanel({
 
   function handleResetToLive() {
     setActiveSnapshotId(null);
+    setActiveSnapshotRefreshNonce(refreshNonce);
     setControls(buildDefaultControls(order, lastUpdated));
+    setHeatmapRangeMultiplier(1);
+    setHeatmapRowCount(13);
     setFeedback(null);
   }
 
   return (
-    <section className="paper-scenario-card">
+    <section className={`paper-scenario-card ${className}`.trim()}>
       <div className="paper-scenario-card__header">
         <div>
           <span className="brand__eyebrow">Scenario calculator</span>
@@ -908,14 +1872,16 @@ export default function PaperTradeScenarioPanel({
           >
             {panelOpen ? "Hide calculator" : "Show calculator"}
           </button>
-          <button
-            type="button"
-            className={`chart-toggle ${savingSnapshot ? "chart-toggle--active" : ""}`}
-            onClick={handleSaveSnapshot}
-            disabled={savingSnapshot || !onSaveCalculatorSnapshot}
-          >
-            {savingSnapshot ? "Saving..." : "Save snapshot"}
-          </button>
+          {onSaveCalculatorSnapshot ? (
+            <button
+              type="button"
+              className={`chart-toggle ${savingSnapshot ? "chart-toggle--active" : ""}`}
+              onClick={handleSaveSnapshot}
+              disabled={savingSnapshot}
+            >
+              {savingSnapshot ? "Saving..." : "Save snapshot"}
+            </button>
+          ) : null}
           {activeSnapshot ? (
             <button type="button" className="chart-toggle" onClick={handleResetToLive}>
               Use live trade
@@ -952,15 +1918,25 @@ export default function PaperTradeScenarioPanel({
             title="Time series heat map"
             description="P/L across dates and proxy price levels, centered on the current proxy spot. The default view shows a 1x implied-vol range, with quick 2x and 3x range filters available."
             startDate={valuationMinDate}
-            endDate={strategyCloseDate}
+            endDate={valuationMaxDate}
             currentPrice={currentProxySpot || underlyingPrice}
             volatility={impliedVolatility}
+            ivAtm={impliedVolatility}
+            ivPut={putVolatility}
+            ivCall={callVolatility}
             spotLabel={proxySpotLabel}
             priceDigits={proxySpotDigits}
             secondarySpotLabel={converterRatio > 0 ? actualSpotLabel : ""}
             secondaryPriceDigits={actualSpotDigits}
             getSecondarySpot={converterRatio > 0 ? (spot) => spot / converterRatio : null}
+            rowCount={heatmapRowCount}
+            onRowCountChange={setHeatmapRowCount}
             getCellPnL={calculateHeatmapPnL}
+            getCellSignal={calculateHeatmapSignal}
+            rangeMultiplier={heatmapRangeMultiplier}
+            onRangeMultiplierChange={setHeatmapRangeMultiplier}
+            snapshot={activeSnapshot?.payload?.heatmapSnapshot ?? null}
+            theme={theme}
           />
           <div className="calculator-studio paper-scenario-card__studio">
           <div ref={mainLayoutRef} className="paper-scenario-card__main">
@@ -997,9 +1973,9 @@ export default function PaperTradeScenarioPanel({
               <div className="paper-scenario-card__chart-frame">
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={chartData}>
-                    <CartesianGrid stroke="rgba(148,163,184,0.12)" />
-                    <XAxis dataKey={chartXAxisKey} tick={{ fill: "rgba(226,232,240,0.65)", fontSize: 11 }} />
-                    <YAxis domain={chartDomain} tick={{ fill: "rgba(226,232,240,0.65)", fontSize: 11 }} />
+                    <CartesianGrid stroke={chartTheme.grid} />
+                    <XAxis dataKey={chartXAxisKey} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
+                    <YAxis domain={chartDomain} tick={{ fill: chartTheme.axis, fontSize: 11 }} />
                     <Tooltip
                       formatter={(value) => formatCurrency(value)}
                       labelFormatter={(label, payload) =>
@@ -1010,22 +1986,22 @@ export default function PaperTradeScenarioPanel({
                           : `Proxy spot ${label}`
                       }
                       contentStyle={{
-                        background: "rgba(15, 23, 42, 0.96)",
-                        border: "1px solid rgba(148, 163, 184, 0.18)",
+                        background: chartTheme.tooltipBackground,
+                        border: `1px solid ${chartTheme.tooltipBorder}`,
                         borderRadius: "14px"
                       }}
                     />
                     <Area
                       type="monotone"
                       dataKey="totalPnL"
-                      stroke="#2dd4bf"
-                      fill="rgba(45, 212, 191, 0.15)"
+                      stroke={chartTheme.strategyAreaStroke}
+                      fill={chartTheme.strategyAreaFill}
                       strokeWidth={2.2}
                     />
                     <Line
                       type="monotone"
                       dataKey="totalPnL"
-                      stroke="#f59e0b"
+                      stroke={chartTheme.strategyLineStroke}
                       dot={false}
                       strokeWidth={1.5}
                     />
@@ -1045,10 +2021,17 @@ export default function PaperTradeScenarioPanel({
                     className="calculator-slider__number calculator-slider__number--date"
                     type="date"
                     min={valuationMinDate}
-                    max={strategyCloseDate}
+                    max={valuationMaxDate}
                     value={valuationDate}
                     onChange={(event) =>
-                      setControls((current) => ({ ...current, valuationDate: event.target.value }))
+                      setControls((current) => ({
+                        ...current,
+                        valuationDate: coerceToTradingDate(
+                          event.target.value,
+                          valuationDateOptions.length ? valuationDateOptions : [valuationMaxDate].filter(Boolean),
+                          "previous"
+                        )
+                      }))
                     }
                   />
                 </div>
@@ -1062,13 +2045,14 @@ export default function PaperTradeScenarioPanel({
                   onChange={(event) =>
                     setControls((current) => ({
                       ...current,
-                      valuationDate: addDays(valuationMinDate, Number(event.target.value))
+                      valuationDate:
+                        valuationDateOptions[Number(event.target.value)] ?? valuationDateOptions[0] ?? valuationMinDate
                     }))
                   }
                 />
                 <div className="calculator-slider__scale">
                   <span>{formatDateLabel(valuationMinDate)}</span>
-                  <span>{formatDateLabel(strategyCloseDate)}</span>
+                  <span>{formatDateLabel(valuationMaxDate)}</span>
                 </div>
               </div>
 
@@ -1152,6 +2136,76 @@ export default function PaperTradeScenarioPanel({
                 </div>
               </div>
 
+              <div className="calculator-slider">
+                <div className="calculator-slider__header">
+                  <div>
+                    <span>Put IV (below spot)</span>
+                    <strong>{formatNumber(putVolatility * 100, 2)}%</strong>
+                  </div>
+                  <input
+                    className="calculator-slider__number"
+                    type="number"
+                    min="5"
+                    max="150"
+                    step="0.5"
+                    value={controls.ivPut ?? ""}
+                    onChange={(event) =>
+                      setControls((current) => ({ ...current, ivPut: event.target.value }))
+                    }
+                  />
+                </div>
+                <input
+                  className="calculator-slider__range"
+                  type="range"
+                  min="5"
+                  max="150"
+                  step="0.5"
+                  value={clamp(Number(controls.ivPut ?? 30), 5, 150)}
+                  onChange={(event) =>
+                    setControls((current) => ({ ...current, ivPut: event.target.value }))
+                  }
+                />
+                <div className="calculator-slider__scale">
+                  <span>5%</span>
+                  <span>150%</span>
+                </div>
+              </div>
+
+              <div className="calculator-slider">
+                <div className="calculator-slider__header">
+                  <div>
+                    <span>Call IV (above spot)</span>
+                    <strong>{formatNumber(callVolatility * 100, 2)}%</strong>
+                  </div>
+                  <input
+                    className="calculator-slider__number"
+                    type="number"
+                    min="5"
+                    max="150"
+                    step="0.5"
+                    value={controls.ivCall ?? ""}
+                    onChange={(event) =>
+                      setControls((current) => ({ ...current, ivCall: event.target.value }))
+                    }
+                  />
+                </div>
+                <input
+                  className="calculator-slider__range"
+                  type="range"
+                  min="5"
+                  max="150"
+                  step="0.5"
+                  value={clamp(Number(controls.ivCall ?? 20), 5, 150)}
+                  onChange={(event) =>
+                    setControls((current) => ({ ...current, ivCall: event.target.value }))
+                  }
+                />
+                <div className="calculator-slider__scale">
+                  <span>5%</span>
+                  <span>150%</span>
+                </div>
+              </div>
+
               {polymarketLegs.length ? (
                 <div className="calculator-slider">
                   <div className="calculator-slider__header">
@@ -1177,6 +2231,44 @@ export default function PaperTradeScenarioPanel({
                   </div>
                 </div>
               ) : null}
+
+              {polymarketLegs.length ? (
+                <div className="calculator-slider">
+                  <div className="calculator-slider__header">
+                    <div>
+                      <span>Polymarket YES estimate</span>
+                      <strong>{formatNumber(polymarketYesPrice, 2)}</strong>
+                    </div>
+                    <input
+                      className="calculator-slider__number"
+                      type="number"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={controls.polymarketYesPrice ?? ""}
+                      placeholder={formatNumber(estimatedYesPrice, 2)}
+                      onChange={(event) =>
+                        setControls((current) => ({ ...current, polymarketYesPrice: event.target.value }))
+                      }
+                    />
+                  </div>
+                  <input
+                    className="calculator-slider__range"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={clamp(polymarketYesPrice, 0, 1)}
+                    onChange={(event) =>
+                      setControls((current) => ({ ...current, polymarketYesPrice: event.target.value }))
+                    }
+                  />
+                  <div className="calculator-slider__scale">
+                    <span>0</span>
+                    <span>1</span>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -1197,12 +2289,21 @@ export default function PaperTradeScenarioPanel({
                 {formatCurrency(optionsPnL)}
               </strong>
             </article>
-            <article className="calculator-total">
-              <span>Polymarket P&amp;L</span>
-              <strong className={polymarketPnL >= 0 ? "positive" : "negative"}>
-                {formatCurrency(polymarketPnL)}
-              </strong>
-            </article>
+            {isDeltaHedgeStrategy ? (
+              <article className="calculator-total">
+                <span>Share P&amp;L</span>
+                <strong className={sharesPnL >= 0 ? "positive" : "negative"}>
+                  {formatCurrency(sharesPnL)}
+                </strong>
+              </article>
+            ) : (
+              <article className="calculator-total">
+                <span>Polymarket P&amp;L</span>
+                <strong className={polymarketPnL >= 0 ? "positive" : "negative"}>
+                  {formatCurrency(polymarketPnL)}
+                </strong>
+              </article>
+            )}
             <article className="calculator-total calculator-total--accent">
               <span>Total Profit/Loss</span>
               <strong className={totalPnL >= 0 ? "positive" : "negative"}>
@@ -1261,12 +2362,15 @@ export default function PaperTradeScenarioPanel({
                     <span className="calculator-line__calc">Calc mark {formatNumber(leg.modelPrice, 2)}</span>
                   </div>
                   <div className="calculator-line__reference">
-                    {scenarioOrder.polymarketUrl ? (
-                      <a href={scenarioOrder.polymarketUrl} target="_blank" rel="noreferrer">
-                        {scenarioOrder.polymarketUrl}
+                    {scenarioPolymarketEventUrl ? (
+                      <a href={scenarioPolymarketEventUrl} target="_blank" rel="noreferrer">
+                        {scenarioPolymarketEventUrl}
                       </a>
-                    ) : null}
-                    <span>{leg.action} {leg.outcome}</span>
+                    ) : (
+                      <span>Seed fallback market</span>
+                    )}
+                    {polymarketReferenceLine ? <span>{polymarketReferenceLine}</span> : null}
+                    <span>{scenarioPolymarketEventUrl ? `${leg.action} ${leg.outcome}` : "No live event URL yet"}</span>
                   </div>
                 </div>
                 <div className="calculator-line__editor">

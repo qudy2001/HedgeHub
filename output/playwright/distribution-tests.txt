@@ -1,0 +1,218 @@
+
+> hedgehub@0.1.0 test
+> node --test tests/*.test.js
+
+TAP version 13
+# Subtest: builder API persists layouts/items, isolates users, excludes unverified evidence and returns background scan results
+ok 1 - builder API persists layouts/items, isolates users, excludes unverified evidence and returns background scan results
+  ---
+  duration_ms: 40.716458
+  type: 'test'
+  ...
+# Subtest: cancelling a job during collection preserves cancelled state and skips subsequent symbols
+ok 2 - cancelling a job during collection preserves cancelled state and skips subsequent symbols
+  ---
+  duration_ms: 28.618875
+  type: 'test'
+  ...
+# Subtest: stock/option payoffs agree with collar strike boundaries and fees; modeled liquidity is not fabricated
+ok 3 - stock/option payoffs agree with collar strike boundaries and fees; modeled liquidity is not fabricated
+  ---
+  duration_ms: 1.79725
+  type: 'test'
+  ...
+# Subtest: market scan never silently synthesizes contracts or selects collapsed vertical spreads
+ok 4 - market scan never silently synthesizes contracts or selects collapsed vertical spreads
+  ---
+  duration_ms: 0.634833
+  type: 'test'
+  ...
+# Subtest: credit spread maximum loss reserves its width; long puts have unlimited upside stock combination
+ok 5 - credit spread maximum loss reserves its width; long puts have unlimited upside stock combination
+  ---
+  duration_ms: 0.30675
+  type: 'test'
+  ...
+# Subtest: catalysts are scoped, expire, deduplicate and do not repeatedly accumulate; completion alone is not bullish
+ok 6 - catalysts are scoped, expire, deduplicate and do not repeatedly accumulate; completion alone is not bullish
+  ---
+  duration_ms: 0.393375
+  type: 'test'
+  ...
+# Subtest: strategy validation rejects invalid quantities, symbols, pricing and non-finite numbers
+ok 7 - strategy validation rejects invalid quantities, symbols, pricing and non-finite numbers
+  ---
+  duration_ms: 0.205375
+  type: 'test'
+  ...
+# Subtest: backtest trades use next-session opening prices; future data cannot alter earlier positions or equity
+ok 8 - backtest trades use next-session opening prices; future data cannot alter earlier positions or equity
+  ---
+  duration_ms: 10.743
+  type: 'test'
+  ...
+# Subtest: backtest coverage, capital and friction boundaries are explicit
+ok 9 - backtest coverage, capital and friction boundaries are explicit
+  ---
+  duration_ms: 8.656333
+  type: 'test'
+  ...
+# Subtest: TradingAgents extraction preserves missing targets and does not verify or resolve suggested claims
+ok 10 - TradingAgents extraction preserves missing targets and does not verify or resolve suggested claims
+  ---
+  duration_ms: 0.613542
+  type: 'test'
+  ...
+# Subtest: shared reference model: known normal probabilities, put-call parity and zero-volatility limit
+ok 11 - shared reference model: known normal probabilities, put-call parity and zero-volatility limit
+  ---
+  duration_ms: 0.493667
+  type: 'test'
+  ...
+# Subtest: cash-secured portfolio sizing and breakeven agree with exact payoff
+ok 12 - cash-secured portfolio sizing and breakeven agree with exact payoff
+  ---
+  duration_ms: 0.150625
+  type: 'test'
+  ...
+# Subtest: scanner returns bid-based yield and preserves unknown earnings and quote provenance
+ok 13 - scanner returns bid-based yield and preserves unknown earnings and quote provenance
+  ---
+  duration_ms: 1.206625
+  type: 'test'
+  ...
+# Subtest: unverified, stale, crossed and future quotes cannot pass eligibility
+ok 14 - unverified, stale, crossed and future quotes cannot pass eligibility
+  ---
+  duration_ms: 0.341834
+  type: 'test'
+  ...
+# Subtest: missing exact prediction market does not fall through to unrelated or similar markets
+ok 15 - missing exact prediction market does not fall through to unrelated or similar markets
+  ---
+  duration_ms: 0.162083
+  type: 'test'
+  ...
+# Subtest: Tiger trade time cannot masquerade as quote time; model deltas are separate from vendor daily Greeks
+ok 16 - Tiger trade time cannot masquerade as quote time; model deltas are separate from vendor daily Greeks
+  ---
+  duration_ms: 0.253416
+  type: 'test'
+  ...
+# Subtest: insufficient IV history and future financial filings remain unavailable
+ok 17 - insufficient IV history and future financial filings remain unavailable
+  ---
+  duration_ms: 0.134042
+  type: 'test'
+  ...
+# Subtest: research earnings gaps block entry without hiding analysis; fees reduce credit
+ok 18 - research earnings gaps block entry without hiding analysis; fees reduce credit
+  ---
+  duration_ms: 0.496833
+  type: 'test'
+  ...
+# Subtest: research store preserves immutable snapshots, isolates owners and deduplicates observations
+ok 19 - research store preserves immutable snapshots, isolates owners and deduplicates observations
+  ---
+  duration_ms: 2.834583
+  type: 'test'
+  ...
+# Subtest: peer median averages even samples and relative strength aligns trading dates
+ok 20 - peer median averages even samples and relative strength aligns trading dates
+  ---
+  duration_ms: 5.123916
+  type: 'test'
+  ...
+# Subtest: distribution keeps call/put totals, ranks five expiries and separates near and far exposure
+ok 21 - distribution keeps call/put totals, ranks five expiries and separates near and far exposure
+  ---
+  duration_ms: 0.699916
+  type: 'test'
+  ...
+# Subtest: missing values are not zero; duplicates and expired contracts cannot inflate totals
+ok 22 - missing values are not zero; duplicates and expired contracts cannot inflate totals
+  ---
+  duration_ms: 0.087125
+  type: 'test'
+  ...
+# Subtest: automatic grouping crosses years using Monday weeks and months without losing totals
+ok 23 - automatic grouping crosses years using Monday weeks and months without losing totals
+  ---
+  duration_ms: 1.013125
+  type: 'test'
+  ...
+# Subtest: full distribution collection includes far expiries and all strikes, caches requests and never uses modeled fallback
+ok 24 - full distribution collection includes far expiries and all strikes, caches requests and never uses modeled fallback
+  ---
+  duration_ms: 1.056417
+  type: 'test'
+  ...
+# Subtest: Polygon chain aggregation retains real contracts and missing metrics instead of falling back to synthetic data
+ok 25 - Polygon chain aggregation retains real contracts and missing metrics instead of falling back to synthetic data
+  ---
+  duration_ms: 0.819333
+  type: 'test'
+  ...
+# Subtest: Tiger quota retry retains the affected expiry rather than omitting far-dated contracts
+ok 26 - Tiger quota retry retains the affected expiry rather than omitting far-dated contracts
+  ---
+  duration_ms: 0.165333
+  type: 'test'
+  ...
+# Subtest: research API saves the reviewed preview, rejects other users, validates inputs and enforces routine limits
+ok 27 - research API saves the reviewed preview, rejects other users, validates inputs and enforces routine limits
+  ---
+  duration_ms: 41.478458
+  type: 'test'
+  ...
+# Subtest: failed collection retains last-good data and last-success time; repeated reads back off
+ok 28 - failed collection retains last-good data and last-success time; repeated reads back off
+  ---
+  duration_ms: 3.229917
+  type: 'test'
+  ...
+# Subtest: research settings reject malformed symbols and fees
+ok 29 - research settings reject malformed symbols and fees
+  ---
+  duration_ms: 0.36
+  type: 'test'
+  ...
+# Subtest: research window includes 30 days past and the full seven-day expiry buffer
+ok 30 - research window includes 30 days past and the full seven-day expiry buffer
+  ---
+  duration_ms: 6.77325
+  type: 'test'
+  ...
+# Subtest: unconfirmed company schedules remain visible and stale curated reviews are gaps
+ok 31 - unconfirmed company schedules remain visible and stale curated reviews are gaps
+  ---
+  duration_ms: 0.150833
+  type: 'test'
+  ...
+# Subtest: social topics are deduplicated, windowed and never mislabeled as sentiment scores
+ok 32 - social topics are deduplicated, windowed and never mislabeled as sentiment scores
+  ---
+  duration_ms: 0.41775
+  type: 'test'
+  ...
+# Subtest: social access is opt-in and does not make network calls when disabled
+ok 33 - social access is opt-in and does not make network calls when disabled
+  ---
+  duration_ms: 0.232042
+  type: 'test'
+  ...
+# Subtest: economic collection splits large ranges and retains the final buffer day
+ok 34 - economic collection splits large ranges and retains the final buffer day
+  ---
+  duration_ms: 3.204084
+  type: 'test'
+  ...
+1..34
+# tests 34
+# suites 0
+# pass 34
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 154.891292

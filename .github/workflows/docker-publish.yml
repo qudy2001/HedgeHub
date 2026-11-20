@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - master
+      - codex/livedata
+      - codex/postgresql
     tags:
       - "v*"
   workflow_dispatch:
@@ -16,6 +18,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: ./Dockerfile
+            suffix: ""
 
     steps:
       - name: Check out repository
@@ -24,7 +31,18 @@ jobs:
       - name: Normalize image name
         id: image
         shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          image_name="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          if [[ "${GITHUB_REF_NAME}" == "codex/livedata" ]]; then
+            image_name="${image_name}-livedata"
+          elif [[ "${GITHUB_REF_NAME}" == "codex/postgresql" ]]; then
+            image_name="${image_name}-postgresql"
+          fi
+
+          image_name="${image_name}${{ matrix.suffix }}"
+
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -45,7 +63,7 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=ref,event=branch
             type=ref,event=tag
             type=sha
@@ -54,7 +72,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

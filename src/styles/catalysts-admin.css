@@ -1,0 +1,96 @@
+/* Admin > Catalysts. Builds on the shared admin-users__* layout classes. */
+.admin-catalysts__review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 12px;
+  border-radius: var(--radius-panel);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.46);
+}
+
+.admin-catalysts__review--stale {
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.admin-catalysts__review p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.admin-catalysts__form textarea {
+  padding: 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--button-border);
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.admin-catalysts__pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.admin-catalysts__form label.admin-catalysts__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-catalysts__symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-catalysts__row {
+  align-items: flex-start;
+}
+
+.admin-catalysts__row--past {
+  opacity: 0.6;
+}
+
+.admin-catalysts__row .admin-users__identity {
+  min-width: 0;
+}
+
+.admin-catalysts__row strong {
+  overflow-wrap: anywhere;
+}
+
+.admin-catalysts__note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* .app-state is a full-screen placeholder; keep the in-panel empty message compact. */
+.admin-catalysts__empty {
+  min-height: 0;
+  place-items: start;
+  padding: 4px 0 0;
+  line-height: 1.5;
+}
+
+.admin-catalysts__file {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .admin-catalysts__pair {
+    grid-template-columns: 1fr;
+  }
+}
